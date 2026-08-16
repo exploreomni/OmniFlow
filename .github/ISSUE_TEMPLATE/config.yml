@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/exploreomni/OmniFlow/security/advisories/new
+    about: Use GitHub private vulnerability reporting. Do not disclose suspected vulnerabilities publicly.
+  - name: Installation and troubleshooting
+    url: https://github.com/exploreomni/OmniFlow/blob/main/docs/TROUBLESHOOTING.md
+    about: Review common setup, routing, permission, validation, and dbt synchronization failures.

@@ -1,0 +1,11 @@
+* @exploreomni/maintainers
+
+/.github/ @exploreomni/maintainers
+/action.yml @exploreomni/maintainers
+/requirements/ @exploreomni/maintainers
+/pyproject.toml @exploreomni/maintainers
+/SECURITY.md @exploreomni/maintainers
+/src/omniflow/security.py @exploreomni/maintainers
+/src/omniflow/trust.py @exploreomni/maintainers
+/src/omniflow/discovery.py @exploreomni/maintainers
+/src/omniflow/omni_client.py @exploreomni/maintainers

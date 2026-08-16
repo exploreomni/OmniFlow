@@ -1,0 +1,88 @@
+name: OmniFlow
+
+on: # zizmor: ignore[dangerous-triggers] trusted-base workflow never executes PR-head code
+  pull_request_target:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+  pull-requests: write
+  security-events: write
+
+concurrency:
+  group: omniflow-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  omniflow:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
+        with:
+          python-version: "3.11"
+
+      - name: Run OmniFlow
+        if: github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository
+        uses: exploreomni/OmniFlow@<pinned-commit-sha> # zizmor: ignore[unpinned-uses] customer must replace
+        with:
+          config: .omniflow.yml
+          omni-api-key: ${{ secrets.OMNI_API_KEY }}
+
+      - name: Route fork pull request without Omni secret
+        if: github.event_name == 'pull_request_target' && github.event.pull_request.head.repo.full_name != github.repository
+        uses: exploreomni/OmniFlow@<pinned-commit-sha> # zizmor: ignore[unpinned-uses] customer must replace
+        with:
+          config: .omniflow.yml
+
+      - name: Upload evidence artifacts
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: omniflow-public-summary
+          path: |
+            .omniflow/public/report.json
+            .omniflow/public/report.md
+            .omniflow/public/report.sarif
+            .omniflow/public/junit.xml
+            .omniflow/public/evidence.json
+            .omniflow/artifact-manifest.json
+          if-no-files-found: ignore
+          include-hidden-files: true
+
+      - name: Upload SARIF
+        # Enable only when GitHub Code Security is available by setting the
+        # repository variable OMNIFLOW_UPLOAD_SARIF to true.
+        if: always() && vars.OMNIFLOW_UPLOAD_SARIF == 'true' && hashFiles('.omniflow/public/report.sarif') != ''
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@dc73d59c2d7bd4f8194098a91219eeee6d8a1719
+        with:
+          sarif_file: .omniflow/public/report.sarif
+
+      - name: Comment on PR
+        if: always() && github.event_name == 'pull_request_target' && hashFiles('.omniflow/public/report.md') != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          MARKER='<!-- omniflow-report -->'
+          RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          BODY="$(printf '%s\n\nRun: %s\n\n' "$MARKER" "$RUN_URL"; cat .omniflow/public/report.md)"
+          EXISTING="$(gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments?per_page=100" \
+            --jq '[.[] | select(.user.login == "github-actions[bot]") | select(.body | contains("<!-- omniflow-report -->"))][0].id // empty')"
+          if [ -n "$EXISTING" ]; then
+            gh api -X PATCH "repos/${GITHUB_REPOSITORY}/issues/comments/${EXISTING}" -f body="$BODY" >/dev/null
+          else
+            gh pr comment "$PR_NUMBER" --body "$BODY"
+          fi

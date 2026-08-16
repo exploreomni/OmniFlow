@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "models": [
+    {
+      "base_url": "https://customer.omniapp.co",
+      "model_id": "00000000-0000-0000-0000-000000000000",
+      "model_path": "omni/my_model",
+      "base_branch": "main",
+      "git_provider": "github",
+      "web_url": "https://github.com/org/repo"
+    }
+  ]
+}

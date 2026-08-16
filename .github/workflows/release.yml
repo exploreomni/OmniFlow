@@ -1,0 +1,127 @@
+name: Release
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: "3.11"
+
+      - name: Install release dependencies
+        env:
+          PIP_DISABLE_PIP_VERSION_CHECK: "1"
+          PIP_NO_INPUT: "1"
+        run: |
+          python -m pip install --require-hashes --only-binary=:all: --requirement requirements/release-py311-linux-x86_64.txt
+          PIP_NO_INDEX=1 python -m pip install --no-deps --no-build-isolation .
+
+      - name: Verify release candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          PACKAGE_VERSION="$(python -c 'import omniflow; print(omniflow.__version__)')"
+          if [ "$GITHUB_EVENT_NAME" = "push" ]; then
+            test "$GITHUB_REF_NAME" = "v$PACKAGE_VERSION"
+            MAIN_STATUS="$(gh api "repos/${GITHUB_REPOSITORY}/compare/${GITHUB_SHA}...main" --jq .status)"
+            test "$MAIN_STATUS" = "ahead" -o "$MAIN_STATUS" = "identical"
+          else
+            test "$GITHUB_REF" = "refs/heads/main"
+          fi
+          python -m pip check
+
+      - name: Build distributions
+        run: python -m build --no-isolation
+
+      - name: Generate SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610
+        with:
+          path: .
+          format: spdx-json
+          output-file: dist/omniflow.spdx.json
+
+      - name: Generate checksums
+        working-directory: dist
+        run: sha256sum omniflow_ci-*.whl omniflow_ci-*.tar.gz omniflow.spdx.json > SHA256SUMS
+
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: omniflow-release-artifacts
+          path: dist/
+          if-no-files-found: error
+
+  sign-preflight:
+    name: Signed release preflight
+    needs: build
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write  # Obtain a keyless Sigstore identity for the preflight bundle.
+    steps:
+      - name: Download verified release artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: omniflow-release-artifacts
+          path: dist
+
+      - name: Sign preflight artifacts
+        uses: sigstore/gh-action-sigstore-python@790bc6befb9d733738f18d8f895854b453640ec9
+        with:
+          inputs: ./dist/*
+
+      - name: Upload signed preflight bundle
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: omniflow-signed-release-preflight-${{ github.sha }}
+          path: dist/
+          if-no-files-found: error
+
+  publish-github:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: github-release
+      url: https://github.com/${{ github.repository }}/releases/tag/${{ github.ref_name }}
+    permissions:
+      contents: write  # Create the GitHub release and attach verified artifacts.
+      id-token: write  # Perform keyless Sigstore signing without a stored signing key.
+    steps:
+      - name: Download verified release artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: omniflow-release-artifacts
+          path: dist
+
+      - name: Sign release artifacts
+        uses: sigstore/gh-action-sigstore-python@790bc6befb9d733738f18d8f895854b453640ec9
+        with:
+          inputs: ./dist/*
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --generate-notes

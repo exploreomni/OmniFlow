@@ -1,0 +1,64 @@
+name: Bug report
+description: Report reproducible OmniFlow behavior using redacted, synthetic details.
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for helping improve OmniFlow. Do not include credentials, tenant URLs, real model or branch IDs, customer YAML, raw API responses, query results, PII, owner emails, or restricted artifacts. Report security issues privately instead.
+  - type: input
+    id: version
+    attributes:
+      label: OmniFlow version
+      description: Provide the full action commit SHA or released version.
+      placeholder: 40-character commit SHA
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Affected area
+      options:
+        - Installation or GitHub Action
+        - Pull-request routing
+        - Model or content validation
+        - Semantic diff or lint
+        - Downstream contracts
+        - dbt exposures
+        - Post-deployment dbt sync
+        - Reporting or redaction
+        - Documentation
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: behavior
+    attributes:
+      label: Observed behavior
+      description: Describe the result and exit code with all tenant-specific values replaced by placeholders.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal safe reproduction
+      description: Use synthetic metadata and redacted public output only.
+    validations:
+      required: true
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safe disclosure confirmation
+      options:
+        - label: I removed credentials, private tenant and model identifiers, customer YAML, raw payloads, query results, PII, URLs, and restricted artifacts.
+          required: true
+        - label: This is not a suspected security vulnerability.
+          required: true

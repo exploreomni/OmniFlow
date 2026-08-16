@@ -1,0 +1,129 @@
+name: OmniFlow
+description: Security-first validation and post-deployment synchronization for Omni semantic-layer changes.
+inputs:
+  mode:
+    description: Operation to run. Supported values are validate, repair, and dbt-sync.
+    required: false
+    default: validate
+  config:
+    description: Path to .omniflow.yml
+    required: false
+    default: .omniflow.yml
+  omni-api-key:
+    description: Dedicated least-privilege Omni personal access token. Exposed only to the validation step.
+    required: false
+  repair-api-key:
+    description: Separate write-capable Omni PAT. Exposed only to the opt-in repair step.
+    required: false
+  sync-api-key:
+    description: Dedicated Modeler or Connection Admin PAT. Exposed only to the protected dbt sync step.
+    required: false
+  skip-reason:
+    description: Record a successful skipped run without exposing the Omni API key.
+    required: false
+    default: ""
+runs:
+  using: composite
+  steps:
+    - name: Install OmniFlow
+      shell: bash
+      env:
+        PIP_DISABLE_PIP_VERSION_CHECK: "1"
+        PIP_NO_INPUT: "1"
+      run: |
+        set -euo pipefail
+        python - <<'PY'
+        import platform
+        import sys
+
+        supported = sys.version_info[:2] == (3, 11) and platform.system() == "Linux" and platform.machine() == "x86_64"
+        if not supported:
+            raise SystemExit("OmniFlow's locked action runtime requires Linux x86_64 with Python 3.11")
+        PY
+        python -m pip install --require-hashes --only-binary=:all: \
+          --requirement "$GITHUB_ACTION_PATH/requirements/action-py311-linux-x86_64.txt"
+        PIP_NO_INDEX=1 python -m pip install --no-deps --no-build-isolation "$GITHUB_ACTION_PATH"
+        python -m pip check
+
+    - name: Validate action mode
+      shell: bash
+      env:
+        OMNIFLOW_INPUT_MODE: ${{ inputs.mode }}
+        OMNIFLOW_INPUT_SKIP_REASON: ${{ inputs['skip-reason'] }}
+      run: |
+        set -euo pipefail
+        case "$OMNIFLOW_INPUT_MODE" in
+          validate)
+            ;;
+          repair)
+            if [ -n "$OMNIFLOW_INPUT_SKIP_REASON" ]; then
+              echo "skip-reason is supported only in validate mode" >&2
+              exit 2
+            fi
+            ;;
+          dbt-sync)
+            if [ -n "$OMNIFLOW_INPUT_SKIP_REASON" ]; then
+              echo "skip-reason is supported only in validate mode" >&2
+              exit 2
+            fi
+            ;;
+          *)
+            echo "mode must be validate, repair, or dbt-sync" >&2
+            exit 2
+            ;;
+        esac
+
+    - name: Record skipped run
+      if: inputs.mode == 'validate' && inputs['skip-reason'] != ''
+      shell: bash
+      env:
+        OMNIFLOW_INPUT_CONFIG: ${{ inputs.config }}
+        OMNIFLOW_INPUT_SKIP_REASON: ${{ inputs['skip-reason'] }}
+      run: |
+        set -euo pipefail
+        omniflow run --auto --config "$OMNIFLOW_INPUT_CONFIG" \
+          --skip-reason "$OMNIFLOW_INPUT_SKIP_REASON"
+
+    - name: Route OmniFlow run
+      id: route
+      if: inputs.mode == 'validate' && inputs['skip-reason'] == ''
+      shell: bash
+      env:
+        OMNIFLOW_INPUT_CONFIG: ${{ inputs.config }}
+        OMNIFLOW_GITHUB_TOKEN: ${{ github.token }}
+      run: |
+        set -euo pipefail
+        omniflow route --auto --config "$OMNIFLOW_INPUT_CONFIG" \
+          --format github >> "$GITHUB_OUTPUT"
+
+    - name: Run OmniFlow
+      if: inputs.mode == 'validate' && inputs['skip-reason'] == '' && steps.route.outputs.should_run == 'true'
+      shell: bash
+      env:
+        OMNI_API_KEY: ${{ inputs['omni-api-key'] }}
+        OMNIFLOW_INPUT_CONFIG: ${{ inputs.config }}
+        OMNIFLOW_GITHUB_TOKEN: ${{ github.token }}
+      run: |
+        set -euo pipefail
+        omniflow run --auto --config "$OMNIFLOW_INPUT_CONFIG"
+
+    - name: Run OmniFlow AI repair
+      if: inputs.mode == 'repair'
+      shell: bash
+      env:
+        OMNIFLOW_REPAIR_API_KEY: ${{ inputs['repair-api-key'] }}
+        OMNIFLOW_INPUT_CONFIG: ${{ inputs.config }}
+        OMNIFLOW_GITHUB_TOKEN: ${{ github.token }}
+      run: |
+        set -euo pipefail
+        omniflow repair ai --auto --config "$OMNIFLOW_INPUT_CONFIG"
+
+    - name: Synchronize dbt metadata into Omni
+      if: inputs.mode == 'dbt-sync'
+      shell: bash
+      env:
+        OMNIFLOW_SYNC_API_KEY: ${{ inputs['sync-api-key'] }}
+        OMNIFLOW_INPUT_CONFIG: ${{ inputs.config }}
+      run: |
+        set -euo pipefail
+        omniflow dbt sync --auto --config "$OMNIFLOW_INPUT_CONFIG"

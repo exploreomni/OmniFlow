@@ -1,0 +1,29 @@
+name: SAST
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sast-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  codeql:
+    permissions:
+      contents: read
+      security-events: write  # Upload CodeQL results to GitHub code scanning.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: github/codeql-action/init@dc73d59c2d7bd4f8194098a91219eeee6d8a1719
+        with:
+          languages: python
+      - uses: github/codeql-action/analyze@dc73d59c2d7bd4f8194098a91219eeee6d8a1719

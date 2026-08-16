@@ -1,0 +1,72 @@
+name: Deploy dbt and synchronize Omni
+
+on:
+  push:
+    branches: [main]
+    # Keep this list limited to files that can change the production dbt build.
+    # Update the prefixes when the dbt project is nested in the repository.
+    paths:
+      - dbt_project.yml
+      - packages.yml
+      - dependencies.yml
+      - selectors.yml
+      - analyses/**
+      - models/**
+      - macros/**
+      - seeds/**
+      - semantic_models/**
+      - snapshots/**
+      - tests/**
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: omniflow-dbt-production-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  deploy-and-sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    environment: omniflow-production
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      # Replace this command with the repository's reviewed production dbt deployment.
+      # OmniFlow must remain after this step so a failed dbt deployment prevents refresh.
+      - name: Deploy dbt to production
+        run: ./scripts/deploy-dbt-production.sh
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
+        with:
+          python-version: "3.11"
+
+      - name: Synchronize dbt metadata into Omni
+        uses: exploreomni/OmniFlow@<pinned-commit-sha> # zizmor: ignore[unpinned-uses] customer must replace
+        with:
+          mode: dbt-sync
+          config: .omniflow.yml
+          sync-api-key: ${{ secrets.OMNIFLOW_SYNC_API_KEY }}
+
+      - name: Upload synchronization evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: omniflow-dbt-sync-evidence
+          path: |
+            .omniflow/public/report.json
+            .omniflow/public/report.md
+            .omniflow/public/report.sarif
+            .omniflow/public/junit.xml
+            .omniflow/public/evidence.json
+            .omniflow/public/dbt-sync.json
+            .omniflow/artifact-manifest.json
+          if-no-files-found: ignore
+          include-hidden-files: true

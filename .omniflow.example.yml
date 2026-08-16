@@ -1,0 +1,74 @@
+contracts:
+  enabled: true
+  fail_on:
+    deleted_referenced_fields: true
+    renamed_referenced_fields: true
+    referenced_field_type_changes: true
+    referenced_join_cardinality_changes: true
+    coverage_gaps: true
+
+checks:
+  content_validation:
+    enabled: true
+    fail_on_new_only: true
+    labels:
+      - Verified
+      - Executive
+
+  model_validation:
+    enabled: true
+    fail_on_warnings: false
+
+  semantic_lint:
+    enabled: true
+    rules:
+      require_field_descriptions: warn
+      require_primary_keys: warn
+      block_deleted_fields: warn
+      warn_relationship_cardinality_change: warn
+      require_topic_labels: warn
+
+  # Optional: add published Omni dashboard-to-dbt model lineage to reports.
+  # Requires a configured Omni dbt integration and Connection Admin permission.
+  # Leave this commented out when the Omni connection does not use dbt.
+  # dbt_exposures:
+  #   enabled: true
+  #   fail_on_unavailable: false
+
+reporting:
+  formats:
+    - json
+    - markdown
+    - sarif
+    - junit
+  output_dir: .omniflow
+
+security:
+  redact_logs: true
+  allow_raw_response_output: false
+  max_report_samples: 20
+  redact_document_names: false
+  redaction_level: standard
+  retain_restricted_artifacts: false
+
+# Optional post-deployment sync for repositories that deploy dbt models.
+# Invoke only after the production dbt job succeeds. It is disabled by default
+# and has no effect on repositories that do not use dbt.
+# deployment:
+#   dbt_sync:
+#     enabled: true
+#     refresh_mode: hard
+#     poll_interval_seconds: 5
+#     timeout_seconds: 900
+#     post_sync_validation: true
+
+# Unreleased development scaffold: human-authorized Omni Modeling Agent repair.
+# Do not enable for customer use until Omni publishes a supported Modeling Agent API.
+# Omni's documented AI Jobs API may execute queries and has no no-query switch.
+# repairs:
+#   ai:
+#     enabled: true
+#     allow_query_execution: true
+#     max_changed_files: 3
+#     max_changed_lines: 200
+#     poll_timeout_seconds: 300

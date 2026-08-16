@@ -1,0 +1,54 @@
+# DEVELOPMENT PREVIEW: do not install until Omni publishes a supported Modeling Agent API.
+name: OmniFlow AI Repair
+
+on: # zizmor: ignore[dangerous-triggers] trusted-base workflow never executes PR-head code
+  pull_request_target:
+    types: [labeled]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: omniflow-ai-repair-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  repair:
+    if: >-
+      github.event.label.name == 'omniflow-ai-repair' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    environment: omniflow-ai-repair
+    timeout-minutes: 30
+    steps:
+      - name: Checkout trusted base branch
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
+        with:
+          python-version: "3.11"
+
+      - name: Run human-authorized AI repair
+        uses: exploreomni/OmniFlow@<pinned-commit-sha> # zizmor: ignore[unpinned-uses] customer must replace
+        with:
+          mode: repair
+          config: .omniflow.yml
+          repair-api-key: ${{ secrets.OMNIFLOW_REPAIR_API_KEY }}
+
+      - name: Upload public repair evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: omniflow-ai-repair-public-evidence
+          path: |
+            .omniflow/public/repair.json
+            .omniflow/public/repair.md
+            .omniflow/public/evidence.json
+            .omniflow/artifact-manifest.json
+          if-no-files-found: warn
+          include-hidden-files: true
