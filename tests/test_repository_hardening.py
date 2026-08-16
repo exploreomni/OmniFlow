@@ -83,6 +83,15 @@ class RepositoryHardeningTests(unittest.TestCase):
                     if str(step.get("uses", "")).startswith("actions/checkout@"):
                         self.assertFalse(step.get("with", {}).get("persist-credentials"), msg=str(path))
 
+    def test_secret_scan_uses_checksum_verified_open_source_cli(self):
+        text = (ROOT / ".github/workflows/secret-scan.yml").read_text(encoding="utf-8")
+        self.assertNotIn("gitleaks/gitleaks-action", text)
+        self.assertNotIn("GITLEAKS_LICENSE", text)
+        self.assertIn('GITLEAKS_VERSION: "8.30.1"', text)
+        self.assertIn("551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb", text)
+        self.assertIn("sha256sum --check --status", text)
+        self.assertIn("gitleaks\" git --redact --no-banner", text)
+
     def test_legacy_package_and_packaging_shims_are_absent(self):
         self.assertFalse((ROOT / "setup.py").exists())
         self.assertFalse((ROOT / "setup.cfg").exists())
