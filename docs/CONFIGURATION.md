@@ -158,6 +158,33 @@ The policy only evaluates changes the semantic diff marks `breaking`: deleted fi
 
 Pending detection requires both the recorded commit and a full-history checkout. When either is missing, OmniFlow prints a warning and evaluates same-pull-request detection only rather than blocking on incomplete evidence. Keep `dbt_paths` consistent with the `push.paths` filter on the deployment workflow. See [Breaking Change Hold](BREAKING_CHANGE_HOLD.md).
 
+## dbt Impact Analysis
+
+This optional check covers the opposite direction from the breaking change hold: a dbt-only pull request that removes a warehouse column or model the committed Omni YAML still references. It runs only on pull requests that have dbt-path changes and no Omni model changes, needs no Omni credential, and never queries the warehouse.
+
+```yaml
+checks:
+  dbt_impact:
+    enabled: true
+    manifest_path: target/manifest.json
+    fail_on_orphaned_references: true
+    omni_yaml_paths:
+      - omni/my_model
+    table_mapping:
+      - dbt_model: orders_v2
+        sql_table_name: analytics.marts.orders
+```
+
+| Setting | Default | Allowed range or behavior |
+| --- | --- | --- |
+| `enabled` | `false` | Must be enabled in trusted base-branch policy. |
+| `manifest_path` | none | Relative path to a committed dbt manifest. Falls back to SQL heuristics when absent. |
+| `fail_on_orphaned_references` | `true` | `true` blocks the merge; `false` reports a warning only. |
+| `omni_yaml_paths` | `model_path` values from `.omni/flow.json` | Relative directories holding Omni model YAML, maximum 50. |
+| `table_mapping` | none | `dbt_model` plus `sql_table_name` or `omni_view` overrides, maximum 500 entries. |
+
+The check reuses `deployment.breaking_change_hold.dbt_paths` to identify dbt source files, so both policies stay consistent. Manifest mode is precise; SQL heuristic mode is conservative and reports nothing for `SELECT *` or unparseable statements. Column matching is case-insensitive and uses word boundaries so removing `customer` never flags a field referencing `customer_id`. See [dbt Impact Analysis](DBT_IMPACT.md).
+
 ## Semantic Lint
 
 `checks.semantic_lint.enabled` defaults to `true`. Every rule accepts `off`, `info`, `warn`, or `error`. Only `error` is a blocking lint severity.

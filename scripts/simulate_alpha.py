@@ -85,6 +85,12 @@ class Scenario:
     include_api_key: bool = True
     model_ids: tuple[str, ...] = (MODEL_ID,)
     operation: str = "validate"
+    # dbt impact scenarios need real SQL on both sides of the diff so the
+    # heuristic can detect a removed output column.
+    dbt_sql_base: str | None = None
+    dbt_sql_head: str | None = None
+    dbt_sql_path: str | None = None
+    delete_dbt_sql: bool = False
 
 
 SCENARIOS = [
@@ -260,6 +266,93 @@ deployment:
     dbt_paths:
       - models
 """,
+    ),
+    Scenario(
+        name="dbt_impact_orphaned_column",
+        description="dbt-only PR removing a column Omni references should fail instead of skipping",
+        expected_exit=1,
+        changed_files="models/marts/orders.sql",
+        server_mode="unused",
+        dbt_sql_path="models/marts/orders.sql",
+        dbt_sql_base="select id, revenue from raw.orders\n",
+        dbt_sql_head="select id, total_revenue from raw.orders\n",
+        config="""checks:
+  dbt_impact:
+    enabled: true
+deployment:
+  breaking_change_hold:
+    enabled: true
+    dbt_paths:
+      - models
+""",
+    ),
+    Scenario(
+        name="dbt_impact_safe_addition",
+        description="dbt-only PR adding a column should skip cleanly",
+        expected_exit=0,
+        changed_files="models/marts/orders.sql",
+        server_mode="unused",
+        dbt_sql_path="models/marts/orders.sql",
+        dbt_sql_base="select id, revenue from raw.orders\n",
+        dbt_sql_head="select id, revenue, discount from raw.orders\n",
+        config="""checks:
+  dbt_impact:
+    enabled: true
+deployment:
+  breaking_change_hold:
+    enabled: true
+    dbt_paths:
+      - models
+""",
+    ),
+    Scenario(
+        name="dbt_impact_model_deleted",
+        description="dbt-only PR deleting a model Omni still references should fail",
+        expected_exit=1,
+        changed_files="models/marts/orders.sql",
+        server_mode="unused",
+        dbt_sql_path="models/marts/orders.sql",
+        dbt_sql_base="select id, revenue from raw.orders\n",
+        delete_dbt_sql=True,
+        config="""checks:
+  dbt_impact:
+    enabled: true
+deployment:
+  breaking_change_hold:
+    enabled: true
+    dbt_paths:
+      - models
+""",
+    ),
+    Scenario(
+        name="dbt_impact_warning_mode",
+        description="orphaned reference in warning mode should report without blocking",
+        expected_exit=0,
+        changed_files="models/marts/orders.sql",
+        server_mode="unused",
+        dbt_sql_path="models/marts/orders.sql",
+        dbt_sql_base="select id, revenue from raw.orders\n",
+        dbt_sql_head="select id, total_revenue from raw.orders\n",
+        config="""checks:
+  dbt_impact:
+    enabled: true
+    fail_on_orphaned_references: false
+deployment:
+  breaking_change_hold:
+    enabled: true
+    dbt_paths:
+      - models
+""",
+    ),
+    Scenario(
+        name="dbt_impact_disabled_skips",
+        description="dbt-only PR should skip when impact analysis is disabled",
+        expected_exit=0,
+        changed_files="models/marts/orders.sql",
+        server_mode="unused",
+        dbt_sql_path="models/marts/orders.sql",
+        dbt_sql_base="select id, revenue from raw.orders\n",
+        dbt_sql_head="select id, total_revenue from raw.orders\n",
     ),
 ]
 
@@ -514,6 +607,10 @@ def setup_repo(repo: Path, *, base_url: str, scenario: Scenario) -> None:
         model_root = repo / model_path_for(model_id)
         (model_root / "views").mkdir(parents=True)
         (model_root / "views/orders.view").write_text(BASE_FILES["views/orders.view"], encoding="utf-8")
+    if scenario.dbt_sql_base and scenario.dbt_sql_path:
+        dbt_file = repo / scenario.dbt_sql_path
+        dbt_file.parent.mkdir(parents=True, exist_ok=True)
+        dbt_file.write_text(scenario.dbt_sql_base, encoding="utf-8")
     config = (
         scenario.config
         or """reporting:
@@ -528,6 +625,13 @@ security:
     if scenario.operation == "validate":
         run(["git", "checkout", "-q", "-b", BRANCH_NAME], cwd=repo)
     apply_changed_files(repo, scenario.changed_files)
+    if scenario.dbt_sql_path:
+        dbt_file = repo / scenario.dbt_sql_path
+        if scenario.delete_dbt_sql:
+            dbt_file.unlink(missing_ok=True)
+        elif scenario.dbt_sql_head:
+            dbt_file.parent.mkdir(parents=True, exist_ok=True)
+            dbt_file.write_text(scenario.dbt_sql_head, encoding="utf-8")
     if scenario.operation == "dbt_sync":
         run(["git", "add", "."], cwd=repo)
         run(["git", "commit", "-q", "-m", "deploy dbt"], cwd=repo)
@@ -629,6 +733,7 @@ def inspect_artifacts(repo: Path) -> dict[str, Any]:
         "public/report.json",
         "public/report.md",
         "public/dbt-sync.json",
+        "public/dbt-impact.json",
         "artifact-manifest.json",
     ):
         path = root / relative
@@ -769,6 +874,46 @@ def assert_result(
             expected_severity = "warning" if scenario.name.endswith("_warn") else "error"
             if issue.get("severity") != expected_severity:
                 errors.append(f"hold severity should be {expected_severity} for {scenario.name}")
+    if scenario.name.startswith("dbt_impact"):
+        files = artifacts.get("files", [])
+        if scenario.name == "dbt_impact_disabled_skips":
+            if "public/dbt-impact.json" in files:
+                errors.append("disabled impact analysis should not emit an impact artifact")
+            report = artifacts.get("public/report.json:json", {})
+            if report.get("policy_decision") != "skipped":
+                errors.append("disabled impact analysis should leave the skip decision intact")
+        else:
+            if "public/dbt-impact.json" not in files:
+                errors.append("impact analysis did not emit public/dbt-impact.json")
+            impact = artifacts.get("public/dbt-impact.json:json", {})
+            issues = impact.get("issues", [])
+            if scenario.name == "dbt_impact_safe_addition":
+                if issues:
+                    errors.append("an additive dbt column should not orphan any Omni reference")
+            elif not issues:
+                errors.append("expected an orphaned Omni reference finding")
+            else:
+                issue = issues[0]
+                expected_rule = (
+                    "dbt_model_removal_orphans_omni_view"
+                    if scenario.name == "dbt_impact_model_deleted"
+                    else "dbt_column_removal_orphans_omni_field"
+                )
+                if issue.get("rule") != expected_rule:
+                    errors.append(f"expected rule {expected_rule}, got {issue.get('rule')}")
+                expected_severity = (
+                    "warning" if scenario.name == "dbt_impact_warning_mode" else "error"
+                )
+                if issue.get("severity") != expected_severity:
+                    errors.append(
+                        f"expected severity {expected_severity}, got {issue.get('severity')}"
+                    )
+                if scenario.name in {"dbt_impact_orphaned_column", "dbt_impact_warning_mode"}:
+                    if issue.get("column") != "revenue":
+                        errors.append("impact finding did not identify the removed 'revenue' column")
+                    orphaned = {item.get("field") for item in issue.get("orphaned_fields", [])}
+                    if "revenue" not in orphaned:
+                        errors.append("impact finding did not name the orphaned Omni field")
     return not errors, errors
 
 

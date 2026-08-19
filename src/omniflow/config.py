@@ -40,11 +40,20 @@ OMNI_KEYS = {
     "include_personal_folders",
     "timeout",
 }
-CHECK_KEYS = {"content_validation", "model_validation", "semantic_lint", "dbt_exposures"}
+CHECK_KEYS = {"content_validation", "model_validation", "semantic_lint", "dbt_exposures", "dbt_impact"}
 CONTENT_KEYS = {"enabled", "fail_on_new_only", "labels"}
 MODEL_KEYS = {"enabled", "fail_on_warnings"}
 LINT_KEYS = {"enabled", "rules"}
 EXPOSURE_KEYS = {"enabled", "fail_on_unavailable"}
+DBT_IMPACT_KEYS = {
+    "enabled",
+    "manifest_path",
+    "fail_on_orphaned_references",
+    "omni_yaml_paths",
+    "table_mapping",
+}
+TABLE_MAPPING_KEYS = {"dbt_model", "omni_view", "sql_table_name"}
+MAX_TABLE_MAPPINGS = 500
 REPORTING_KEYS = {"formats", "output_dir"}
 SECURITY_KEYS = {
     "redact_logs",
@@ -212,6 +221,15 @@ class DbtExposureSettings:
 
 
 @dataclass
+class DbtImpactSettings:
+    enabled: bool = False
+    manifest_path: str | None = None
+    fail_on_orphaned_references: bool = True
+    omni_yaml_paths: list[str] = field(default_factory=list)
+    table_mapping: list[dict[str, str]] = field(default_factory=list)
+
+
+@dataclass
 class ReportingSettings:
     formats: list[str] = field(default_factory=lambda: list(DEFAULT_REPORT_FORMATS))
     output_dir: str = ".omniflow"
@@ -263,6 +281,7 @@ class OmniFlowConfig:
     semantic_lint: SemanticLintSettings
     contracts: ContractSettings
     dbt_exposures: DbtExposureSettings
+    dbt_impact: DbtImpactSettings
     reporting: ReportingSettings
     security: SecuritySettings
     ai_repair: AIRepairSettings
@@ -293,6 +312,7 @@ def _to_config(raw: dict[str, Any], source: Path | None) -> OmniFlowConfig:
     model_raw = _mapping(checks_raw.get("model_validation"), "checks.model_validation")
     lint_raw = _mapping(checks_raw.get("semantic_lint"), "checks.semantic_lint")
     exposures_raw = _mapping(checks_raw.get("dbt_exposures"), "checks.dbt_exposures")
+    dbt_impact_raw = _mapping(checks_raw.get("dbt_impact"), "checks.dbt_impact")
     lint_rules = _lint_rules(lint_raw.get("rules"))
     formats = _report_formats(reporting_raw.get("formats"))
     output_dir = _output_dir(reporting_raw.get("output_dir"))
@@ -389,6 +409,21 @@ def _to_config(raw: dict[str, Any], source: Path | None) -> OmniFlowConfig:
             False,
         ),
     )
+    dbt_impact = DbtImpactSettings(
+        enabled=parse_bool("dbt_impact.enabled", dbt_impact_raw.get("enabled"), False),
+        manifest_path=_relative_repo_path(
+            dbt_impact_raw.get("manifest_path"), name="checks.dbt_impact.manifest_path"
+        ),
+        fail_on_orphaned_references=parse_bool(
+            "dbt_impact.fail_on_orphaned_references",
+            dbt_impact_raw.get("fail_on_orphaned_references"),
+            True,
+        ),
+        omni_yaml_paths=_repo_path_list(
+            dbt_impact_raw.get("omni_yaml_paths"), name="checks.dbt_impact.omni_yaml_paths"
+        ),
+        table_mapping=_table_mapping(dbt_impact_raw.get("table_mapping")),
+    )
     reporting = ReportingSettings(
         formats=formats,
         output_dir=output_dir,
@@ -484,6 +519,7 @@ def _to_config(raw: dict[str, Any], source: Path | None) -> OmniFlowConfig:
         semantic_lint=lint,
         contracts=contracts,
         dbt_exposures=dbt_exposures,
+        dbt_impact=dbt_impact,
         reporting=reporting,
         security=security,
         ai_repair=ai_repair,
@@ -584,6 +620,75 @@ def _pending_label(value: Any) -> str:
     return normalized
 
 
+def _relative_repo_path(value: Any, *, name: str) -> str | None:
+    """Validate a single optional repository-relative path."""
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise ConfigError(f"{name} must be a non-empty string when provided")
+    candidate = value.strip()
+    path = Path(candidate)
+    if (
+        path.is_absolute()
+        or ".." in path.parts
+        or len(candidate) > 1_024
+        or any(character in candidate for character in ("\x00", "\r", "\n", "\\"))
+    ):
+        raise ConfigError(f"{name} must be a relative path inside the repository")
+    return candidate
+
+
+def _repo_path_list(value: Any, *, name: str) -> list[str]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ConfigError(f"{name} must be a list of repository paths")
+    normalized: list[str] = []
+    for item in value:
+        candidate = _relative_repo_path(item, name=name)
+        if candidate is None:
+            raise ConfigError(f"{name} entries must be non-empty strings")
+        stripped = candidate.strip("/")
+        if not stripped or stripped == ".":
+            raise ConfigError(f"{name} entries must be relative repository paths")
+        if stripped not in normalized:
+            normalized.append(stripped)
+    if len(normalized) > MAX_DBT_PATHS:
+        raise SecurityPolicyError(f"{name} cannot exceed {MAX_DBT_PATHS} entries")
+    return normalized
+
+
+def _table_mapping(value: Any) -> list[dict[str, str]]:
+    """Validate explicit dbt-model to Omni-view mapping overrides."""
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ConfigError("checks.dbt_impact.table_mapping must be a list of mappings")
+    if len(value) > MAX_TABLE_MAPPINGS:
+        raise SecurityPolicyError(
+            f"checks.dbt_impact.table_mapping cannot exceed {MAX_TABLE_MAPPINGS} entries"
+        )
+    mappings: list[dict[str, str]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            raise ConfigError("checks.dbt_impact.table_mapping entries must be mappings")
+        _reject_unknown_keys(item, TABLE_MAPPING_KEYS, "checks.dbt_impact.table_mapping entry")
+        if not item.get("dbt_model"):
+            raise ConfigError("checks.dbt_impact.table_mapping entries require dbt_model")
+        entry: dict[str, str] = {}
+        for key in sorted(TABLE_MAPPING_KEYS):
+            raw = item.get(key)
+            if raw is None:
+                continue
+            if not isinstance(raw, str) or not raw.strip() or len(raw.strip()) > 512:
+                raise ConfigError(
+                    f"checks.dbt_impact.table_mapping {key} must be a non-empty string no longer than 512 characters"
+                )
+            entry[key] = raw.strip()
+        mappings.append(entry)
+    return mappings
+
+
 def _mapping(value: Any, name: str) -> dict[str, Any]:
     if value is None:
         return {}
@@ -638,6 +743,11 @@ def _validate_config_schema(raw: dict[str, Any]) -> None:
         _mapping(checks.get("dbt_exposures"), "checks.dbt_exposures"),
         EXPOSURE_KEYS,
         "checks.dbt_exposures",
+    )
+    _reject_unknown_keys(
+        _mapping(checks.get("dbt_impact"), "checks.dbt_impact"),
+        DBT_IMPACT_KEYS,
+        "checks.dbt_impact",
     )
     _reject_unknown_keys(
         _mapping(contracts.get("fail_on"), "contracts.fail_on"),

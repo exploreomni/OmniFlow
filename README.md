@@ -17,6 +17,7 @@ The complete walkthrough is in [Install OmniFlow In A GitHub Repository](docs/IN
 7. Create a harmless model change in an Omni branch, select **Create pull request**, and confirm OmniFlow validates the resulting GitHub pull request.
 8. For repositories that deploy dbt, optionally add the protected [post-deployment dbt sync](docs/DBT_SYNC.md) after the production dbt command succeeds.
 9. For monorepos that keep dbt and Omni on one branch, optionally enable the [breaking change hold](docs/BREAKING_CHANGE_HOLD.md) so breaking model changes cannot merge ahead of their dbt deployment.
+10. Optionally enable [dbt impact analysis](docs/DBT_IMPACT.md) so a dbt-only pull request cannot remove a column or model that the Omni model still references.
 
 After the first live run succeeds, make the OmniFlow check required in GitHub branch protection. Continue with the [installation checklist](docs/INSTALLATION.md#step-9-verify-the-installation) before treating OmniFlow as a merge gate.
 
@@ -32,6 +33,7 @@ The workflow always preserves `report.sarif` in the evidence artifact. Repositor
 - Optional, branch-aware dbt exposure metadata
 - Optional post-deployment dbt metadata refresh with asynchronous job polling and full revalidation
 - Optional single-branch breaking-change hold that keeps dbt and Omni merges in a safe order
+- Optional dbt impact analysis that blocks dbt changes which would orphan Omni references
 - JSON, Markdown, SARIF, JUnit, and evidence artifacts
 
 Core OmniFlow validation does not execute warehouse queries, store query results, write model YAML, or merge pull requests. An [AI Repair development scaffold](docs/AI_REPAIR.md) is present but is disabled, unreleased, and not supported for customer installation because Omni does not currently document a public Modeling Agent mutation API.
@@ -122,7 +124,26 @@ PR B (Omni): updates the view to reference customer_key
     → PASSES → PR B merges → Omni promotes against a ready warehouse
 ```
 
-### Scenario 4: Fork Pull Request
+### Scenario 4: Two dbt-Only PRs With Breaking Changes
+
+Two developers rename columns in dbt. Neither PR touches Omni model YAML.
+
+```text
+PR A (dbt only): renames revenue → total_revenue in models/marts/orders.sql
+  → OmniFlow would normally skip (no Omni files changed)
+  → With dbt impact analysis enabled:
+    - Reads the committed Omni YAML from the repo
+    - Finds the Omni view 'orders' still defines a 'revenue' field
+    → BLOCKS: "This dbt change removes column 'revenue' but Omni still
+       references it in 1 field"
+
+Developer updates the Omni model in the correct sequence, or pairs the
+change with an Omni PR that the breaking change hold will sequence.
+```
+
+Without this check, both PRs merge cleanly and the breakage only appears after dbt deploys.
+
+### Scenario 5: Fork Pull Request
 
 ```text
 External contributor opens a PR from a fork
@@ -144,9 +165,20 @@ External contributor opens a PR from a fork
 | Content Validator issues (new-only policy) | Fail |
 | Breaking Omni + dbt change in same PR (hold enabled) | Fail (split required) |
 | Breaking Omni while dbt deployment pending (hold enabled) | Fail (held until sync) |
-| dbt-only PR with no Omni files | Skip (exit 0) |
+| dbt-only PR removing a column Omni references (impact enabled) | Fail (orphaned reference) |
+| dbt-only PR adding a column | Pass |
+| dbt-only PR with no Omni files and no impact check | Skip (exit 0) |
 | Fork PR without Omni files | Skip (exit 0) |
 | Fork PR with Omni files | Fail closed (exit 2) |
+
+### Coverage In Both Directions
+
+The two optional dbt policies are complements:
+
+| Direction | Policy |
+| --- | --- |
+| Omni model change merging ahead of its dbt deployment | [Breaking change hold](docs/BREAKING_CHANGE_HOLD.md) |
+| dbt change orphaning an existing Omni reference | [dbt impact analysis](docs/DBT_IMPACT.md) |
 
 ## End-User Flow
 
@@ -257,6 +289,14 @@ Omni promotes model YAML on merge, so a combined column rename can break product
 
 It is disabled by default, never fires for additive changes, and does nothing in repositories with no configured dbt paths. It prevents the unsafe merge; it does not intercept Omni's webhook. See [Breaking Change Hold](docs/BREAKING_CHANGE_HOLD.md).
 
+### 9. Optional dbt Impact Analysis
+
+The breaking change hold covers breaking Omni changes. This check covers the opposite direction: a dbt-only pull request that removes a warehouse column or model the committed Omni YAML still references.
+
+Without it, two dbt pull requests can rename columns, merge cleanly because neither touches Omni files, and break dashboards once dbt deploys. The check runs on pull requests OmniFlow would otherwise skip, needs no Omni credential, and uses a committed dbt manifest when available or conservative SQL parsing when not.
+
+It is disabled by default. See [dbt Impact Analysis](docs/DBT_IMPACT.md).
+
 ## Trust And Routing
 
 The example uses GitHub's `pull_request_target` event but never checks out or executes proposed PR code. A credential-free preflight retrieves changed filenames through GitHub's API and reads `.omni/flow.json`, `.omniflow.yml`, and the workflow itself from the trusted base branch. Only a selected Omni model context starts the validation process with `OMNI_API_KEY`; skipped PRs never inject it. This prevents a same-repository pull request from changing `base_url`, disabling gates, enabling unsafe output, replacing the action, or redirecting the token.
@@ -331,6 +371,7 @@ Exit codes are `0` success, `1` validation failure, `2` configuration error, `3`
 - [Testing and live validation](docs/TESTING.md)
 - [Post-deployment dbt synchronization](docs/DBT_SYNC.md)
 - [Breaking change hold for single-branch monorepos](docs/BREAKING_CHANGE_HOLD.md)
+- [dbt impact analysis on Omni references](docs/DBT_IMPACT.md)
 - [AI Repair development scaffold](docs/AI_REPAIR.md)
 - [Troubleshooting](docs/TROUBLESHOOTING.md)
 - [Support and safe diagnostic sharing](SUPPORT.md)
@@ -355,7 +396,7 @@ python -m build
 twine check dist/*
 ```
 
-The simulation covers same-repository, fork, and multi-model routing; contract failures; strict redaction; missing branches; malicious PR metadata; successful and partial dbt exposure coverage; one-refresh-per-connection dbt synchronization; post-sync revalidation; refresh-job failure; and breaking-change hold behavior for held, unheld, and warn-only pull requests. The maintainers have also completed end-to-end live pull-request validation on a non-production model. Neither result replaces the adopter-specific live gate for actual Omni PR metadata, tenant permissions, branch mapping, Content Validator coverage, dbt exposure coverage, schema refresh and Git side effects, GitHub annotations/comments, branch-protection enforcement, or webhook promotion. Use the [testing matrix](docs/TESTING.md) to distinguish automated, live-tenant, and release evidence.
+The simulation covers same-repository, fork, and multi-model routing; contract failures; strict redaction; missing branches; malicious PR metadata; successful and partial dbt exposure coverage; one-refresh-per-connection dbt synchronization; post-sync revalidation; refresh-job failure; breaking-change hold behavior for held, unheld, and warn-only pull requests; and dbt impact analysis for orphaned columns, deleted models, additive changes, warn-only mode, and the disabled default. The maintainers have also completed end-to-end live pull-request validation on a non-production model. Neither result replaces the adopter-specific live gate for actual Omni PR metadata, tenant permissions, branch mapping, Content Validator coverage, dbt exposure coverage, schema refresh and Git side effects, GitHub annotations/comments, branch-protection enforcement, or webhook promotion. Use the [testing matrix](docs/TESTING.md) to distinguish automated, live-tenant, and release evidence.
 
 ## Maintainer Release Setup
 

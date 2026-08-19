@@ -182,6 +182,33 @@ The runner has a shallow checkout, so pending-deployment detection was skipped. 
 
 The release step runs only after `omniflow dbt sync` succeeds. Confirm the deployment job completed, that `OMNIFLOW_SYNC_STATE_TOKEN` is configured so the synchronized commit was recorded, and that the label on the pull request matches `deployment.breaking_change_hold.pending_label`. Auto-merge also waits for required checks and reviews, so a released pull request can still be pending on branch protection.
 
+## dbt Impact Analysis
+
+### The finding is marked `ambiguous_relation_match`
+
+The dbt model name was unqualified and matched several Omni relations with the same table name in different schemas. OmniFlow lists every candidate in `candidate_relations` and reports all their orphaned fields rather than guessing which schema changed. Commit a dbt manifest so the exact `relation_name` is available, or add a `checks.dbt_impact.table_mapping` entry pinning the model to one relation.
+
+### The check flagged a column that is not actually breaking
+
+Matching is textual. A column name appearing incidentally inside a field's SQL is treated as a reference. Confirm the finding against the reported `orphaned_fields`, and add a `table_mapping` entry if the dbt model was matched to the wrong Omni view.
+
+### The check found nothing even though a column was renamed
+
+Read `analysis_mode` and `notes` in `dbt-impact.json`:
+
+- `sql_heuristic` with a note about a missing manifest means precision is limited. Commit a dbt manifest and set `checks.dbt_impact.manifest_path`.
+- A note about no available base ref means the checkout had no comparison point. Use a checkout with enough history for `origin/<base>`, the bare base branch, or `HEAD~1` to resolve.
+- `SELECT *` in the model SQL yields no columns by design, so no removal is claimed.
+- In manifest mode, a column is only reported when the base manifest documented columns for that node.
+
+### The check did not run at all
+
+It only evaluates pull requests with dbt-path changes and no Omni model changes. Confirm `checks.dbt_impact.enabled` is `true`, that a changed file matches `deployment.breaking_change_hold.dbt_paths`, and that an Omni model path is resolvable from `checks.dbt_impact.omni_yaml_paths` or `.omni/flow.json`. When both dbt and Omni files change, the breaking change hold and contract validation apply instead.
+
+### `no Omni model path is available`
+
+The policy is enabled but OmniFlow could not locate the Omni YAML. Add `checks.dbt_impact.omni_yaml_paths`, or ensure `.omni/flow.json` includes a `model_path` for each model.
+
 ## Exit Codes
 
 | Code | Meaning |

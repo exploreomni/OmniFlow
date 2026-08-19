@@ -5,6 +5,9 @@ import json
 import os
 import platform
 import shutil
+
+# Git is invoked without a shell and with bounded arguments.
+import subprocess  # nosec B404
 import sys
 from pathlib import Path
 from typing import Any
@@ -20,15 +23,22 @@ from .config import (
     require_sync_api_key,
 )
 from .contracts import evaluate_contracts
+from .dbt_impact import evaluate_dbt_impact
 from .dbt_sync import run_dbt_sync, validate_dbt_sync_environment
 from .diff.diff_engine import diff_graphs
 from .diff.semantic_graph import build_graph
 from .diff.yaml_loader import load_yaml_files
-from .discovery import ModelContext, discover_contexts, discover_deployment_contexts, get_changed_files
+from .discovery import (
+    ModelContext,
+    discover_contexts,
+    discover_deployment_contexts,
+    get_changed_files,
+    load_flow_metadata,
+)
 from .downstream import generate_downstream_dependencies
 from .exceptions import ConfigError, ExitCodes, OmniAuthError, OmniFlowError, SecurityPolicyError
 from .exposures import run_dbt_exposure_enrichment
-from .git import current_branch, current_sha, event_name, pr_number
+from .git import current_branch, current_sha, event_name, git_executable, pr_number
 from .github.annotations import annotation_lines
 from .github.repair_attempt import GitHubRepairAttemptGuard, load_repair_event
 from .logging import configure_logging
@@ -212,6 +222,11 @@ def cmd_run(args: argparse.Namespace) -> int:
         _write_setup_failure_artifacts(config=config, output_dir=output_dir, exc=exc)
         raise
     if not contexts:
+        # A pull request with no Omni model changes can still break Omni by
+        # removing a warehouse column or model the committed YAML references.
+        impact_exit = _run_dbt_impact_check(config=config, output_dir=output_dir)
+        if impact_exit is not None:
+            return impact_exit
         _write_skipped_artifacts(config=config, output_dir=output_dir)
         print("OmniFlow skipped: no Omni PR context or changed Omni model files detected")
         return 0
@@ -444,6 +459,177 @@ def _write_skipped_artifacts(
         restricted_artifacts_enabled=config.security.retain_restricted_artifacts,
         redaction_level=config.security.redaction_level,
     )
+
+
+def _run_dbt_impact_check(*, config, output_dir: Path) -> int | None:
+    """Analyze a non-Omni pull request for dbt changes that orphan Omni references.
+
+    Returns an exit code when the check ran, or None when it was not applicable so
+    the caller falls through to the normal skip path. This runs without an Omni
+    credential because it only compares committed dbt and Omni files.
+    """
+    if not config.dbt_impact.enabled:
+        return None
+    dbt_paths = config.breaking_change_hold.dbt_paths
+    changed_files = get_changed_files()
+    if not any(_path_under_any(path, dbt_paths) for path in changed_files):
+        return None
+
+    omni_yaml_paths = config.dbt_impact.omni_yaml_paths or _flow_model_paths()
+    if not omni_yaml_paths:
+        print(
+            "omniflow warning: dbt impact analysis is enabled but no Omni model path is available. "
+            "Add checks.dbt_impact.omni_yaml_paths or model_path entries to .omni/flow.json.",
+            file=sys.stderr,
+        )
+        return None
+
+    report, issues = evaluate_dbt_impact(
+        changed_files=changed_files,
+        dbt_paths=dbt_paths,
+        settings=config.dbt_impact,
+        omni_yaml_paths=omni_yaml_paths,
+        base_ref=_base_ref(),
+    )
+    exit_code = (
+        ExitCodes.VALIDATION_FAILED
+        if any(issue.get("severity") == "error" for issue in issues)
+        else ExitCodes.SUCCESS
+    )
+    aggregate = {
+        "tool": "omniflow",
+        "tool_version": __version__,
+        "operation": "dbt_impact",
+        "generated_at": utc_now_iso(),
+        "git_sha": current_sha(),
+        "git_branch": current_branch(),
+        "pr_number": pr_number(),
+        "event_type": event_name(),
+        "runner": _runner_metadata(),
+        "models": [],
+        "config_hash": config.hash,
+        "summary": _summarize(issues),
+        "issues": issues,
+        "model_reports": [report],
+        "raw_query_results_stored": False,
+        "policy_decision": "fail" if exit_code else "pass",
+        "exit_code": exit_code,
+        "exit_code_reason": _exit_code_reason(exit_code),
+    }
+    public_report = write_public_reports(
+        aggregate,
+        output_dir=output_dir,
+        formats=config.reporting.formats,
+        redaction_level=config.security.redaction_level,
+    )
+    write_public_json(
+        output_dir / "dbt-impact.json", report, redaction_level=config.security.redaction_level
+    )
+    write_public_json(
+        public_dir(output_dir) / "dbt-impact.json",
+        report,
+        redaction_level=config.security.redaction_level,
+    )
+    evidence = {
+        "tool": "omniflow",
+        "tool_version": __version__,
+        "operation": "dbt_impact",
+        "config_hash": config.hash,
+        "git_sha": current_sha(),
+        "git_branch": current_branch(),
+        "pr_number": pr_number(),
+        "event_type": event_name(),
+        "runner": _runner_metadata(),
+        "models": [],
+        "analysis_mode": report["analysis_mode"],
+        "validation_status": "failed" if exit_code else "passed",
+        "policy_decision": aggregate["policy_decision"],
+        "raw_query_results_stored": False,
+        "exit_code": exit_code,
+        "exit_code_reason": aggregate["exit_code_reason"],
+        "timestamp": utc_now_iso(),
+    }
+    write_public_json(output_dir / "evidence.json", evidence, redaction_level=config.security.redaction_level)
+    write_public_json(
+        public_dir(output_dir) / "evidence.json",
+        evidence,
+        redaction_level=config.security.redaction_level,
+    )
+    write_artifact_manifest(
+        output_dir=output_dir,
+        restricted_artifacts_enabled=config.security.retain_restricted_artifacts,
+        redaction_level=config.security.redaction_level,
+    )
+    _emit_github_annotations(public_report.get("issues", []), limit=config.security.max_report_samples)
+    print(
+        "OmniFlow dbt impact analysis complete: "
+        f"mode={report['analysis_mode']} issues={len(issues)} exit_code={exit_code}"
+    )
+    return exit_code
+
+
+def _flow_model_paths() -> list[str]:
+    """Read model paths from trusted base-branch metadata."""
+    try:
+        flow = load_flow_metadata(missing_ok=True)
+    except OmniFlowError:
+        return []
+    if not flow:
+        return []
+    paths: list[str] = []
+    for model in flow.get("models", []):
+        if not isinstance(model, dict):
+            continue
+        candidate = model.get("model_path")
+        if isinstance(candidate, str) and candidate.strip():
+            normalized = candidate.strip().strip("/")
+            if normalized and normalized not in paths:
+                paths.append(normalized)
+    return paths
+
+
+def _base_ref() -> str | None:
+    """Resolve a Git ref to compare dbt file history against.
+
+    Different CI checkouts expose the base branch differently, so candidates are
+    tried in order and the first one Git can actually resolve is used. Returning
+    None means no comparison base is available and the caller reports that rather
+    than guessing.
+    """
+    candidates: list[str] = []
+    base_branch = os.getenv("GITHUB_BASE_REF")
+    if base_branch:
+        candidates.extend([f"origin/{base_branch}", base_branch])
+    candidates.append("HEAD~1")
+    for candidate in candidates:
+        if _ref_exists(candidate):
+            return candidate
+    return None
+
+
+def _ref_exists(ref: str) -> bool:
+    try:
+        # Arguments are passed directly to Git, never through a shell.
+        subprocess.run(  # nosec B603
+            [git_executable(), "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return False
+    return True
+
+
+def _path_under_any(path: str, prefixes: list[str]) -> bool:
+    normalized = str(path).strip().strip("/")
+    if not normalized:
+        return False
+    for prefix in prefixes:
+        cleaned = str(prefix).strip().strip("/")
+        if cleaned and (normalized == cleaned or normalized.startswith(f"{cleaned}/")):
+            return True
+    return False
 
 
 def _run_context(

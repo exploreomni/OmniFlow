@@ -35,6 +35,20 @@ checks:
   #   enabled: true
   #   fail_on_unavailable: false
 
+  # Optional: block a dbt-only pull request that removes a warehouse column or
+  # model the committed Omni YAML still references. Runs without an Omni
+  # credential and needs no dbt invocation. Uses deployment.breaking_change_hold
+  # dbt_paths to identify dbt sources. See docs/DBT_IMPACT.md.
+  # dbt_impact:
+  #   enabled: true
+  #   manifest_path: target/manifest.json   # omit to use SQL heuristics
+  #   fail_on_orphaned_references: true
+  #   omni_yaml_paths:                      # defaults to .omni/flow.json model paths
+  #     - omni/my_model
+  #   table_mapping:                        # only for custom schema macros
+  #     - dbt_model: orders_v2
+  #       sql_table_name: analytics.marts.orders
+
 reporting:
   formats:
     - json
