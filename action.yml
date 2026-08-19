@@ -24,9 +24,9 @@ inputs:
     default: ""
   last-sync-sha:
     description: >-
-      Commit SHA recorded by the last successful dbt sync. Pass
-      ${{ vars.OMNIFLOW_LAST_SYNC_SHA }} to enable pending-deployment detection in the
-      breaking-change hold policy. Requires a full-history checkout to be effective.
+      Commit SHA recorded by the last successful dbt sync. The calling workflow
+      should pass vars.OMNIFLOW_LAST_SYNC_SHA to enable pending-deployment
+      detection in the breaking-change hold policy.
     required: false
     default: ""
 outputs:
