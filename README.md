@@ -34,10 +34,10 @@ The workflow always preserves `report.sarif` in the evidence artifact. Repositor
 - Optional post-deployment dbt metadata refresh with asynchronous job polling and full revalidation
 - Optional single-branch breaking-change hold that keeps dbt and Omni merges in a safe order
 - Optional dbt impact analysis that blocks dbt changes which would orphan Omni references
-- Optional [AI eval](docs/AI_EVAL.md) regression check that compares Omni AI accuracy and spend between `main` and the branch
+- Optional [AI eval](docs/AI_EVAL.md) regression check that compares Omni AI accuracy between `main` and the branch
 - JSON, Markdown, SARIF, JUnit, and evidence artifacts
 
-Core OmniFlow validation does not execute warehouse queries, store query results, write model YAML, or merge pull requests. The one documented exception is the optional, disabled-by-default [AI eval](docs/AI_EVAL.md) check, which asks Omni AI to answer real prompts against the branch and therefore can run warehouse queries and incur LLM spend; see that guide before enabling it as a required check. An [AI Repair development scaffold](docs/AI_REPAIR.md) is present but is disabled, unreleased, and not supported for customer installation because Omni does not currently document a public Modeling Agent mutation API.
+Core OmniFlow validation does not execute warehouse queries, store query results, write model YAML, or merge pull requests. An [AI Repair development scaffold](docs/AI_REPAIR.md) is present but is disabled, unreleased, and not supported for customer installation because Omni does not currently document a public Modeling Agent mutation API. The optional [AI eval](docs/AI_EVAL.md) check is disabled by default for a different reason: it asks Omni AI to answer real prompts against the branch, which adds real wall-clock time and depends on prompt sets already curated in Omni, rather than being a deterministic YAML check.
 
 ## How OmniFlow Works — By Example
 

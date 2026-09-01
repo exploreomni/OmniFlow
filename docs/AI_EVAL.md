@@ -4,12 +4,7 @@ OmniFlow's AI eval check runs each configured Omni AI eval prompt set against `m
 
 ## Why This Is Opt-In, Not A Default Check
 
-Every other OmniFlow check is static: it reads committed YAML, calls read-only validation and metadata endpoints, and never asks Omni AI to answer a question. AI eval is different on both axes that matter for a CI gate:
-
-- **It executes warehouse queries.** Each eval run has Omni AI answer real prompts against the branch's semantic model, which can run real SQL against the connected warehouse.
-- **It spends money.** Every prompt incurs LLM cost for the answer and for the judge that scores it, reported per run as `main_cost_usd` / `branch_cost_usd`.
-
-Enabling `checks.ai_eval` means every pull request that touches the configured model runs this cost and query load automatically. Treat it the same way as [post-deployment dbt sync](DBT_SYNC.md) or [AI Repair](AI_REPAIR.md): review the prompt sets, the expected per-PR spend, and the warehouse load before turning it on as a required check.
+Every other OmniFlow check is static: it reads committed YAML and calls read-only validation and metadata endpoints. AI eval is different: it asks Omni AI to answer real prompts against both `main` and the branch, which takes real wall-clock time and depends on prompt sets that already exist in Omni. Pass/fail also comes from a judge's scoring rather than deterministic YAML validation, so it's a different kind of signal than the rest of OmniFlow's checks. That combination is why it stays opt-in rather than running alongside model and content validation by default.
 
 ## What It Detects
 
@@ -20,7 +15,7 @@ Enabling `checks.ai_eval` means every pull request that touches the configured m
 | A prompt fails against `main` and passes against the branch | Improvement: reported, never gates |
 | No Omni branch is available for this context | Skipped with a note; the check does not fail |
 
-Cost changes are always reported and never gate. Only a genuine accuracy regression fails the check.
+Only a genuine accuracy regression fails the check.
 
 ## Prerequisite
 
@@ -37,7 +32,7 @@ checks:
     timeout_seconds: 900
     scoring_grace_seconds: 180
     prompt_sets:
-      - id: 9ff94a07-4081-4ef6-9e6a-e542424cb3bf
+      - id: 00000000-0000-0000-0000-000000000000  # replace with your own prompt set ID
         label: Core revenue prompts
 ```
 
@@ -63,26 +58,26 @@ Each run writes two artifacts:
   report.json          # aggregate report; ai_eval appears in check_reports
   report.md            # includes an "AI Eval" section per model
   <model>/
-    ai-eval-detail.json  # restricted: full per-prompt rows, cost breakdown, conversation IDs, timing
+    ai-eval-detail.json  # restricted: full per-prompt rows, conversation IDs, timing
 ```
 
-`ai-eval-detail.json` is written only to the restricted artifact path and is never included in `public/`. It carries the same kind of data-bearing fields (per-prompt cost, timing, conversation ID) that `get_ai_job_status` already discards for AI Repair, for the same reason: it can reflect customer prompt and answer content.
+`ai-eval-detail.json` is written only to the restricted artifact path and is never included in `public/`. It carries the same kind of data-bearing fields (timing, conversation ID) that `get_ai_job_status` already discards for AI Repair, for the same reason: it can reflect customer prompt and answer content.
 
 The public report (`report.json`, `report.md`, `report.sarif`, `junit.xml`) carries only:
 
-- Per prompt set aggregate accuracy (main vs. branch) and total LLM spend
+- Per prompt set aggregate accuracy (main vs. branch)
 - A bounded list (`security.max_report_samples`) of the prompts that regressed, each truncated to 300 characters, with the judge's error reason when Omni provided one
 
-This keeps the reviewer-facing summary useful (which prompts regressed, and by how much accuracy and spend moved) without publishing full per-prompt cost breakdowns or conversation identifiers.
+This keeps the reviewer-facing summary useful (which prompts regressed, and by how much accuracy moved) without publishing full per-prompt detail or conversation identifiers.
 
 ## Limitations
 
-- **This check queries the warehouse and spends money.** See the section above before enabling it as a required check.
 - **A pass does not mean the prompt sets are comprehensive.** AI eval only evaluates the prompt sets you configure; it says nothing about prompts you have not written.
 - **No new prompt sets are created here.** Add or edit prompt sets in Omni directly; this check only runs the ones it's told about.
 - **The two-run limit means wall-clock time scales with prompt set count.** Keep `timeout_seconds` generous if you configure several prompt sets.
+- **Pass/fail comes from a judge's scoring, not deterministic validation.** Treat a regression as a signal to review, the same way you would a flaky test.
 
 ## Related
 
 - [Post-Deployment dbt Synchronization](DBT_SYNC.md) is the other opt-in check that talks to a live system rather than only committed files.
-- [Security Model](SECURITY_MODEL.md) covers OmniFlow's broader no-query-execution posture and why this check is the documented exception.
+- [Security Model](SECURITY_MODEL.md) covers what data this check does and does not persist.

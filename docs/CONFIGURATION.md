@@ -187,7 +187,7 @@ The check reuses `deployment.breaking_change_hold.dbt_paths` to identify dbt sou
 
 ## AI Eval
 
-This optional check runs configured Omni AI eval prompt sets against `main` and against the pull request's Omni branch, then fails on any prompt that regressed. Unlike every other check in this document, it executes warehouse queries through Omni AI and incurs LLM spend, so it is disabled by default. Read [AI Eval](AI_EVAL.md) in full before enabling it.
+This optional check runs configured Omni AI eval prompt sets against `main` and against the pull request's Omni branch, then fails on any prompt that regressed. Unlike every other check in this document, it asks Omni AI to answer real prompts rather than performing deterministic YAML validation, so it is disabled by default. Read [AI Eval](AI_EVAL.md) in full before enabling it.
 
 ```yaml
 checks:
@@ -198,7 +198,7 @@ checks:
     timeout_seconds: 900
     scoring_grace_seconds: 180
     prompt_sets:
-      - id: 9ff94a07-4081-4ef6-9e6a-e542424cb3bf
+      - id: 00000000-0000-0000-0000-000000000000  # replace with your own prompt set ID
         label: Core revenue prompts
 ```
 

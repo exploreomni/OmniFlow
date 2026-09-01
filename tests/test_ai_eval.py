@@ -2,7 +2,7 @@ import unittest
 
 from omniflow.config import load_config
 from omniflow.exceptions import ConfigError, OmniAPIError, SecurityPolicyError
-from omniflow.validators.ai_eval import accuracy, build_comparison, result_cost, run_ai_eval_validation
+from omniflow.validators.ai_eval import accuracy, build_comparison, run_ai_eval_validation
 
 
 class FakeClock:
@@ -51,10 +51,6 @@ class ComparisonTests(unittest.TestCase):
     def test_accuracy_with_no_scored_results_is_none(self):
         self.assertEqual(accuracy([result("a", None)]), (None, 0, 0))
 
-    def test_result_cost_sums_answer_and_judge_cost(self):
-        self.assertEqual(result_cost({"cost": 0.01, "scoring_cost": 0.002}), 0.012)
-        self.assertIsNone(result_cost({}))
-
     def test_build_comparison_classifies_every_status(self):
         main_run = {"results": [result("regressed", 1), result("improved", 0), result("same", 1), result("gone", 1)]}
         branch_run = {
@@ -93,12 +89,12 @@ class RunAiEvalValidationTests(unittest.TestCase):
     def test_regression_fails_the_check_and_bounds_public_detail(self):
         client = FakeEvalClient(
             {
-                "main": {"status": "COMPLETE", "results": [result("q1", 1), result("q2", 1, cost=0.01)]},
+                "main": {"status": "COMPLETE", "results": [result("q1", 1), result("q2", 1)]},
                 "branch": {
                     "status": "COMPLETE",
                     "results": [
-                        result("q1", 0, error_reason="wrong answer", cost=0.02),
-                        result("q2", 1, cost=0.01),
+                        result("q1", 0, error_reason="wrong answer"),
+                        result("q2", 1),
                     ],
                 },
             }
@@ -127,7 +123,7 @@ class RunAiEvalValidationTests(unittest.TestCase):
         self.assertEqual(summary["regressed_count"], 1)
         self.assertAlmostEqual(summary["accuracy_delta_pts"], -50.0)
         self.assertEqual(client.started[1]["branch_id"], "branch-1")
-        # Detail carries per-prompt cost/timing that never reaches the public report.
+        # Detail carries full per-prompt rows that never reach the public report.
         self.assertEqual(len(detail["prompt_set_results"][0]["comparison"]), 2)
 
     def test_regression_reports_as_warning_when_not_gating(self):

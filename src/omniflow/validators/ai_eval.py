@@ -28,11 +28,11 @@ def run_ai_eval_validation(
     """Run each configured prompt set against `main` and the PR branch, and compare.
 
     Returns (public_summary_report, detail_report, exit_code). The public report
-    carries only aggregate accuracy/cost numbers and a bounded list of regressed
-    prompts; the detail report carries full per-prompt rows (cost breakdown,
-    conversation IDs, timing) and is intended for restricted-artifact storage
-    only, mirroring how the Omni AI job status API discards prompt/result text
-    from anything written to a public surface.
+    carries only aggregate accuracy numbers and a bounded list of regressed
+    prompts; the detail report carries full per-prompt rows (conversation IDs,
+    timing) and is intended for restricted-artifact storage only, mirroring how
+    the Omni AI job status API discards prompt/result text from anything
+    written to a public surface.
     """
     generated_at = utc_now_iso()
     if not branch_id:
@@ -113,7 +113,6 @@ def _public_report(
         rows = sr["rows"]
         m_acc, m_pass, m_n = accuracy(sr["main_run"].get("results", []))
         b_acc, b_pass, b_n = accuracy(sr["branch_run"].get("results", []))
-        m_cost, b_cost = run_cost(sr["main_run"]), run_cost(sr["branch_run"])
         regressions = [row for row in rows if row["status"] == "regressed"]
         improvements = [row for row in rows if row["status"] == "improved"]
         summaries.append(
@@ -127,9 +126,6 @@ def _public_report(
                 "branch_passed": b_pass,
                 "branch_total": b_n,
                 "accuracy_delta_pts": None if (m_acc is None or b_acc is None) else round((b_acc - m_acc) * 100, 1),
-                "main_cost_usd": round(m_cost, 4),
-                "branch_cost_usd": round(b_cost, 4),
-                "cost_delta_usd": round(b_cost - m_cost, 4),
                 "regressed_count": len(regressions),
                 "improved_count": len(improvements),
             }
@@ -266,19 +262,6 @@ def accuracy(results: list[dict[str, Any]]) -> tuple[float | None, int, int]:
     return passed / len(scored), passed, len(scored)
 
 
-def result_cost(result: dict[str, Any]) -> float | None:
-    """Total raw LLM cost (USD) for one prompt: model answer + judge scoring.
-    Returns None when Omni reported no cost at all."""
-    cost, scoring_cost = result.get("cost"), result.get("scoring_cost")
-    if cost is None and scoring_cost is None:
-        return None
-    return (cost or 0) + (scoring_cost or 0)
-
-
-def run_cost(run: dict[str, Any]) -> float:
-    return sum(result_cost(result) or 0 for result in run.get("results", []))
-
-
 def build_comparison(main_run: dict[str, Any], branch_run: dict[str, Any]) -> list[dict[str, Any]]:
     main_by = index_by_prompt(main_run)
     branch_by = index_by_prompt(branch_run)
@@ -305,8 +288,6 @@ def build_comparison(main_run: dict[str, Any], branch_run: dict[str, Any]) -> li
                 "status": status,
                 "branch_error": branch_result.get("error_reason"),
                 "branch_conversation_id": (branch_result.get("agentic_job") or {}).get("conversation_id"),
-                "main_total_cost": result_cost(main_result),
-                "branch_total_cost": result_cost(branch_result),
                 "branch_timing_ms": branch_result.get("timing_ms"),
                 "main_query_count": main_result.get("query_count"),
                 "branch_query_count": branch_result.get("query_count"),

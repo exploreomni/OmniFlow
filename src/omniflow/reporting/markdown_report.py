@@ -256,8 +256,6 @@ def _ai_eval_lines(summaries: list[dict[str, Any]], *, decision: str) -> list[st
         lines.append(
             f"- `{_safe_code(entry.get('prompt_set_label', ''))}`: accuracy "
             f"`{_pct(entry.get('main_accuracy'))}` → `{_pct(entry.get('branch_accuracy'))}` ({delta_str}); "
-            f"spend `${entry.get('main_cost_usd', 0):.4f}` → `${entry.get('branch_cost_usd', 0):.4f}` "
-            f"(`{entry.get('cost_delta_usd', 0):+.4f}`); "
             f"regressed `{entry.get('regressed_count', 0)}`, improved `{entry.get('improved_count', 0)}`."
         )
     return lines
