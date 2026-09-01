@@ -391,6 +391,50 @@ class OmniClientTests(unittest.TestCase):
         self.assertEqual(session.calls[0][0], "POST")
         self.assertEqual(session.calls[0][1], "https://omni.example/api/v1/ai/jobs/job-1/cancel")
 
+    def test_ai_eval_run_lifecycle_uses_documented_endpoints(self):
+        session = FakeSession(
+            [
+                FakeResponse({"run": {"id": "run-1"}}, status_code=201),
+                FakeResponse({"run": {"id": "run-2"}}, status_code=201),
+                FakeResponse({"run": {"id": "run-1", "status": "COMPLETE", "results": []}}),
+            ]
+        )
+        client = OmniClient(base_url="https://omni.example", api_key=FAKE_API_KEY, session=session)
+        main_run_id = client.start_ai_eval_run(prompt_set_id="set-1", description="baseline")
+        branch_run_id = client.start_ai_eval_run(
+            prompt_set_id="set-1", description="branch eval", branch_id="branch-1"
+        )
+        self.assertEqual(main_run_id, "run-1")
+        self.assertEqual(branch_run_id, "run-2")
+        self.assertEqual(
+            session.calls[0][2]["json"], {"prompt_set_id": "set-1", "description": "baseline"}
+        )
+        self.assertEqual(
+            session.calls[1][2]["json"],
+            {
+                "prompt_set_id": "set-1",
+                "description": "branch eval",
+                "run_config": {"branch_id": "branch-1"},
+            },
+        )
+        self.assertEqual(session.calls[0][1], "https://omni.example/api/v1/ai/eval/runs")
+        run = client.get_ai_eval_run("run-1")
+        self.assertEqual(run["status"], "COMPLETE")
+
+    def test_ai_eval_run_rejects_mismatched_id_and_missing_status(self):
+        for payload in (
+            {"run": {"id": "other-run", "status": "COMPLETE"}},
+            {"run": {"id": "run-1"}},
+        ):
+            with self.subTest(payload=payload):
+                client = OmniClient(
+                    base_url="https://omni.example",
+                    api_key=FAKE_API_KEY,
+                    session=FakeSession([FakeResponse(payload)]),
+                )
+                with self.assertRaises(OmniAPIError):
+                    client.get_ai_eval_run("run-1")
+
     def test_yaml_write_delete_and_git_commit_use_documented_contracts(self):
         session = FakeSession(
             [

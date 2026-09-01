@@ -185,6 +185,34 @@ checks:
 
 The check reuses `deployment.breaking_change_hold.dbt_paths` to identify dbt source files, so both policies stay consistent. Manifest mode is precise; SQL heuristic mode is conservative and reports nothing for `SELECT *` or unparseable statements. Column matching is case-insensitive and uses word boundaries so removing `customer` never flags a field referencing `customer_id`. See [dbt Impact Analysis](DBT_IMPACT.md).
 
+## AI Eval
+
+This optional check runs configured Omni AI eval prompt sets against `main` and against the pull request's Omni branch, then fails on any prompt that regressed. Unlike every other check in this document, it executes warehouse queries through Omni AI and incurs LLM spend, so it is disabled by default. Read [AI Eval](AI_EVAL.md) in full before enabling it.
+
+```yaml
+checks:
+  ai_eval:
+    enabled: true
+    fail_on_regression: true
+    poll_interval_seconds: 10
+    timeout_seconds: 900
+    scoring_grace_seconds: 180
+    prompt_sets:
+      - id: 9ff94a07-4081-4ef6-9e6a-e542424cb3bf
+        label: Core revenue prompts
+```
+
+| Setting | Default | Allowed range or behavior |
+| --- | --- | --- |
+| `enabled` | `false` | Must be enabled in trusted base-branch policy. |
+| `prompt_sets` | `[]` | `{id, label}` entries for existing Omni AI eval prompt sets, maximum 20. |
+| `fail_on_regression` | `true` | `true` blocks the merge; `false` reports regressions as warnings only. |
+| `poll_interval_seconds` | `10` | Bounded 2-30 seconds. |
+| `timeout_seconds` | `900` | Bounded 30-3600 seconds. |
+| `scoring_grace_seconds` | `180` | Bounded 0-600 seconds. |
+
+Reuses `OMNI_API_KEY`; no dedicated token is required. See [AI Eval](AI_EVAL.md).
+
 ## Semantic Lint
 
 `checks.semantic_lint.enabled` defaults to `true`. Every rule accepts `off`, `info`, `warn`, or `error`. Only `error` is a blocking lint severity.

@@ -19,6 +19,8 @@ MAX_PAGINATION_PAGES = 500
 MAX_PAGINATION_RECORDS = 50_000
 MAX_AI_PROMPT_BYTES = 16 * 1024
 AI_JOB_STATES = {"CANCELLED", "COMPLETE", "DELIVERING", "EXECUTING", "FAILED", "QUEUED"}
+AI_EVAL_TERMINAL_STATES = {"COMPLETE", "CANCELLED"}
+MAX_AI_EVAL_DESCRIPTION_CHARS = 200
 SCHEMA_REFRESH_STATES = {"RUNNING", "COMPLETED", "FAILED"}
 SCHEMA_REFRESH_MODEL_KINDS = {"SHARED", "SHARED_EXTENSION"}
 
@@ -308,6 +310,53 @@ class OmniClient:
         if state not in {"CANCELLED", "COMPLETE", "FAILED"}:
             raise OmniAPIError("AI job cancellation did not return a terminal state")
         return {"job_id": job_id, "state": state}
+
+    def start_ai_eval_run(
+        self,
+        *,
+        prompt_set_id: str,
+        description: str,
+        branch_id: str | None = None,
+    ) -> str:
+        prompt_set_id = validate_path_segment(prompt_set_id, name="prompt_set_id")
+        if not isinstance(description, str) or not description.strip():
+            raise ConfigError("AI eval run description must be a non-empty string")
+        description = description.strip()
+        if len(description) > MAX_AI_EVAL_DESCRIPTION_CHARS:
+            raise ConfigError(
+                f"AI eval run description must be {MAX_AI_EVAL_DESCRIPTION_CHARS} characters or fewer"
+            )
+        request_payload: dict[str, Any] = {"prompt_set_id": prompt_set_id, "description": description}
+        if branch_id:
+            request_payload["run_config"] = {"branch_id": validate_path_segment(branch_id, name="branch_id")}
+        payload = self._request(
+            "POST",
+            "/api/v1/ai/eval/runs",
+            json_payload=request_payload,
+            retry_transient=False,
+        )
+        if not isinstance(payload, dict) or not isinstance(payload.get("run"), dict):
+            raise OmniAPIError("AI eval run creation returned an unexpected response shape")
+        run_id = payload["run"].get("id")
+        if not isinstance(run_id, str) or not run_id.strip():
+            raise OmniAPIError("AI eval run creation did not return a run ID")
+        return validate_path_segment(run_id.strip(), name="run_id")
+
+    def get_ai_eval_run(self, run_id: str) -> dict[str, Any]:
+        run_id = validate_path_segment(run_id, name="run_id")
+        payload = self._request("GET", f"/api/v1/ai/eval/runs/{run_id}")
+        if not isinstance(payload, dict) or not isinstance(payload.get("run"), dict):
+            raise OmniAPIError("AI eval run status returned an unexpected response shape")
+        run = payload["run"]
+        if run.get("id") != run_id:
+            raise OmniAPIError("AI eval run status returned a mismatched run ID")
+        status = run.get("status")
+        if not isinstance(status, str) or not status.strip():
+            raise OmniAPIError("AI eval run status returned an invalid status")
+        results = run.get("results")
+        if results is not None and not isinstance(results, list):
+            raise OmniAPIError("AI eval run status returned an unexpected results shape")
+        return run
 
     def update_model_yaml(
         self,
