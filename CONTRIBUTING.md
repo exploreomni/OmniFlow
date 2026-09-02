@@ -7,7 +7,7 @@ Thanks for helping make semantic-layer development safer.
 ```bash
 python3.11 -m venv .venv
 . .venv/bin/activate
-python -m pip install --upgrade "pip==26.1.2" "setuptools==83.0.0"
+python -m pip install --upgrade "pip==26.2" "setuptools==83.0.0"
 python -m pip install -e ".[dev]"
 pytest
 ruff check .
