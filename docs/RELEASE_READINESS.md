@@ -4,6 +4,8 @@
 
 OmniFlow remains controlled alpha. A merge, successful CI run, signed preflight, release publication, and adopter acceptance are different states. No checklist entry is satisfied merely by this document existing.
 
+This hardening branch prepares version `0.5.0a1`; no release tag, publication, or production acceptance is implied. Safer failure defaults and artifact manifest v2 need adopter review before upgrading from `0.4.0`.
+
 | Capability | Candidate policy | Acceptance needed before required production gating |
 | --- | --- | --- |
 | Model/content validation, trusted discovery, semantic diff/lint, downstream contracts, public reports | Core candidate scope | Exact-SHA CI and release evidence plus adopter-specific valid/invalid checks, permissions, privacy, and recovery |
