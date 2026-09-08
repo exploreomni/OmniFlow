@@ -6,6 +6,7 @@ from .exceptions import OmniAPIError
 from .omni_client import OmniClient
 from .security import redact
 from .timestamps import utc_now_iso
+from .validators.content import content_documents
 
 
 def generate_downstream_dependencies(
@@ -32,6 +33,7 @@ def generate_downstream_dependencies(
                 user_id=user_id,
                 include_personal_folders=include_personal_folders,
             )
+            search_dependencies = _dependencies_from_payload(payload, search)
         except OmniAPIError as exc:
             mode = "targeted_partial" if dependencies else "targeted_unavailable"
             coverage_gaps.append(
@@ -42,7 +44,7 @@ def generate_downstream_dependencies(
                 }
             )
             continue
-        for dependency in _dependencies_from_payload(payload, search):
+        for dependency in search_dependencies:
             identity = (
                 dependency.get("content_id"),
                 dependency.get("query_id"),
@@ -52,6 +54,8 @@ def generate_downstream_dependencies(
                 continue
             seen.add(identity)
             dependencies.append(dependency)
+    if coverage_gaps:
+        mode = "targeted_partial" if dependencies else "targeted_unavailable"
     return {
         "version": 1,
         "model_id": model_id,
@@ -110,12 +114,10 @@ def _append_search(searches: list[dict[str, str]], seen: set[tuple[str, str]], f
 
 
 def _dependencies_from_payload(payload: Any, search: dict[str, str]) -> list[dict[str, Any]]:
-    if not isinstance(payload, dict) or not isinstance(payload.get("content"), list):
-        return []
     dependencies = []
-    for document in payload["content"]:
-        if not isinstance(document, dict):
-            continue
+    for document in content_documents(payload):
+        if not any(document.get(key) for key in ("document_id", "id", "identifier")):
+            raise OmniAPIError("Content Validator response is missing a referenced document identity")
         base = {
             "content_id": document.get("document_id") or document.get("id"),
             "content_identifier": document.get("identifier"),

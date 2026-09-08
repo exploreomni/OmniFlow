@@ -4,6 +4,8 @@ OmniFlow is an open-source, local-first CI/CD companion for Omni semantic-layer 
 
 > **Status:** Controlled alpha. The complete Omni-created PR, validation, evidence, merge, and Omni synchronization path has passed on a maintainer-controlled non-production model. The post-deployment dbt schema-refresh stage has automated contract coverage but still requires its first live non-production connection test. Each adopter must complete the live installation gate against its own model, permissions, dbt deployment, Git settings, GitHub plan, and branch protections before making OmniFlow a required check.
 
+Historical pilot success does not qualify a new commit. Core validation is the initial release candidate scope; dbt impact, sync/hold, and AI eval require separate acceptance and remain opt-in. AI repair remains unsupported. Use the [release and adopter acceptance checklist](docs/RELEASE_READINESS.md) to record the exact candidate and outstanding gates.
+
 ## Quick Start
 
 The complete walkthrough is in [Install OmniFlow In A GitHub Repository](docs/INSTALLATION.md). The short path is:
@@ -85,29 +87,22 @@ Developer adds a new column in dbt + adds the field in Omni (same PR)
   → Merge → dbt deploys → omniflow dbt sync → Omni refreshes
 ```
 
-**Breaking change — OmniFlow sequences automatically:**
+**Breaking change — preserve compatibility through every phase:**
 
 ```text
-Developer renames customer_id → customer_key in dbt AND updates the Omni view (same PR)
-  → OmniFlow detects: breaking Omni change + dbt source change in the same PR
-  → BLOCKS merge: "Split required for safe deployment"
-
-Developer splits into two PRs:
-
-PR 1 (dbt only): renames the column in dbt
-  → Passes → merges → dbt deploys → warehouse now has customer_key
-  → omniflow dbt sync → Omni refreshes → sync SHA recorded
-
-PR 2 (Omni only): updates the view to reference customer_key
-  → Hold clears (no pending dbt changes)
-  → OmniFlow validates contracts: no content references the old name
-  → Auto-merge completes → Omni promotes safely
+1. Expand: add customer_key while retaining customer_id and compatible values.
+   → Review → dbt deploys → refresh and validation succeed → sync SHA recorded.
+2. Migrate: update Omni definitions and consumers to customer_key.
+   → Explicitly revalidate the current PR head against durable sync evidence.
+   → Fresh checks and independent review → manual merge.
+3. Contract: remove customer_id only after proving no consumer requires it.
+   → Review downstream evidence → deploy → verify and record recovery evidence.
 ```
 
 **Breaking change in separate PRs, wrong order:**
 
 ```text
-PR A (dbt): renames customer_id → customer_key (merges, but dbt hasn't deployed yet)
+PR A (dbt): adds customer_key alongside customer_id (merges, but hasn't deployed yet)
 PR B (Omni): updates the view to reference customer_key
 
   → OmniFlow validates PR B:
@@ -117,11 +112,12 @@ PR B (Omni): updates the view to reference customer_key
     → PR B is labeled omniflow/awaiting-deploy
 
   → dbt deploys → omniflow dbt sync → sync SHA recorded
-  → Workflow removes the label → enables auto-merge
-  → GitHub re-runs OmniFlow on PR B:
+  → Maintainer explicitly dispatches current-head revalidation for PR B:
     - No pending dbt changes → hold clears
     - Contract validation: no dashboards reference old name
-    → PASSES → PR B merges → Omni promotes against a ready warehouse
+    → Verify head and sync evidence did not change during validation
+    → Attach successful readiness check to that head and clear configured label
+    → Independent review and manual merge → Omni promotes against a ready warehouse
 ```
 
 ### Scenario 4: Two dbt-Only PRs With Breaking Changes
@@ -208,7 +204,7 @@ Copy `.github/workflow-examples/omniflow.yml` into the customer repository as `.
 The action installs from that pinned checkout during alpha testing:
 
 ```yaml
-- uses: atx-omni/OmniFlow@<pinned-commit-sha>
+- uses: exploreomni/OmniFlow@<pinned-commit-sha>
   with:
     omni-api-key: ${{ secrets.OMNI_API_KEY }}
 ```

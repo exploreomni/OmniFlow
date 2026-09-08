@@ -108,7 +108,7 @@ Use [omniflow.yml](../.github/workflow-examples/omniflow.yml). It passes the rec
 ```yaml
 - name: Run OmniFlow
   id: omniflow
-  uses: atx-omni/OmniFlow@<pinned-commit-sha>
+  uses: exploreomni/OmniFlow@<pinned-commit-sha>
   with:
     config: .omniflow.yml
     omni-api-key: ${{ secrets.OMNI_API_KEY }}

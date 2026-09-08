@@ -1319,6 +1319,12 @@ def cmd_repair_ai(args: argparse.Namespace) -> int:
         if not config.security.retain_restricted_artifacts:
             _purge_restricted_path(restricted_dir(output_dir))
 
+        write_artifact_manifest(
+            output_dir=output_dir,
+            restricted_artifacts_enabled=config.security.retain_restricted_artifacts,
+            redaction_level=config.security.redaction_level,
+        )
+
 
 def _client_and_branch(config):
     context = ModelContext(

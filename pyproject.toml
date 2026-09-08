@@ -42,9 +42,9 @@ dev = [
 omniflow = "omniflow.cli:main"
 
 [project.urls]
-Documentation = "https://github.com/atx-omni/omniflow#readme"
-Issues = "https://github.com/atx-omni/omniflow/issues"
-Repository = "https://github.com/atx-omni/omniflow"
+Documentation = "https://github.com/exploreomni/OmniFlow#readme"
+Issues = "https://github.com/exploreomni/OmniFlow/issues"
+Repository = "https://github.com/exploreomni/OmniFlow"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

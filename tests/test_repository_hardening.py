@@ -10,6 +10,33 @@ ROOT = Path(__file__).resolve().parents[1]
 PINNED_USE_RE = re.compile(r"^[^@\s]+@[0-9a-f]{40}$")
 
 
+def locked_requirements(text: str) -> list[str]:
+    """Validate each logical pip requirement, not a global count of hash lines."""
+    requirements = []
+    pending = ""
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        continued = line.endswith("\\")
+        pending += " " + (line[:-1].strip() if continued else line)
+        if continued:
+            continue
+        entry, pending = pending.strip(), ""
+        if entry == "-r action-py311-linux-x86_64.txt":
+            continue  # The included runtime lock is validated separately.
+        if not re.fullmatch(
+            r"[A-Za-z0-9][A-Za-z0-9_.-]*==[A-Za-z0-9][A-Za-z0-9.!+_-]*"
+            r"(?:\s+--hash=sha256:[0-9a-f]{64})+",
+            entry,
+        ):
+            raise ValueError(f"Requirement must be exactly pinned with SHA-256 hashes: {entry}")
+        requirements.append(entry)
+    if pending or not requirements:
+        raise ValueError("Incomplete or empty dependency lock")
+    return requirements
+
+
 def nested_uses(value: Any) -> list[str]:
     if isinstance(value, dict):
         values = []
@@ -38,7 +65,7 @@ class RepositoryHardeningTests(unittest.TestCase):
         for path in workflow_paths:
             payload = yaml.safe_load(path.read_text(encoding="utf-8"))
             for use in nested_uses(payload):
-                if use == "atx-omni/OmniFlow@<pinned-commit-sha>":
+                if use == "exploreomni/OmniFlow@<pinned-commit-sha>":
                     continue
                 if use.startswith("./"):
                     continue
@@ -105,7 +132,9 @@ class RepositoryHardeningTests(unittest.TestCase):
         self.assertIn("workflow_dispatch:", text)
         self.assertIn("--require-hashes --only-binary=:all:", text)
         self.assertIn("requirements/release-py311-linux-x86_64.txt", text)
-        self.assertIn("compare/${GITHUB_SHA}...main", text)
+        self.assertIn("scripts/verify_release_candidate.py", text)
+        self.assertIn("release-evidence.json", text)
+        self.assertIn("--prerelease", text)
         self.assertIn("name: Signed release preflight", text)
         self.assertIn("github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'", text)
         self.assertIn("name: omniflow-signed-release-preflight-${{ github.sha }}", text)
@@ -195,10 +224,14 @@ class RepositoryHardeningTests(unittest.TestCase):
             "requirements/release-py311-linux-x86_64.txt",
         ):
             text = (ROOT / relative).read_text(encoding="utf-8")
-            requirements = [line for line in text.splitlines() if "==" in line and not line.lstrip().startswith("#")]
-            hashes = [line for line in text.splitlines() if "--hash=sha256:" in line]
-            self.assertTrue(requirements, msg=relative)
-            self.assertEqual(len(requirements), len(hashes), msg=relative)
+            self.assertTrue(locked_requirements(text), msg=relative)
+
+    def test_lock_accepts_multiple_hashes_but_never_masks_an_unhashed_requirement(self):
+        hashed = f"one==1.0 --hash=sha256:{'a' * 64} --hash=sha256:{'b' * 64}"
+        self.assertEqual(len(locked_requirements(hashed)), 1)
+        for invalid in (f"{hashed}\ntwo==2.0", "one>=1.0", "one==1.0 --hash=sha256:invalid"):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                locked_requirements(invalid)
 
     def test_security_critical_files_have_codeowners(self):
         text = (ROOT / ".github/CODEOWNERS").read_text(encoding="utf-8")
