@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from ..exceptions import ConfigError
+
 
 @dataclass
 class SemanticGraph:
@@ -21,6 +23,8 @@ def build_graph(files: dict[str, Any]) -> SemanticGraph:
         kind = _infer_kind(file_path, payload)
         if kind == "model":
             if isinstance(payload, dict):
+                if graph.model:
+                    raise ConfigError("Ambiguous semantic model identity across multiple model files")
                 graph.model.update({"file": file_path, **payload})
                 _add_inline_topics(graph, file_path, payload)
             continue
@@ -31,9 +35,11 @@ def build_graph(files: dict[str, Any]) -> SemanticGraph:
             continue
         name = _name(file_path, payload)
         if kind == "topic":
+            _require_unique(graph.topics, name, kind="topic")
             graph.topics[name] = {"file": file_path, **payload}
             _add_relationships(graph, file_path, payload, scope=f"topic:{name}")
         else:
+            _require_unique(graph.views, name, kind="view")
             graph.views[name] = {"file": file_path, **payload}
             _add_fields(graph, file_path, name, payload)
             _add_relationships(graph, file_path, payload, scope=f"view:{name}")
@@ -50,7 +56,12 @@ def _infer_kind(file_path: str, payload: Any) -> str:
         return "topic"
     if lower.endswith(".composite_topic") or ".composite_topic." in lower:
         return "topic"
-    if stem == "relationships" or "relationship" in lower or isinstance(payload, list):
+    if (
+        stem == "relationships"
+        or stem.endswith(".relationships")
+        or lower.endswith(".relationships")
+        or isinstance(payload, list)
+    ):
         return "relationship"
     if isinstance(payload, dict) and (payload.get("type") == "topic" or "base_view" in payload):
         return "topic"
@@ -61,7 +72,21 @@ def _name(file_path: str, payload: dict[str, Any]) -> str:
     value = payload.get("name") or payload.get("view") or payload.get("topic")
     if isinstance(value, str) and value.strip():
         return value.strip()
-    return file_path.rsplit("/", 1)[-1].split(".", 1)[0]
+    name = file_path.rsplit("/", 1)[-1]
+    for suffix in (".yaml", ".yml"):
+        if name.lower().endswith(suffix):
+            name = name[: -len(suffix)]
+            break
+    for suffix in (".view", ".topic", ".composite_topic"):
+        if name.lower().endswith(suffix):
+            name = name[: -len(suffix)]
+            break
+    return name
+
+
+def _require_unique(items: dict[str, Any], name: str, *, kind: str) -> None:
+    if name in items:
+        raise ConfigError(f"Ambiguous semantic {kind} identity; duplicate definitions cannot be compared safely")
 
 
 def _iter_field_groups(payload: dict[str, Any]) -> list[dict[str, Any]]:
@@ -71,9 +96,13 @@ def _iter_field_groups(payload: dict[str, Any]) -> list[dict[str, Any]]:
         if isinstance(value, dict):
             groups.append(value)
         elif isinstance(value, list):
-            groups.append(
-                {str(item.get("name")): item for item in value if isinstance(item, dict) and item.get("name")}
-            )
+            group = {}
+            for item in value:
+                if isinstance(item, dict) and item.get("name"):
+                    name = str(item["name"])
+                    _require_unique(group, name, kind="field")
+                    group[name] = item
+            groups.append(group)
     return groups
 
 
@@ -83,6 +112,7 @@ def _add_fields(graph: SemanticGraph, file_path: str, view_name: str, payload: d
             if not isinstance(definition, dict):
                 continue
             key = f"{view_name}.{field_name}"
+            _require_unique(graph.fields, key, kind="field")
             graph.fields[key] = {"file": file_path, "view": view_name, "name": field_name, **definition}
 
 
@@ -147,4 +177,5 @@ def _add_inline_topics(graph: SemanticGraph, file_path: str, payload: dict[str, 
         return
     for name, topic in items:
         if isinstance(topic, dict):
+            _require_unique(graph.topics, str(name), kind="topic")
             graph.topics[str(name)] = {"file": file_path, "name": str(name), **topic}

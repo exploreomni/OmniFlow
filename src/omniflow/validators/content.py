@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 from typing import Any, Iterable
 
+from ..exceptions import OmniAPIError
 from ..omni_client import OmniClient
 from ..security import redact, secure_write_text
 from ..timestamps import utc_now_iso
@@ -46,14 +47,42 @@ def extract_owner(record: dict[str, Any]) -> dict[str, str] | None:
     return normalized or None
 
 
+def _issue_list(value: Any) -> list[Any]:
+    if not isinstance(value, list) or any(not isinstance(item, (str, dict)) for item in value):
+        raise OmniAPIError("Content Validator response contains an invalid issue list")
+    if any(isinstance(item, dict) and "message" in item and not isinstance(item["message"], str) for item in value):
+        raise OmniAPIError("Content Validator response contains an invalid issue message")
+    return value
+
+
+def content_documents(payload: Any) -> list[dict[str, Any]]:
+    """Validate evidence-bearing members before filtering or interpreting emptiness."""
+    if not isinstance(payload, dict) or not isinstance(payload.get("content"), list):
+        raise OmniAPIError("Content Validator response has an unexpected content envelope")
+    for document in payload["content"]:
+        if not isinstance(document, dict):
+            raise OmniAPIError("Content Validator response contains an invalid document")
+        for key in ("document_id", "identifier"):
+            if key in document and (not isinstance(document[key], str) or not document[key].strip()):
+                raise OmniAPIError("Content Validator response contains an invalid document identity")
+        if "dashboard_filter_issues" in document:
+            _issue_list(document["dashboard_filter_issues"])
+        if "queries_and_issues" in document:
+            queries = document["queries_and_issues"]
+            if not isinstance(queries, list) or any(not isinstance(query, dict) for query in queries):
+                raise OmniAPIError("Content Validator response contains an invalid query list")
+            for query in queries:
+                for key in ("query_presentation_id", "query_id", "query_id_map_key"):
+                    if key in query and (not isinstance(query[key], str) or not query[key].strip()):
+                        raise OmniAPIError("Content Validator response contains an invalid query identity")
+                if "issues" in query:
+                    _issue_list(query["issues"])
+    return payload["content"]
+
+
 def collect_content_issues(payload: dict[str, Any]) -> list[Any]:
     issues: list[Any] = []
-    content = payload.get("content")
-    if not isinstance(content, list):
-        return issues
-    for document in content:
-        if not isinstance(document, dict):
-            continue
+    for document in content_documents(payload):
         doc_context = {
             "document_id": document.get("document_id"),
             "document_identifier": document.get("identifier"),
@@ -101,20 +130,16 @@ def collect_content_issues(payload: dict[str, Any]) -> list[Any]:
 
 def extract_issues(payload: Any) -> list[Any]:
     if isinstance(payload, list):
-        return payload
+        return _issue_list(payload)
     if not isinstance(payload, dict):
-        return []
-    for key in ("issues", "validation_issues", "errors"):
-        value = payload.get(key)
-        if isinstance(value, list):
-            return value
+        raise OmniAPIError("Content Validator response has an unexpected envelope")
     if "content" in payload:
         return collect_content_issues(payload)
-    for key in ("documents", "items", "results"):
-        value = payload.get(key)
-        if isinstance(value, list):
-            return value
-    return []
+    # Retain explicitly supported legacy issue envelopes, including valid empty lists.
+    for key in ("issues", "validation_issues", "errors", "documents", "items", "results"):
+        if key in payload:
+            return _issue_list(payload[key])
+    raise OmniAPIError("Content Validator response has an unexpected envelope")
 
 
 def issue_identity(issue: Any) -> str:
@@ -195,9 +220,12 @@ def filter_validator_payload(payload: Any, allowed_identifiers: set[str]) -> Any
     if not isinstance(payload, dict) or not isinstance(payload.get("content"), list):
         return payload
     filtered = dict(payload)
+    documents = content_documents(payload)
+    if any(not isinstance(document.get("identifier"), str) for document in documents):
+        raise OmniAPIError("Content Validator response is missing an identity required for label filtering")
     filtered["content"] = [
         document
-        for document in payload["content"]
+        for document in documents
         if isinstance(document, dict)
         and isinstance(document.get("identifier"), str)
         and document["identifier"] in allowed_identifiers
@@ -352,6 +380,7 @@ def _prepare_validator_payload(
     labels: list[str],
     records_by_identifier: dict[str, dict[str, Any]],
 ) -> Any:
+    extract_issues(payload)
     if not isinstance(payload, dict) or not isinstance(payload.get("content"), list):
         return payload
     if labels:

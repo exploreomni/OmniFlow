@@ -13,7 +13,7 @@ from .exceptions import SecurityPolicyError
 SECRET_KEY_RE = re.compile(r"(api[_-]?key|token|secret|password)", re.IGNORECASE)
 SECRET_VALUE_RE = re.compile(
     r"(Bearer\s+)[A-Za-z0-9._~+/=-]+|"
-    r"(OMNI_API_KEY=)[^\s]+|"
+    r"((?:OMNI_API_KEY|OMNIFLOW_SYNC_API_KEY|OMNIFLOW_REPAIR_API_KEY)=)[^\s]+|"
     r"([?&](?:api[_-]?key|token|secret|password)=)[^&\s]+",
     re.IGNORECASE,
 )
@@ -22,6 +22,22 @@ URL_VALUE_RE = re.compile(r"https?://[^\s<>\]\[)('`\"]+", re.IGNORECASE)
 SAFE_PATH_SEGMENT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 SAFE_BRANCH_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,254}$")
 RAW_KEYS = {"raw", "raw_issue", "raw_payload", "raw_response", "payload"}
+ACTIVE_CREDENTIAL_ENV_VARS = ("OMNI_API_KEY", "OMNIFLOW_SYNC_API_KEY", "OMNIFLOW_REPAIR_API_KEY")
+MAX_PUBLIC_DIAGNOSTIC_CHARS = 2000
+SENSITIVE_PUBLIC_KEYS = {
+    "prompt",
+    "prompt_text",
+    "answer",
+    "answer_text",
+    "response_text",
+    "error_reason",
+    "branch_error",
+    "main_error",
+    "conversation_id",
+    "branch_conversation_id",
+    "query_results",
+    "result_rows",
+}
 STANDARD_PUBLIC_REDACT_KEYS = {
     "email",
     "owner_email",
@@ -42,6 +58,7 @@ STRICT_PUBLIC_REDACT_KEYS = STANDARD_PUBLIC_REDACT_KEYS | {
     "query_name",
     "folder",
     "labels",
+    "prompt_set_label",
 }
 STRICT_TEXT_REDACT_KEYS = {"message", "summary"}
 
@@ -83,10 +100,12 @@ def redact(value: Any) -> Any:
     if isinstance(value, list):
         return [redact(item) for item in value]
     if isinstance(value, str):
-        redacted = SECRET_VALUE_RE.sub(lambda match: _redact_match(match), value)
-        secret = os.getenv("OMNI_API_KEY")
-        if secret and len(secret) >= 4:
+        redacted = value
+        # Longest first prevents overlapping token values from leaving a suffix behind.
+        secrets = {os.environ[name] for name in ACTIVE_CREDENTIAL_ENV_VARS if os.getenv(name)}
+        for secret in sorted(secrets, key=len, reverse=True):
             redacted = redacted.replace(secret, "[REDACTED]")
+        redacted = SECRET_VALUE_RE.sub(lambda match: _redact_match(match), redacted)
         return EMAIL_VALUE_RE.sub("[REDACTED_EMAIL]", URL_VALUE_RE.sub("[REDACTED_URL]", redacted))
     return value
 
@@ -110,6 +129,7 @@ def _public_safe(value: Any, *, strict: bool) -> Any:
                 continue
             if (
                 contains_secret_key(key)
+                or normalized in SENSITIVE_PUBLIC_KEYS
                 or normalized in redact_keys
                 or normalized.endswith("_url")
                 or normalized.endswith("_email")
@@ -117,6 +137,9 @@ def _public_safe(value: Any, *, strict: bool) -> Any:
                 safe[key] = "[REDACTED]"
             else:
                 safe[key] = _public_safe(item, strict=strict)
+                if normalized in STRICT_TEXT_REDACT_KEYS and isinstance(safe[key], str):
+                    if len(safe[key]) > MAX_PUBLIC_DIAGNOSTIC_CHARS:
+                        safe[key] = safe[key][: MAX_PUBLIC_DIAGNOSTIC_CHARS - 1] + "…"
         return safe
     if isinstance(value, list):
         return [_public_safe(item, strict=strict) for item in value]
