@@ -6,7 +6,7 @@ OmniFlow is currently in controlled alpha and has no stable package release. Ins
 
 ## Reporting A Vulnerability
 
-Do not open a public issue for a suspected vulnerability. Use [GitHub private vulnerability reporting](https://github.com/atx-omni/OmniFlow/security/advisories/new). Include the affected commit or version, reproduction steps, impact, and any suggested mitigation.
+Do not open a public issue for a suspected vulnerability. Use [GitHub private vulnerability reporting](https://github.com/exploreomni/OmniFlow/security/advisories/new). Include the affected commit or version, reproduction steps, impact, and any suggested mitigation.
 
 Maintainers will review complete reports on a best-effort basis. No service-level commitment is implied while the project remains in alpha.
 

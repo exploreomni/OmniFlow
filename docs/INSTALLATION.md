@@ -64,7 +64,7 @@ This file contains routing metadata, not credentials. Commit it to the protected
 The action reference should look like this:
 
 ```yaml
-uses: atx-omni/OmniFlow@0123456789abcdef0123456789abcdef01234567
+uses: exploreomni/OmniFlow@0123456789abcdef0123456789abcdef01234567
 ```
 
 Do not use `@main`, a floating tag, or an unpinned GitHub branch. OmniFlow does not currently publish an official PyPI package. The supported action installs from the pinned checkout with a hash-locked Python 3.11 Linux dependency set.

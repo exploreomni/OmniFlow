@@ -65,7 +65,7 @@ class RepositoryHardeningTests(unittest.TestCase):
         for path in workflow_paths:
             payload = yaml.safe_load(path.read_text(encoding="utf-8"))
             for use in nested_uses(payload):
-                if use == "atx-omni/OmniFlow@<pinned-commit-sha>":
+                if use == "exploreomni/OmniFlow@<pinned-commit-sha>":
                     continue
                 if use.startswith("./"):
                     continue

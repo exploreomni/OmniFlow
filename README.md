@@ -204,7 +204,7 @@ Copy `.github/workflow-examples/omniflow.yml` into the customer repository as `.
 The action installs from that pinned checkout during alpha testing:
 
 ```yaml
-- uses: atx-omni/OmniFlow@<pinned-commit-sha>
+- uses: exploreomni/OmniFlow@<pinned-commit-sha>
   with:
     omni-api-key: ${{ secrets.OMNI_API_KEY }}
 ```
