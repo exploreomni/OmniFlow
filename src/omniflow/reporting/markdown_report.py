@@ -254,7 +254,7 @@ def _ai_eval_lines(summaries: list[dict[str, Any]], *, decision: str) -> list[st
         delta = entry.get("accuracy_delta_pts")
         delta_str = "n/a" if delta is None else f"{delta:+.1f} pts"
         lines.append(
-            f"- `{_safe_code(entry.get('prompt_set_label', ''))}`: accuracy "
+            f"- `{_safe_code(entry.get('prompt_set_id', ''))}`: accuracy "
             f"`{_pct(entry.get('main_accuracy'))}` → `{_pct(entry.get('branch_accuracy'))}` ({delta_str}); "
             f"regressed `{entry.get('regressed_count', 0)}`, improved `{entry.get('improved_count', 0)}`."
         )

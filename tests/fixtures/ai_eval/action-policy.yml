@@ -1,0 +1,22 @@
+omni:
+  base_url: http://127.0.0.1:18765
+  model_id: eval-smoke-model
+  branch_id: eval-smoke-branch
+checks:
+  content_validation:
+    enabled: false
+  model_validation:
+    enabled: false
+  semantic_lint:
+    enabled: false
+  ai_eval:
+    enabled: true
+    scoring_grace_seconds: 0
+    prompt_sets:
+      - id: eval-smoke-set
+contracts:
+  enabled: false
+security:
+  redaction_level: strict
+  max_report_samples: 0
+  retain_restricted_artifacts: false

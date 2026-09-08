@@ -187,7 +187,7 @@ The check reuses `deployment.breaking_change_hold.dbt_paths` to identify dbt sou
 
 ## AI Eval
 
-This optional check runs configured Omni AI eval prompt sets against `main` and against the pull request's Omni branch, then fails on any prompt that regressed. Unlike every other check in this document, it asks Omni AI to answer real prompts rather than performing deterministic YAML validation, so it is disabled by default. Read [AI Eval](AI_EVAL.md) in full before enabling it.
+This optional controlled-alpha check compares configured Omni prompt sets against `main` and the pull request's Omni branch. It supports binary scores only (`1` pass, `0` fail); unsupported numeric scores and incomplete comparisons always fail operationally. It starts agentic jobs and stays disabled pending tenant acceptance. Read [AI Eval](AI_EVAL.md) in full before enabling it.
 
 ```yaml
 checks:
@@ -205,13 +205,13 @@ checks:
 | Setting | Default | Allowed range or behavior |
 | --- | --- | --- |
 | `enabled` | `false` | Must be enabled in trusted base-branch policy. |
-| `prompt_sets` | `[]` | `{id, label}` entries for existing Omni AI eval prompt sets, maximum 20. |
+| `prompt_sets` | `[]` | `{id, label, model_id}` entries for existing sets, maximum 20. Only `id` is required; optional model routing is verified against Omni. Labels stay restricted. |
 | `fail_on_regression` | `true` | `true` blocks the merge; `false` reports regressions as warnings only. |
 | `poll_interval_seconds` | `10` | Bounded 2-30 seconds. |
 | `timeout_seconds` | `900` | Bounded 30-3600 seconds. |
 | `scoring_grace_seconds` | `180` | Bounded 0-600 seconds. |
 
-Reuses `OMNI_API_KEY`; no dedicated token is required. See [AI Eval](AI_EVAL.md).
+Uses `OMNI_API_KEY`; verify eval permissions and service-identity capacity before enabling. Public samples contain opaque prompt IDs only, and sample limits never change regression gating. Operational failures cannot be downgraded by `fail_on_regression`. See [AI Eval](AI_EVAL.md).
 
 ## Semantic Lint
 

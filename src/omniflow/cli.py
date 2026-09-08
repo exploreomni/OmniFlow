@@ -690,6 +690,7 @@ def _run_context(
             timeout_seconds=config.ai_eval.timeout_seconds,
             scoring_grace_seconds=config.ai_eval.scoring_grace_seconds,
             max_samples=config.security.max_report_samples,
+            record_runs=lambda journal: write_json_report(output_dir / "ai-eval-runs.json", journal),
         )
         # Full per-prompt detail (cost breakdown, conversation IDs, timing) carries
         # customer prompt/answer content and stays restricted; only the bounded

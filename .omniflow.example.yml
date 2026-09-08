@@ -54,6 +54,8 @@ checks:
   # to answer real prompts rather than performing deterministic YAML
   # validation, so it stays disabled by default. Read docs/AI_EVAL.md before
   # enabling it.
+  # Binary scoring only; unsupported scores and incomplete results always block.
+  # Public sampling limits never change the gate. Qualify the tenant before use.
   # ai_eval:
   #   enabled: true
   #   fail_on_regression: true

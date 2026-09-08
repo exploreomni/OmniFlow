@@ -37,7 +37,7 @@ The workflow always preserves `report.sarif` in the evidence artifact. Repositor
 - Optional [AI eval](docs/AI_EVAL.md) regression check that compares Omni AI accuracy between `main` and the branch
 - JSON, Markdown, SARIF, JUnit, and evidence artifacts
 
-Core OmniFlow validation does not execute warehouse queries, store query results, write model YAML, or merge pull requests. An [AI Repair development scaffold](docs/AI_REPAIR.md) is present but is disabled, unreleased, and not supported for customer installation because Omni does not currently document a public Modeling Agent mutation API. The optional [AI eval](docs/AI_EVAL.md) check is disabled by default for a different reason: it asks Omni AI to answer real prompts against the branch, which adds real wall-clock time and depends on prompt sets already curated in Omni, rather than being a deterministic YAML check.
+Core OmniFlow validation does not execute warehouse queries, store query results, write model YAML, or merge pull requests. An [AI Repair development scaffold](docs/AI_REPAIR.md) is present but is disabled, unreleased, and not supported for customer installation because Omni does not currently document a public Modeling Agent mutation API. Optional [AI eval](docs/AI_EVAL.md) starts agentic jobs for curated prompt sets and stays disabled pending non-production acceptance. Its narrow binary-score policy blocks unsupported scores and incomplete results; permissions, service capacity, query behavior, and costs must be confirmed in the selected tenant before enablement.
 
 ## How OmniFlow Works — By Example
 

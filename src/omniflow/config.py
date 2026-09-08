@@ -62,7 +62,7 @@ AI_EVAL_KEYS = {
     "timeout_seconds",
     "scoring_grace_seconds",
 }
-PROMPT_SET_KEYS = {"id", "label"}
+PROMPT_SET_KEYS = {"id", "label", "model_id"}
 MAX_PROMPT_SETS = 20
 REPORTING_KEYS = {"formats", "output_dir"}
 SECURITY_KEYS = {
@@ -768,7 +768,13 @@ def _prompt_sets(value: Any) -> list[dict[str, str]]:
             raise ConfigError(
                 "checks.ai_eval.prompt_sets label must be a non-empty string no longer than 200 characters"
             )
-        prompt_sets.append({"id": prompt_set_id, "label": label.strip() if label else prompt_set_id})
+        entry = {"id": prompt_set_id, "label": label.strip() if label else prompt_set_id}
+        model_id = item.get("model_id")
+        if model_id is not None:
+            if not isinstance(model_id, str) or not model_id.strip() or len(model_id.strip()) > 128:
+                raise ConfigError("checks.ai_eval.prompt_sets model_id must be a non-empty string of at most 128 characters")
+            entry["model_id"] = model_id.strip()
+        prompt_sets.append(entry)
     return prompt_sets
 
 
