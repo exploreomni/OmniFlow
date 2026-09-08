@@ -115,12 +115,6 @@ jobs:
         id: dbt
         continue-on-error: true
         uses: ./.omniflow-tooling
-        env:
-          GITHUB_EVENT_NAME: pull_request
-          GITHUB_EVENT_PATH: ${{ steps.fixture.outputs.event_path }}
-          GITHUB_BASE_REF: main
-          GITHUB_HEAD_REF: fixture-head
-          GITHUB_SHA: ${{ steps.fixture.outputs.base_sha }}
       - name: Verify expected failure and immutable-data boundary
         env:
           ACTION_OUTCOME: ${{ steps.dbt.outcome }}

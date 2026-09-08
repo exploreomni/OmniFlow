@@ -11,7 +11,10 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shlex
 import subprocess
+import sys
+import tempfile
 from pathlib import Path
 
 
@@ -55,7 +58,19 @@ def prepare(root: Path, event_path: Path):
         "head": {"sha": head, "ref": "fixture-head", "repo": {"full_name": repository}},
     }}
     event_path.write_text(json.dumps(event))
-    (root / ".fixture-state.json").write_text(json.dumps({"base": base, "head": head}))
+    (root / ".fixture-state.json").write_text(json.dumps({"base": base, "head": head, "event": str(event_path)}))
+    # GitHub reserves GITHUB_* variables: step env is not a reliable event
+    # override. This test-only launcher sets synthetic context inside the CLI
+    # process; the real composite steps and installed package remain unchanged.
+    if os.getenv("GITHUB_PATH"):
+        launcher_dir = Path(tempfile.mkdtemp(prefix="omniflow-dbt-fixture-", dir=os.environ["RUNNER_TEMP"]))
+        launcher = launcher_dir / "omniflow"
+        launcher.write_text(
+            f"#!/bin/sh\nexec {shlex.quote(sys.executable)} {shlex.quote(str(Path(__file__).resolve()))} invoke \"$@\"\n"
+        )
+        launcher.chmod(0o700)
+        with Path(os.environ["GITHUB_PATH"]).open("a") as stream:
+            stream.write(str(launcher_dir) + "\n")
     output = os.getenv("GITHUB_OUTPUT")
     values = f"base_sha={base}\nhead_sha={head}\nevent_path={event_path}\n"
     if output:
@@ -79,6 +94,15 @@ def verify(root: Path):
 
 
 if __name__ == "__main__":
+    if len(sys.argv) > 1 and sys.argv[1] == "invoke":
+        state = json.loads((Path.cwd() / ".fixture-state.json").read_text())
+        os.environ.update({
+            "GITHUB_EVENT_NAME": "pull_request", "GITHUB_EVENT_PATH": state["event"],
+            "GITHUB_BASE_REF": "main", "GITHUB_HEAD_REF": "fixture-head", "GITHUB_SHA": state["base"],
+        })
+        from omniflow.cli import main
+
+        raise SystemExit(main(sys.argv[2:]))
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("operation", choices=("prepare", "verify"))
     parser.add_argument("--workspace", type=Path, default=Path.cwd())

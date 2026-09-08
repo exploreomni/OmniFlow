@@ -190,6 +190,12 @@ class ManifestTests(unittest.TestCase):
 
 
 class CrossReferenceTests(unittest.TestCase):
+    def setUp(self):
+        # These are local-file fixtures, not the CI runner's enclosing real PR.
+        context = mock.patch.dict(os.environ, {"GITHUB_EVENT_NAME": ""})
+        context.start()
+        self.addCleanup(context.stop)
+
     def _repo(self, directory, *, views=None, manifest_text=None):
         root = Path(directory)
         model_dir = root / "omni/my_model/views"
