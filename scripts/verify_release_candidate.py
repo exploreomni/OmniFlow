@@ -12,6 +12,7 @@ REQUIRED_JOBS = {
     "dependency-scan.yml": {"pip-audit"},
     "actions-security.yml": {"zizmor"},
     "sast.yml": {"codeql"},
+    "secret-scan.yml": {"gitleaks"},
 }
 
 

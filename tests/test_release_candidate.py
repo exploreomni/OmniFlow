@@ -26,7 +26,7 @@ def evidence(*, main=SHA, conclusion="success", missing_job=False, other_sha=Fal
 
 
 def test_release_accepts_only_exact_main_with_all_required_jobs():
-    assert len(release.verify("example/repo", SHA, evidence())) == 4
+    assert len(release.verify("example/repo", SHA, evidence())) == 5
 
 
 @pytest.mark.parametrize("kwargs", [
