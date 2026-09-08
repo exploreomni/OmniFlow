@@ -386,7 +386,7 @@ Exit codes are `0` success, `1` validation failure, `2` configuration error, `3`
 ```bash
 python3.11 -m venv .venv
 . .venv/bin/activate
-python -m pip install --upgrade "pip==26.1.2" "setuptools==83.0.0"
+python -m pip install --upgrade "pip==26.2" "setuptools==83.0.0"
 python -m pip install -e ".[dev]"
 pytest --cov=omniflow
 ruff check .

@@ -32,7 +32,7 @@ OmniFlow uses four evidence layers. A green result in one layer must not be pres
 ```bash
 python3.11 -m venv .venv
 . .venv/bin/activate
-python -m pip install --upgrade "pip==26.1.2" "setuptools==83.0.0"
+python -m pip install --upgrade "pip==26.2" "setuptools==83.0.0"
 python -m pip install -e ".[dev]"
 pytest --cov=omniflow
 ruff check .
