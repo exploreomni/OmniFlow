@@ -34,7 +34,7 @@ jobs:
           python-version: "3.11"
 
       - name: Run human-authorized AI repair
-        uses: atx-omni/OmniFlow@<pinned-commit-sha> # zizmor: ignore[unpinned-uses] customer must replace
+        uses: exploreomni/OmniFlow@<pinned-commit-sha> # zizmor: ignore[unpinned-uses] customer must replace
         with:
           mode: repair
           config: .omniflow.yml

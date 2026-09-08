@@ -31,7 +31,7 @@ jobs:
 
       - name: Install development dependencies
         run: |
-          python -m pip install --disable-pip-version-check --no-input --upgrade "pip==26.1.2" "setuptools==83.0.0"
+          python -m pip install --disable-pip-version-check --no-input --upgrade "pip==26.2" "setuptools==83.0.0"
           python -m pip install --disable-pip-version-check --no-input -e ".[dev]"
 
       - name: Lint
@@ -57,19 +57,24 @@ jobs:
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
         with:
-          python-version: "3.12"
+          python-version: "3.11"
 
       - name: Build and inspect distributions
         run: |
-          python -m pip install --disable-pip-version-check --no-input --upgrade "pip==26.1.2" "setuptools==83.0.0"
+          python -m pip install --disable-pip-version-check --no-input --upgrade "pip==26.2" "setuptools==83.0.0"
           python -m pip install --disable-pip-version-check --no-input ".[dev]"
-          python -m build
+          python -m venv /tmp/omniflow-release-build
+          /tmp/omniflow-release-build/bin/python -m pip install --require-hashes --only-binary=:all: --requirement requirements/release-py311-linux-x86_64.txt
+          /tmp/omniflow-release-build/bin/python -m pip check
+          /tmp/omniflow-release-build/bin/python -m build --no-isolation
           twine check dist/*
 
       - name: Verify wheel installation
         run: |
           python -m venv /tmp/omniflow-wheel-test
-          /tmp/omniflow-wheel-test/bin/python -m pip install --disable-pip-version-check --no-input dist/*.whl
+          /tmp/omniflow-wheel-test/bin/python -m pip install --require-hashes --only-binary=:all: --requirement requirements/action-py311-linux-x86_64.txt
+          PIP_NO_INDEX=1 /tmp/omniflow-wheel-test/bin/python -m pip install --no-deps dist/*.whl
+          /tmp/omniflow-wheel-test/bin/python -m pip check
           /tmp/omniflow-wheel-test/bin/omniflow --version
 
   action-install:

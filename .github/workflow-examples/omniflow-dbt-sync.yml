@@ -49,7 +49,7 @@ jobs:
           python-version: "3.11"
 
       - name: Synchronize dbt metadata into Omni
-        uses: atx-omni/OmniFlow@<pinned-commit-sha> # zizmor: ignore[unpinned-uses] customer must replace
+        uses: exploreomni/OmniFlow@<pinned-commit-sha> # zizmor: ignore[unpinned-uses] customer must replace
         with:
           mode: dbt-sync
           config: .omniflow.yml

@@ -11,7 +11,7 @@ OmniFlow uses four evidence layers. A green result in one layer must not be pres
 
 | Capability | Automated evidence | Required live evidence |
 | --- | --- | --- |
-| Omni and non-Omni PR routing | Unit tests and simulator | One dbt-only or application-only PR skips; one Omni PR runs |
+| Omni and non-Omni PR routing | Unit tests and simulator | One irrelevant PR skips; an Omni PR runs; dbt-only changes run the credential-free analyzer when enabled |
 | Trusted model discovery | Unit tests plus an orchestrated two-model simulator run for marker, push, fork, and ambiguity paths | Omni-created PR resolves the expected model and branch |
 | Model validation | Unit parser and policy tests | Valid and intentionally invalid branch checks |
 | Content validation | Unit extraction, labels, history, base comparison, and redaction tests | Tenant Content Validator completes with expected scope |
@@ -20,8 +20,8 @@ OmniFlow uses four evidence layers. A green result in one layer must not be pres
 | Downstream contracts | Unit and simulator reference tests | Targeted content searches complete without coverage gaps |
 | dbt exposures | Unit normalization, partial coverage, failure policy, and simulator tests | Base and branch calls return expected dashboard and dependency counts |
 | Post-deployment dbt sync | Unit API contract, polling, event, branch, timeout, action, and evidence tests | Controlled refresh completes after a real dbt deployment and Git side effects are understood |
-| Breaking change hold | Unit detection, config validation, orchestration, and simulator tests for held, unheld, and warn paths | A combined breaking change is blocked, the label is applied, and a successful dbt sync releases the held pull request |
-| dbt impact analysis | Unit manifest, SQL heuristic, cross-reference, config, and simulator tests for orphaned column, deleted model, additive, warn, and disabled paths | A real dbt column rename against a live Omni model is blocked, and the manifest and heuristic modes agree |
+| Breaking change hold | Unit detection, durable state, and current-head revalidation tests | A held PR stays blocked after sync until explicit fresh validation attaches success to its unchanged head; manual merge follows review |
+| dbt impact analysis | Unit manifest, bounded head acquisition, heuristic limits, relation change, and routing tests | A referenced column removal or relation move blocks; unsupported heuristic evidence remains explicitly incomplete |
 | AI eval (opt-in, binary scoring only) | Full CLI/artifact regressions for zero sampling, incomplete/unsupported results, model routing, privacy and cleanup; loopback enabled-Action CI fixture | Confirm tenant scoring/permission/quota contracts, a real controlled regression, cancellation/recovery, and final public/restricted artifacts before enabling |
 | JSON, Markdown, SARIF, and JUnit | Unit render tests and packaged action tests | Public artifact downloads open and contain only redacted evidence |
 | GitHub annotations and PR summary | Unit escaping tests | A controlled PR displays warnings or errors and updates one bot comment |
@@ -30,10 +30,12 @@ OmniFlow uses four evidence layers. A green result in one layer must not be pres
 
 ## Local Regression Gate
 
+During development, run the focused regression for each fix once, then run this broader gate once at an integration boundary. Re-run failures and directly affected tests after a correction; do not repeatedly execute every layer for unchanged code. Live checks use only an explicitly approved non-production target. Track unexecuted gates in [release readiness](RELEASE_READINESS.md).
+
 ```bash
 python3.11 -m venv .venv
 . .venv/bin/activate
-python -m pip install --upgrade "pip==26.1.2" "setuptools==83.0.0"
+python -m pip install --upgrade "pip==26.2" "setuptools==83.0.0"
 python -m pip install -e ".[dev]"
 pytest --cov=omniflow
 ruff check .

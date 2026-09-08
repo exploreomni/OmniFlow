@@ -17,6 +17,9 @@ jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    permissions:
+      contents: read
+      actions: read  # Verify completed main-push workflows for this exact candidate.
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -25,6 +28,13 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
         with:
           python-version: "3.11"
+
+      - name: Require successful checks on exact candidate SHA
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p dist
+          python scripts/verify_release_candidate.py > dist/release-evidence.json
 
       - name: Install release dependencies
         env:
@@ -41,8 +51,6 @@ jobs:
           PACKAGE_VERSION="$(python -c 'import omniflow; print(omniflow.__version__)')"
           if [ "$GITHUB_EVENT_NAME" = "push" ]; then
             test "$GITHUB_REF_NAME" = "v$PACKAGE_VERSION"
-            MAIN_STATUS="$(gh api "repos/${GITHUB_REPOSITORY}/compare/${GITHUB_SHA}...main" --jq .status)"
-            test "$MAIN_STATUS" = "ahead" -o "$MAIN_STATUS" = "identical"
           else
             test "$GITHUB_REF" = "refs/heads/main"
           fi
@@ -51,8 +59,16 @@ jobs:
       - name: Build distributions
         run: python -m build --no-isolation
 
+      - name: Verify exact-lock wheel installation
+        run: |
+          python -m venv /tmp/omniflow-release-wheel
+          /tmp/omniflow-release-wheel/bin/python -m pip install --require-hashes --only-binary=:all: --requirement requirements/action-py311-linux-x86_64.txt
+          PIP_NO_INDEX=1 /tmp/omniflow-release-wheel/bin/python -m pip install --no-deps dist/*.whl
+          /tmp/omniflow-release-wheel/bin/python -m pip check
+          /tmp/omniflow-release-wheel/bin/omniflow --version
+
       - name: Generate SBOM
-        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610
+        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26
         with:
           path: .
           format: spdx-json
@@ -60,7 +76,7 @@ jobs:
 
       - name: Generate checksums
         working-directory: dist
-        run: sha256sum omniflow_ci-*.whl omniflow_ci-*.tar.gz omniflow.spdx.json > SHA256SUMS
+        run: sha256sum omniflow_ci-*.whl omniflow_ci-*.tar.gz omniflow.spdx.json release-evidence.json > SHA256SUMS
 
       - name: Upload release artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
@@ -124,4 +140,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-        run: gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --generate-notes
+        run: |
+          TAG_SHA="$(gh api "repos/${GH_REPO}/commits/${GITHUB_REF_NAME}" --jq .sha)"
+          test "$TAG_SHA" = "$GITHUB_SHA"
+          gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --generate-notes --prerelease

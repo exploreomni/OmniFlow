@@ -39,7 +39,7 @@ Use [the dbt sync workflow example](../.github/workflow-examples/omniflow-dbt-sy
 
 ```yaml
 - name: Synchronize dbt metadata into Omni
-  uses: atx-omni/OmniFlow@<pinned-commit-sha>
+  uses: exploreomni/OmniFlow@<pinned-commit-sha>
   with:
     mode: dbt-sync
     config: .omniflow.yml
