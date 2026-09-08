@@ -234,7 +234,7 @@ checks:
     ),
     Scenario(
         name="breaking_change_hold_omni_only",
-        description="breaking Omni change without dbt evidence should not be held",
+        description="breaking Omni change without verified sync state should fail closed",
         expected_exit=1,
         changed_files="omni/model/views/orders.view",
         config="""deployment:
@@ -288,7 +288,7 @@ deployment:
     ),
     Scenario(
         name="dbt_impact_safe_addition",
-        description="dbt-only PR adding a column should skip cleanly",
+        description="dbt-only PR adding a column should record a complete-coverage pass",
         expected_exit=0,
         changed_files="models/marts/orders.sql",
         server_mode="unused",
@@ -622,6 +622,7 @@ security:
     (repo / ".omniflow.yml").write_text(config, encoding="utf-8")
     run(["git", "add", "."], cwd=repo)
     run(["git", "commit", "-q", "-m", "base"], cwd=repo)
+    base_sha = run(["git", "rev-parse", "HEAD"], cwd=repo).stdout.strip()
     if scenario.operation == "validate":
         run(["git", "checkout", "-q", "-b", BRANCH_NAME], cwd=repo)
     apply_changed_files(repo, scenario.changed_files)
@@ -637,7 +638,21 @@ security:
         run(["git", "commit", "-q", "-m", "deploy dbt"], cwd=repo)
         event = {"ref": "refs/heads/main", "commits": []}
     else:
-        event = {"pull_request": {"body": marker_body(scenario), "number": 1}}
+        # Exact-head analysis reads immutable Git objects rather than uncommitted
+        # checkout data. Keep distinct real base/head objects in every PR fixture.
+        run(["git", "add", "."], cwd=repo)
+        run(["git", "commit", "-q", "--allow-empty", "-m", "proposed change"], cwd=repo)
+        head_sha = run(["git", "rev-parse", "HEAD"], cwd=repo).stdout.strip()
+        repository = {"full_name": "atx-omni/simulated"}
+        event = {
+            "number": 1,
+            "repository": repository,
+            "pull_request": {
+                "body": marker_body(scenario), "number": 1,
+                "base": {"sha": base_sha, "ref": "main", "repo": repository},
+                "head": {"sha": head_sha, "ref": BRANCH_NAME, "repo": repository},
+            },
+        }
     write_json(repo / "event.json", event)
 
 
@@ -669,6 +684,7 @@ def run_omniflow(repo: Path, scenario: Scenario) -> subprocess.CompletedProcess[
     for name in (
         "OMNI_API_KEY",
         "OMNIFLOW_SYNC_API_KEY",
+        "OMNIFLOW_LAST_SYNC_SHA",
         "GITHUB_ACTIONS",
         "GITHUB_HEAD_REF",
         "GITHUB_BASE_REF",
@@ -861,8 +877,12 @@ def assert_result(
             if issue.get("validator") == "breaking_change_hold"
         ]
         if scenario.name == "breaking_change_hold_omni_only":
-            if hold_issues:
-                errors.append("hold fired without any dbt change evidence")
+            if not any(
+                issue.get("rule") == "breaking_change_sync_state_unavailable"
+                and issue.get("severity") == "error"
+                for issue in hold_issues
+            ):
+                errors.append("missing sync evidence did not produce a blocking state-coverage hold")
         elif not hold_issues:
             errors.append("breaking change beside a dbt source change did not trigger the hold")
         else:
@@ -890,6 +910,11 @@ def assert_result(
             if scenario.name == "dbt_impact_safe_addition":
                 if issues:
                     errors.append("an additive dbt column should not orphan any Omni reference")
+                if impact.get("coverage_complete") is not True:
+                    errors.append("supported additive SQL did not record complete coverage")
+                report = artifacts.get("public/report.json:json", {})
+                if report.get("policy_decision") != "pass":
+                    errors.append("an analyzed additive dbt change must pass rather than skip")
             elif not issues:
                 errors.append("expected an orphaned Omni reference finding")
             else:
@@ -935,8 +960,8 @@ def write_json(path: Path, payload: dict[str, Any]) -> None:
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
-def run(cmd: list[str], *, cwd: Path) -> None:
-    subprocess.run(cmd, cwd=cwd, check=True, text=True, capture_output=True)
+def run(cmd: list[str], *, cwd: Path) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(cmd, cwd=cwd, check=True, text=True, capture_output=True)
 
 
 if __name__ == "__main__":
