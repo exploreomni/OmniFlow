@@ -22,7 +22,10 @@ URL_VALUE_RE = re.compile(r"https?://[^\s<>\]\[)('`\"]+", re.IGNORECASE)
 SAFE_PATH_SEGMENT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 SAFE_BRANCH_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,254}$")
 RAW_KEYS = {"raw", "raw_issue", "raw_payload", "raw_response", "payload"}
-ACTIVE_CREDENTIAL_ENV_VARS = ("OMNI_API_KEY", "OMNIFLOW_SYNC_API_KEY", "OMNIFLOW_REPAIR_API_KEY")
+ACTIVE_CREDENTIAL_ENV_VARS = (
+    "OMNI_API_KEY", "OMNIFLOW_SYNC_API_KEY", "OMNIFLOW_REPAIR_API_KEY",
+    "OMNIFLOW_SYNC_STATE_TOKEN", "OMNIFLOW_GITHUB_TOKEN", "GITHUB_TOKEN", "GH_TOKEN",
+)
 MAX_PUBLIC_DIAGNOSTIC_CHARS = 2000
 SENSITIVE_PUBLIC_KEYS = {
     "prompt",

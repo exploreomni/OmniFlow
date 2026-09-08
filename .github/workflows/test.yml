@@ -94,3 +94,36 @@ jobs:
           test -f .omniflow/public/report.json
           test -f .omniflow/artifact-manifest.json
           test ! -d .omniflow/restricted
+
+  dbt-action-integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          path: .omniflow-tooling
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: "3.11"
+      - name: Prepare trusted consumer fixture
+        id: fixture
+        run: |
+          python .omniflow-tooling/scripts/smoke_dbt_action.py prepare \
+            --event "$RUNNER_TEMP/omniflow-dbt-event.json"
+      - name: Exercise actual dbt-only action without Omni credentials
+        id: dbt
+        continue-on-error: true
+        uses: ./.omniflow-tooling
+        env:
+          GITHUB_EVENT_NAME: pull_request
+          GITHUB_EVENT_PATH: ${{ steps.fixture.outputs.event_path }}
+          GITHUB_BASE_REF: main
+          GITHUB_HEAD_REF: fixture-head
+          GITHUB_SHA: ${{ steps.fixture.outputs.base_sha }}
+      - name: Verify expected failure and immutable-data boundary
+        env:
+          ACTION_OUTCOME: ${{ steps.dbt.outcome }}
+        run: |
+          test "$ACTION_OUTCOME" = failure
+          python .omniflow-tooling/scripts/smoke_dbt_action.py verify

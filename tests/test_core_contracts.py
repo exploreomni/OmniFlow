@@ -152,6 +152,8 @@ def test_active_credentials_and_data_fields_do_not_reach_public_formats(tmp_path
     }
     for name, value in secrets.items():
         monkeypatch.setenv(name, value)
+    secrets["OMNIFLOW_SYNC_STATE_TOKEN"] = "synthetic-sensitive-sync-state-value"
+    monkeypatch.setenv("OMNIFLOW_SYNC_STATE_TOKEN", secrets["OMNIFLOW_SYNC_STATE_TOKEN"])
     raw = " ".join(secrets.values())
     assert all(value not in redact(raw) for value in secrets.values())
     report = {

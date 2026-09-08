@@ -86,7 +86,7 @@ class CliOrchestrationTests(unittest.TestCase):
                         exit_code = cmd_route(args)
                 self.assertEqual(exit_code, 0)
                 payload = json.loads(output.call_args.args[0])
-                self.assertEqual(payload, {"model_count": 1, "reason": "", "should_run": True})
+                self.assertEqual(payload, {"model_count": 1, "reason": "", "requires_omni": True, "should_run": True})
                 self.assertFalse(Path(".omniflow/public/report.json").exists())
             finally:
                 os.chdir(original)
