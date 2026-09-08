@@ -17,6 +17,6 @@ Maintainers will review complete reports on a best-effort basis. No service-leve
 - Pull-request policy and model host metadata are read from the trusted base branch.
 - The example privileged workflow does not check out or execute pull-request code; changed filenames are read through GitHub's API.
 - Public artifacts are redacted; detailed model and dependency artifacts are deleted by default and remain local when retention is explicitly enabled.
-- OmniFlow never runs warehouse queries and must not persist raw query results.
+- Core validation does not request warehouse query execution and must not persist raw query results. Optional AI eval has a separate execution contract and must not inherit a no-query/no-cost guarantee from core validation.
 
 See the README for the current live-testing limitations and least-privilege guidance.
