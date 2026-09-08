@@ -32,13 +32,12 @@ Fires when a pull request contains breaking Omni model changes and also modifies
 
 Fires when a pull request contains breaking Omni model changes and dbt sources changed on the base branch after the last recorded successful `omniflow dbt sync`. This catches the wrong-order case: an Omni-only pull request that references schema the warehouse does not have yet because the dbt deployment is still in flight.
 
-Pending detection is evidence-based and fails open. When no sync commit has been recorded, or when the recorded commit is unreachable in the runner's checkout, OmniFlow prints a warning and skips the check rather than blocking a merge on incomplete history.
+Pending detection fails closed when this policy is enabled with `action: fail`. Missing, blank, unreachable, or non-ancestor sync state creates `breaking_change_sync_state_unavailable` and blocks a breaking change. Fetch complete trusted base history and record a verified successful sync before adopting this gate. `action: warn` remains explicitly advisory.
 
 ### What Does Not Fire
 
 - Additive Omni changes, with or without dbt changes
 - dbt changes with no breaking Omni changes
-- Breaking Omni changes in a repository that has no configured dbt paths
 - Breaking Omni changes when dbt has not changed since the last successful sync
 
 ## Enable The Policy
@@ -86,24 +85,27 @@ Nothing changes for the developer. This is the common case.
 combined pull request -> OmniFlow FAILS with split guidance
                       -> pull request labeled omniflow/awaiting-deploy
 
-pull request 1 (dbt only)   -> passes -> merge -> dbt deploys
+pull request 1 (additive dbt expansion) -> passes -> merge -> dbt deploys
                             -> omniflow dbt sync -> Omni refreshed
                             -> synchronized commit recorded
 
-pull request 2 (Omni only)  -> hold clears, contracts validated
-                            -> label removed, auto-merge completes
-                            -> Omni promotes against a warehouse that is ready
+pull request 2 (Omni only)  -> fresh current-head revalidation dispatch
+                            -> readiness check passes and configured label clears
+                            -> human merges after required checks and reviews
+                            -> Omni promotes against the expanded warehouse
+
+later dbt cleanup          -> remove old names only after all consumers migrate
 ```
 
-The developer opens both pull requests. OmniFlow sequences them.
+Use expand/contract. A destructive dbt rename deployed first would break the existing Omni model. Preserve both old and new warehouse names during the transition, migrate consumers, then remove old names after acceptance.
 
 ## Wire Up The Workflows
 
-Two workflow changes make the sequencing automatic. Both are in [the workflow examples](../.github/workflow-examples/).
+Three workflow examples provide deployment evidence and explicit revalidation. Merge remains manual.
 
 ### 1. Validation Workflow
 
-Use [omniflow.yml](../.github/workflow-examples/omniflow.yml). It passes the recorded sync commit into the action and applies or clears the hold label:
+Use [omniflow.yml](../.github/workflow-examples/omniflow.yml). It passes the recorded sync commit into the action and applies the configured hold label. Provision that label during adoption; failed label writes must remain visible.
 
 ```yaml
 - name: Run OmniFlow
@@ -122,11 +124,11 @@ The action exposes two outputs:
 
 The label step is inert unless the policy is enabled, so it is safe to keep in a shared workflow template.
 
-**Set `fetch-depth: 0` on the checkout when the policy is enabled.** Pending detection compares the recorded sync commit against `HEAD`, which requires that commit to be present. With the default shallow checkout, OmniFlow warns and falls back to same-pull-request detection only.
+**Use `fetch-depth: 0`.** Pending detection verifies the synchronized commit is an ancestor of trusted base `HEAD`, then compares their dbt paths. Missing history cannot establish readiness.
 
 ### 2. Deployment Workflow
 
-Use [omniflow-dbt-sync-with-release.yml](../.github/workflow-examples/omniflow-dbt-sync-with-release.yml). After `omniflow dbt sync` succeeds it records the synchronized commit and releases held pull requests:
+Use [omniflow-dbt-sync-with-release.yml](../.github/workflow-examples/omniflow-dbt-sync-with-release.yml). Its historical filename remains, but after sync it only records and rereads durable state. It never removes labels or enables auto-merge:
 
 ```yaml
 - name: Record synchronized commit
@@ -134,20 +136,27 @@ Use [omniflow-dbt-sync-with-release.yml](../.github/workflow-examples/omniflow-d
   env:
     GH_TOKEN: ${{ secrets.OMNIFLOW_SYNC_STATE_TOKEN }}
     SYNCED_SHA: ${{ github.sha }}
-  run: gh variable set OMNIFLOW_LAST_SYNC_SHA --body "$SYNCED_SHA"
-
-- name: Release held Omni model changes
-  if: success()
-  env:
-    GH_TOKEN: ${{ github.token }}
-    PENDING_LABEL: omniflow/awaiting-deploy
   run: |
-    # Remove the label and enable auto-merge for each held pull request.
+    set -euo pipefail
+    test -n "$GH_TOKEN"
+    gh variable set OMNIFLOW_LAST_SYNC_SHA --body "$SYNCED_SHA"
+    RECORDED_SHA="$(gh api "repos/${GITHUB_REPOSITORY}/actions/variables/OMNIFLOW_LAST_SYNC_SHA" --jq .value)"
+    test "$RECORDED_SHA" = "$SYNCED_SHA"
 ```
 
-The release step uses `gh pr merge --auto`, which respects branch protection. Required checks and reviews still have to pass; the step only stops parking the pull request.
+Missing state credentials, failed writes, or mismatched rereads fail the deployment workflow. A successful schema refresh alone is insufficient to release a PR.
 
-Recording a repository variable needs more permission than the default `GITHUB_TOKEN` provides. Create a fine-grained token with read and write access to repository variables only, store it as `OMNIFLOW_SYNC_STATE_TOKEN`, and scope it to the single repository. When that secret is absent the step logs a notice and the policy degrades to same-pull-request detection.
+Recording a repository variable requires a narrowly scoped token with repository Variables read/write permission. Store it as `OMNIFLOW_SYNC_STATE_TOKEN` in the protected environment. Revalidation needs read access to that same durable state and never trusts a workflow's captured `${{ vars }}` snapshot.
+
+### 3. Current-head readiness workflow
+
+Install [omniflow-revalidate-held.yml](../.github/workflow-examples/omniflow-revalidate-held.yml), pin the reviewed OmniFlow commit, and configure the protected environment. After a successful deployment, dispatch this workflow on current protected `main` with the open PR number. It loads the PR and sync state from GitHub, checks the checkout matches current base, and runs the complete existing Omni validation pipeline using a fresh PR event.
+
+The helper creates **`OmniFlow deployment readiness`** on the exact current PR head SHA. It rejects forks, drafts, stale checkout, missing state, failed/skipped model validation, and mismatched report SHA. Before completing success it rereads head, base, and durable sync SHA. If any changed, dispatch a fresh run. Only success clears the trusted policy's configured `pending_label`; it never merges or sends a PR comment. API write failure cannot publish readiness success.
+
+**Adopter configuration is mandatory:** require `OmniFlow deployment readiness` with the expected GitHub Actions source, require the PR to be up to date with its protected base, retain independent test/security checks and reviews, and prevent bypass. For dbt-enabled repos this fresh check is the merge gate for Omni validation; an old `pull_request_target` job may still report its earlier deployment hold and must not be treated as the current-head readiness evidence. The example does not automatically modify consumer branch protection. Dispatch the readiness check for every model PR subject to this required gate, including additive PRs.
+
+Do not use an API rerun of an old `pull_request_target` job as fresh evidence: reruns retain the original event and base snapshot. A new dispatch performs current-head validation explicitly. A PR push requires a new check, and a base change requires updating the PR and revalidation. Labels remain informational; the SHA-bound required check is authoritative.
 
 ## Evidence
 
@@ -161,9 +170,9 @@ State these plainly when planning an adoption.
 
 - **OmniFlow cannot stop Omni's webhook.** The policy prevents the unsafe merge; it does not gate promotion after a merge happens. A merge performed with an administrative bypass still promotes immediately.
 - **Detection is path-based, not semantic.** OmniFlow does not parse dbt models to determine whether a specific column actually changed. A pull request that touches `models/` while making breaking Omni changes is held even if the two are unrelated. Narrow `dbt_paths` to reduce false positives.
-- **Pending detection needs Git history and a recorded commit.** Without `fetch-depth: 0` and `OMNIFLOW_LAST_SYNC_SHA`, only same-pull-request detection runs.
+- **Pending detection needs Git history and a recorded commit.** Missing evidence blocks breaking changes under the default failing action.
 - **The warehouse is never inspected.** OmniFlow does not execute queries, so it cannot confirm whether a renamed object already exists. It reasons from repository and deployment evidence only.
-- **Auto-merge is not a review bypass.** Held pull requests still need their required checks and approvals.
+- **Merge is manual.** Required current-head readiness, up-to-date branch protection, and reviews must be configured by adopters. A passing check proves a bounded validation snapshot; it cannot prevent later warehouse changes or administrative bypass.
 
 For a guarantee that no window exists under any merge path, an Omni-side promotion gate would be required. That capability is not currently documented in Omni's public API, so it is not something OmniFlow can provide.
 

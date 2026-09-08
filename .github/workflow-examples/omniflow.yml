@@ -25,10 +25,8 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
         with:
           # Pending-deployment detection in the optional breaking-change hold policy
-          # needs the recorded sync commit to be reachable. Repositories that enable
-          # deployment.breaking_change_hold should change this to 0. OmniFlow warns and
-          # falls back to same-pull-request detection when the commit is unreachable.
-          fetch-depth: 1
+          # requires complete trusted base history. Missing state blocks readiness.
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Set up Python
@@ -95,8 +93,9 @@ jobs:
             gh pr comment "$PR_NUMBER" --body "$BODY"
           fi
 
-      # Applies or clears the breaking-change hold label so the protected dbt sync
-      # workflow can release this pull request after the deployment lands. This step
+      # Applies the hold label. Only explicit current-head revalidation can release it.
+      # The label is informational; the required readiness check enforces the gate.
+      # This step
       # is inert unless deployment.breaking_change_hold is enabled in trusted policy.
       - name: Apply breaking-change hold label
         if: always() && github.event_name == 'pull_request_target' && steps.omniflow.outputs.hold-pending-label != ''
@@ -107,16 +106,7 @@ jobs:
           PENDING_LABEL: ${{ steps.omniflow.outputs.hold-pending-label }}
         run: |
           set -euo pipefail
-          HAS_LABEL="$(gh pr view "$PR_NUMBER" --json labels \
-            --jq "[.labels[].name] | index(\"${PENDING_LABEL}\") // empty")"
           if [ "$HOLD_TRIGGERED" = "true" ]; then
-            if [ -z "$HAS_LABEL" ]; then
-              gh label create "$PENDING_LABEL" \
-                --description "Held by OmniFlow until the pending dbt deployment completes" \
-                --color D93F0B 2>/dev/null || true
-              gh pr edit "$PR_NUMBER" --add-label "$PENDING_LABEL"
-            fi
-          elif [ -n "$HAS_LABEL" ]; then
-            # The hold cleared on a later push, so stop parking the pull request.
-            gh pr edit "$PR_NUMBER" --remove-label "$PENDING_LABEL"
+            # Provision the configured label before adoption. Do not swallow errors.
+            gh pr edit "$PR_NUMBER" --add-label "$PENDING_LABEL"
           fi

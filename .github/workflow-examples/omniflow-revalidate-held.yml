@@ -1,0 +1,59 @@
+name: OmniFlow current-head readiness
+
+on:
+  workflow_dispatch:
+    inputs:
+      pull-request-number:
+        description: Open same-repository pull request to validate before manual merge
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: omniflow-readiness-${{ inputs['pull-request-number'] }}
+  cancel-in-progress: false
+
+jobs:
+  readiness:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    environment: omniflow-production
+    permissions:
+      contents: read
+      checks: write
+      pull-requests: write
+    steps:
+      - name: Checkout current trusted base
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
+        with:
+          python-version: "3.11"
+      - name: Install pinned OmniFlow
+        uses: atx-omni/OmniFlow@<pinned-commit-sha> # zizmor: ignore[unpinned-uses] customer must replace
+        with:
+          config: .omniflow.yml
+          skip-reason: Protected current-head revalidation follows
+      - name: Validate current PR head and verified sync state
+        env:
+          PR_NUMBER: ${{ inputs['pull-request-number'] }}
+          OMNIFLOW_GITHUB_TOKEN: ${{ github.token }}
+          OMNIFLOW_SYNC_STATE_TOKEN: ${{ secrets.OMNIFLOW_SYNC_STATE_TOKEN }}
+          OMNI_API_KEY: ${{ secrets.OMNI_API_KEY }}
+        run: |
+          set -euo pipefail
+          python -m omniflow.github.revalidation --pull-request "$PR_NUMBER"
+      - name: Upload current-head validation evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: omniflow-current-head-readiness
+          path: .omniflow/public/
+          include-hidden-files: true
+          if-no-files-found: error

@@ -38,7 +38,7 @@ from .discovery import (
 from .downstream import generate_downstream_dependencies
 from .exceptions import ConfigError, ExitCodes, OmniAuthError, OmniFlowError, SecurityPolicyError
 from .exposures import run_dbt_exposure_enrichment
-from .git import current_branch, current_sha, event_name, git_executable, pr_number
+from .git import current_branch, current_sha, event_name, git_executable, git_value, pr_number
 from .github.annotations import annotation_lines
 from .github.repair_attempt import GitHubRepairAttemptGuard, load_repair_event
 from .logging import configure_logging
@@ -47,6 +47,7 @@ from .repair.orchestrator import run_ai_repair, validate_ai_repair_policy
 from .repair.reporting import write_repair_artifacts
 from .reporting.json_report import write_json_report
 from .reporting.writer import write_reports
+from .revision_data import pull_request_changed_files, pull_request_revision
 from .security import redact, validate_repo_output_path
 from .timestamps import utc_now_iso
 from .validators.content import run_content_validation
@@ -323,18 +324,24 @@ def cmd_route(args: argparse.Namespace) -> int:
         _write_setup_failure_artifacts(config=config, output_dir=output_dir, exc=exc)
         raise
 
-    should_run = bool(contexts)
+    requires_omni = bool(contexts)
+    dbt_impact_needed = config.dbt_impact.enabled and any(
+        _path_under_any(path, config.breaking_change_hold.dbt_paths) for path in get_dbt_changed_files()
+    )
+    should_run = requires_omni or dbt_impact_needed
     reason = "" if should_run else "no Omni PR context or changed Omni model files detected"
     if not should_run:
         _write_skipped_artifacts(config=config, output_dir=output_dir, reason=reason)
 
     payload = {
         "should_run": should_run,
+        "requires_omni": requires_omni,
         "reason": reason,
         "model_count": len(contexts),
     }
     if args.format == "github":
         print(f"should_run={'true' if should_run else 'false'}")
+        print(f"requires_omni={'true' if requires_omni else 'false'}")
         print(f"reason={reason}")
         print(f"model_count={len(contexts)}")
     elif args.format == "json":
@@ -471,26 +478,22 @@ def _run_dbt_impact_check(*, config, output_dir: Path) -> int | None:
     if not config.dbt_impact.enabled:
         return None
     dbt_paths = config.breaking_change_hold.dbt_paths
-    changed_files = get_changed_files()
+    changed_files = get_dbt_changed_files()
     if not any(_path_under_any(path, dbt_paths) for path in changed_files):
         return None
 
     omni_yaml_paths = config.dbt_impact.omni_yaml_paths or _flow_model_paths()
-    if not omni_yaml_paths:
-        print(
-            "omniflow warning: dbt impact analysis is enabled but no Omni model path is available. "
-            "Add checks.dbt_impact.omni_yaml_paths or model_path entries to .omni/flow.json.",
-            file=sys.stderr,
+    try:
+        report, issues = evaluate_dbt_impact(
+            changed_files=changed_files,
+            dbt_paths=dbt_paths,
+            settings=config.dbt_impact,
+            omni_yaml_paths=omni_yaml_paths,
+            base_ref=_base_ref(),
         )
-        return None
-
-    report, issues = evaluate_dbt_impact(
-        changed_files=changed_files,
-        dbt_paths=dbt_paths,
-        settings=config.dbt_impact,
-        omni_yaml_paths=omni_yaml_paths,
-        base_ref=_base_ref(),
-    )
+    except OmniFlowError as exc:
+        _write_setup_failure_artifacts(config=config, output_dir=output_dir, exc=exc)
+        raise
     exit_code = (
         ExitCodes.VALIDATION_FAILED
         if any(issue.get("severity") == "error" for issue in issues)
@@ -568,6 +571,11 @@ def _run_dbt_impact_check(*, config, output_dir: Path) -> int | None:
     return exit_code
 
 
+def get_dbt_changed_files() -> list[str]:
+    exact = pull_request_changed_files()
+    return exact if exact is not None else get_changed_files()
+
+
 def _flow_model_paths() -> list[str]:
     """Read model paths from trusted base-branch metadata."""
     try:
@@ -596,6 +604,9 @@ def _base_ref() -> str | None:
     None means no comparison base is available and the caller reports that rather
     than guessing.
     """
+    revision = pull_request_revision("base")
+    if revision is not None:
+        return revision[0]
     candidates: list[str] = []
     base_branch = os.getenv("GITHUB_BASE_REF")
     if base_branch:
@@ -603,7 +614,7 @@ def _base_ref() -> str | None:
     candidates.append("HEAD~1")
     for candidate in candidates:
         if _ref_exists(candidate):
-            return candidate
+            return git_value("rev-parse", candidate)
     return None
 
 

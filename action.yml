@@ -114,13 +114,23 @@ runs:
 
     - name: Run OmniFlow
       id: validate
-      if: inputs.mode == 'validate' && inputs['skip-reason'] == '' && steps.route.outputs.should_run == 'true'
+      if: inputs.mode == 'validate' && inputs['skip-reason'] == '' && steps.route.outputs.should_run == 'true' && steps.route.outputs.requires_omni == 'true'
       shell: bash
       env:
         OMNI_API_KEY: ${{ inputs['omni-api-key'] }}
         OMNIFLOW_INPUT_CONFIG: ${{ inputs.config }}
         OMNIFLOW_GITHUB_TOKEN: ${{ github.token }}
         OMNIFLOW_LAST_SYNC_SHA: ${{ inputs['last-sync-sha'] }}
+      run: |
+        set -euo pipefail
+        omniflow run --auto --config "$OMNIFLOW_INPUT_CONFIG"
+
+    - name: Run dbt impact without Omni credentials
+      if: inputs.mode == 'validate' && inputs['skip-reason'] == '' && steps.route.outputs.should_run == 'true' && steps.route.outputs.requires_omni == 'false'
+      shell: bash
+      env:
+        OMNIFLOW_INPUT_CONFIG: ${{ inputs.config }}
+        OMNIFLOW_GITHUB_TOKEN: ${{ github.token }}
       run: |
         set -euo pipefail
         omniflow run --auto --config "$OMNIFLOW_INPUT_CONFIG"

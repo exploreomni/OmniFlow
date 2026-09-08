@@ -32,6 +32,7 @@ class DbtModel:
     schema_name: str | None = None
     alias: str | None = None
     materialized: str | None = None
+    contract_enforced: bool = False
     columns: set[str] = field(default_factory=set)
 
     def relation_candidates(self) -> set[str]:
@@ -101,6 +102,7 @@ def parse_manifest(text: str, *, source: str = "manifest.json") -> dict[str, Dbt
             schema_name=_optional_string(node.get("schema")),
             alias=_optional_string(node.get("alias")),
             materialized=materialized,
+            contract_enforced=_contract_enforced(node),
             columns=_node_columns(node, source=source),
         )
     return models
@@ -133,6 +135,12 @@ def _config_materialization(node: dict[str, Any]) -> str | None:
     return None
 
 
+def _contract_enforced(node: dict[str, Any]) -> bool:
+    config = node.get("config")
+    contract = config.get("contract") if isinstance(config, dict) else None
+    return isinstance(contract, dict) and contract.get("enforced") is True
+
+
 def _optional_string(value: Any) -> str | None:
     if isinstance(value, str) and value.strip():
         return value.strip()
@@ -149,9 +157,11 @@ def diff_manifests(
     declared columns for that node, so a repository that does not document
     columns never produces phantom findings.
     """
-    removed_models = {
-        unique_id: model for unique_id, model in base.items() if unique_id not in head
-    }
+    removed_models = {}
+    for unique_id, model in base.items():
+        replacement = head.get(unique_id)
+        if replacement is None or _relation_identity(model) != _relation_identity(replacement):
+            removed_models[unique_id] = model
     removed_columns: dict[str, set[str]] = {}
     for unique_id, base_model in base.items():
         head_model = head.get(unique_id)
@@ -161,3 +171,11 @@ def diff_manifests(
         if missing:
             removed_columns[unique_id] = missing
     return removed_models, removed_columns
+
+
+def _relation_identity(model: DbtModel) -> tuple[str, ...]:
+    """Changing a surviving node's alias/schema/database removes its old relation."""
+    if model.relation_name:
+        return (model.relation_name.replace('"', "").replace("`", "").lower().strip(),)
+    return tuple((value or "").lower().strip() for value in
+                 (model.database, model.schema_name, model.alias or model.name))

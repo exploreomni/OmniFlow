@@ -182,14 +182,41 @@ def diff_sql_columns(base_sql: str, head_sql: str) -> set[str]:
     An empty base column set means the base could not be parsed with confidence,
     so no removal is reported.
     """
-    base_columns = extract_output_columns(base_sql)
-    if not base_columns:
+    base_columns, base_complete = analyze_output_columns(base_sql)
+    if not base_complete:
         return set()
-    head_columns = extract_output_columns(head_sql)
-    if not head_columns:
+    head_columns, head_complete = analyze_output_columns(head_sql)
+    if not head_complete:
         # The head is unparseable; refuse to claim every base column was removed.
         return set()
     return base_columns - head_columns
+
+
+def analyze_output_columns(sql: str) -> tuple[set[str], bool]:
+    """A small supported SQL subset; unsupported syntax never establishes safety.
+
+    Source-only ref/source Jinja is allowed. Dynamic projection macros, stars,
+    literals, set operations, DISTINCT, and unaliased expressions require a
+    complete manifest contract. Rejecting these avoids misleading partial sets.
+    """
+    columns = extract_output_columns(sql)
+    cleaned = _strip_noise(sql)
+    selection = _final_select_list(cleaned)
+    if not columns or not selection:
+        return columns, False
+    if "'" in cleaned or re.search(r"\b(?:UNION|INTERSECT|EXCEPT|DISTINCT)\b", cleaned, re.IGNORECASE):
+        return columns, False
+    if re.search(r"\{[%#]|\$\$", sql):
+        return columns, False
+    for match in JINJA_RE.finditer(sql):
+        if not re.fullmatch(r"\{\{\s*(?:ref|source)\s*\([^{}]*\)\s*\}\}", match.group(), re.DOTALL):
+            return columns, False
+        # An unresolved macro within the projection is never a source reference.
+        prefix = sql[:match.start()]
+        if re.search(r"\bFROM\s*$|\bJOIN\s*$", prefix, re.IGNORECASE) is None:
+            return columns, False
+    items = _split_top_level(selection)
+    return columns, bool(items) and all(_column_name(item) is not None for item in items)
 
 
 def model_name_from_path(path: str) -> str | None:

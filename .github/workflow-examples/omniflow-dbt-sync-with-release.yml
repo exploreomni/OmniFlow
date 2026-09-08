@@ -1,12 +1,11 @@
-name: Deploy dbt, synchronize Omni, and release held model changes
+name: Deploy dbt and record verified Omni synchronization
 
 # Single-branch monorepo variant of omniflow-dbt-sync.yml.
 #
 # Use this workflow when dbt and Omni model YAML live on the same protected
 # branch and the repository enables deployment.breaking_change_hold. It records
-# the synchronized commit so pull request validation can tell whether a dbt
-# deployment is still pending, then releases any Omni pull request that the hold
-# policy parked while the warehouse was behind.
+# the synchronized commit so fresh pull request validation can establish readiness.
+# Use omniflow-revalidate-held.yml to validate the current head before manual merge.
 #
 # Keep the ordinary omniflow.yml validation workflow in place. This workflow
 # only runs after a merge to the protected branch.
@@ -44,9 +43,6 @@ jobs:
     environment: omniflow-production
     permissions:
       contents: read
-      # Required only for the release step below, which edits and merges the
-      # held Omni pull request.
-      pull-requests: write
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
@@ -87,36 +83,20 @@ jobs:
         run: |
           set -euo pipefail
           if [ -z "${GH_TOKEN:-}" ]; then
-            echo "OMNIFLOW_SYNC_STATE_TOKEN is not configured; skipping sync state update" >&2
-            echo "Breaking-change hold will fall back to same-pull-request detection only" >&2
-            exit 0
+            echo "OMNIFLOW_SYNC_STATE_TOKEN is required; deployment readiness remains blocked" >&2
+            exit 1
           fi
           gh variable set OMNIFLOW_LAST_SYNC_SHA --body "$SYNCED_SHA"
+          RECORDED_SHA="$(gh api "repos/${GITHUB_REPOSITORY}/actions/variables/OMNIFLOW_LAST_SYNC_SHA" --jq .value)"
+          test "$RECORDED_SHA" = "$SYNCED_SHA"
 
-      # Releases Omni model pull requests that the hold policy parked while the
-      # warehouse was behind. Auto-merge still respects branch protection, so
-      # required checks and reviews must pass before GitHub completes the merge.
-      - name: Release held Omni model changes
+      # State persistence never releases a PR by itself. Dispatch a fresh current-
+      # head readiness check; an old workflow rerun retains its old event snapshot.
+      - name: Explain the required fresh validation
         if: success()
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PENDING_LABEL: omniflow/awaiting-deploy
         run: |
-          set -euo pipefail
-          HELD="$(gh pr list --label "$PENDING_LABEL" --state open --base "$GITHUB_REF_NAME" \
-            --json number --jq '.[].number')"
-          if [ -z "$HELD" ]; then
-            echo "No held Omni pull requests to release"
-            exit 0
-          fi
-          for PR_NUMBER in $HELD; do
-            echo "Releasing held Omni pull request #${PR_NUMBER} after a successful dbt sync"
-            gh pr edit "$PR_NUMBER" --remove-label "$PENDING_LABEL"
-            gh pr comment "$PR_NUMBER" --body \
-              "The pending dbt deployment finished and \`omniflow dbt sync\` succeeded. This pull request is released and set to auto-merge once required checks and reviews pass."
-            # Auto-merge waits for branch protection instead of bypassing it.
-            gh pr merge "$PR_NUMBER" --auto --squash
-          done
+          echo "Sync state is verified. Dispatch OmniFlow current-head readiness with the held PR number."
+          echo "Labels remain until current-head validation succeeds. Merge remains manual."
 
       - name: Upload synchronization evidence
         if: always()

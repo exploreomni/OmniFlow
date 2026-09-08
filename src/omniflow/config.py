@@ -49,6 +49,7 @@ DBT_IMPACT_KEYS = {
     "enabled",
     "manifest_path",
     "fail_on_orphaned_references",
+    "fail_on_incomplete_coverage",
     "omni_yaml_paths",
     "table_mapping",
 }
@@ -225,6 +226,7 @@ class DbtImpactSettings:
     enabled: bool = False
     manifest_path: str | None = None
     fail_on_orphaned_references: bool = True
+    fail_on_incomplete_coverage: bool = True
     omni_yaml_paths: list[str] = field(default_factory=list)
     table_mapping: list[dict[str, str]] = field(default_factory=list)
 
@@ -417,6 +419,11 @@ def _to_config(raw: dict[str, Any], source: Path | None) -> OmniFlowConfig:
         fail_on_orphaned_references=parse_bool(
             "dbt_impact.fail_on_orphaned_references",
             dbt_impact_raw.get("fail_on_orphaned_references"),
+            True,
+        ),
+        fail_on_incomplete_coverage=parse_bool(
+            "dbt_impact.fail_on_incomplete_coverage",
+            dbt_impact_raw.get("fail_on_incomplete_coverage"),
             True,
         ),
         omni_yaml_paths=_repo_path_list(

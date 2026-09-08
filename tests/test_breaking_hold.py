@@ -10,6 +10,7 @@ from unittest import mock
 from omniflow.breaking_hold import (
     PENDING_RULE,
     SAME_PR_RULE,
+    STATE_RULE,
     VALIDATOR,
     evaluate_breaking_hold,
     hold_triggered,
@@ -83,14 +84,15 @@ class SamePullRequestDetectionTests(unittest.TestCase):
         self.assertEqual(issues, [])
         self.assertFalse(hold_triggered(issues))
 
-    def test_breaking_change_without_dbt_file_and_without_sync_state_passes(self):
+    def test_breaking_change_without_sync_state_blocks(self):
         issues = evaluate_breaking_hold(
             diff_result=BREAKING_DIFF,
             changed_files=["omni/my_model/views/orders.view"],
             last_sync_sha=None,
             settings=settings(),
         )
-        self.assertEqual(issues, [])
+        self.assertEqual(issues[0]["rule"], STATE_RULE)
+        self.assertEqual(issues[0]["severity"], "error")
 
     def test_warn_action_reports_without_blocking_severity(self):
         issues = evaluate_breaking_hold(
@@ -129,7 +131,8 @@ class SamePullRequestDetectionTests(unittest.TestCase):
             last_sync_sha=None,
             settings=settings(),
         )
-        self.assertEqual(issues, [])
+        self.assertEqual(issues[0]["rule"], STATE_RULE)
+        self.assertEqual(issues[0]["dbt_paths"], [])
 
     def test_dbt_path_match_requires_a_directory_boundary(self):
         issues = evaluate_breaking_hold(
@@ -138,7 +141,8 @@ class SamePullRequestDetectionTests(unittest.TestCase):
             last_sync_sha=None,
             settings=settings(),
         )
-        self.assertEqual(issues, [])
+        self.assertEqual(issues[0]["rule"], STATE_RULE)
+        self.assertEqual(issues[0]["dbt_paths"], [])
 
     def test_sample_changes_are_bounded(self):
         many_changes = {
@@ -186,8 +190,8 @@ class PendingDeploymentDetectionTests(unittest.TestCase):
             )
         self.assertEqual(issues, [])
 
-    def test_unreachable_sync_commit_does_not_block(self):
-        """A shallow checkout must not fail a merge on incomplete evidence."""
+    def test_unreachable_sync_commit_blocks(self):
+        """Incomplete history cannot establish readiness for a breaking change."""
         with mock.patch("omniflow.breaking_hold._git_changed_files_since", return_value=None):
             issues = evaluate_breaking_hold(
                 diff_result=BREAKING_DIFF,
@@ -195,7 +199,8 @@ class PendingDeploymentDetectionTests(unittest.TestCase):
                 last_sync_sha="abc1234",
                 settings=settings(),
             )
-        self.assertEqual(issues, [])
+        self.assertEqual(issues[0]["rule"], STATE_RULE)
+        self.assertEqual(issues[0]["severity"], "error")
 
     def test_same_pull_request_detection_takes_precedence(self):
         with mock.patch(
@@ -228,7 +233,7 @@ class PendingDeploymentDetectionTests(unittest.TestCase):
             last_sync_sha="   ",
             settings=settings(),
         )
-        self.assertEqual(issues, [])
+        self.assertEqual(issues[0]["rule"], STATE_RULE)
 
 
 class GitLookupTests(unittest.TestCase):
@@ -257,7 +262,8 @@ class GitLookupTests(unittest.TestCase):
         args, kwargs = run.call_args
         self.assertIsInstance(args[0], list)
         self.assertNotIn("shell", kwargs)
-        self.assertEqual(args[0][-1], "abc1234...HEAD")
+        self.assertEqual(args[0][-1], "abc1234..HEAD")
+        self.assertIn("--is-ancestor", run.call_args_list[0].args[0])
 
 
 class HoldConfigTests(unittest.TestCase):
