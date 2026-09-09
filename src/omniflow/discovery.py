@@ -61,6 +61,7 @@ def discover_contexts(
     branch_id: str | None = None,
     flow_path: str | Path = FLOW_PATH,
     allow_skip: bool = False,
+    changed_files: list[str] | None = None,
 ) -> list[ModelContext]:
     branch = branch_name or discover_branch_name()
     if base_url and model_id:
@@ -81,7 +82,7 @@ def discover_contexts(
             "Use .omni/flow.json, OMNI_BASE_URL, or --base-url from a trusted workflow source."
         )
 
-    changed_files = get_changed_files()
+    changed_files = get_changed_files() if changed_files is None else changed_files
     flow = load_flow_metadata(flow_path, missing_ok=allow_skip and not marker)
     if flow is None:
         if any(_is_probable_omni_file(path) for path in changed_files):

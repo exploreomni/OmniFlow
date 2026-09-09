@@ -93,6 +93,23 @@ class ExactRevisionTests(unittest.TestCase):
         self.assertEqual(read_head_text("models/orders.sql", root=self.root, max_bytes=1000),
                          "select customer_key, order_total from raw.orders")
 
+    def test_cli_reuses_internal_inventory_without_reading_mutable_pr_files(self):
+        changed_files = pull_request_changed_files()
+        with mock.patch("omniflow.discovery.get_changed_files", side_effect=AssertionError("mutable PR files")), \
+             mock.patch("omniflow.cli.get_dbt_changed_files", side_effect=AssertionError("repeated inventory")):
+            self.assertEqual(main(["run", "--auto"], changed_files=changed_files), 1)
+        report = json.loads(Path(".omniflow/public/report.json").read_text())
+        self.assertEqual(report["operation"], "dbt_impact")
+        self.assertEqual(report["git_sha"], self.head)
+
+    def test_cli_empty_internal_inventory_does_not_fall_back_to_mutable_routing(self):
+        with mock.patch("omniflow.discovery.get_changed_files", side_effect=AssertionError("mutable PR files")), \
+             mock.patch("omniflow.cli.get_dbt_changed_files", side_effect=AssertionError("repeated inventory")):
+            self.assertEqual(main(["run", "--auto"], changed_files=[]), 0)
+        report = json.loads(Path(".omniflow/public/report.json").read_text())
+        self.assertEqual(report["policy_decision"], "skipped")
+        self.assertEqual(report["git_sha"], self.head)
+
     def test_git_reads_reject_oversized_files_and_missing_revisions(self):
         with self.assertRaises(SecurityPolicyError):
             read_git_text(self.head, "models/orders.sql", root=self.root, max_bytes=3)

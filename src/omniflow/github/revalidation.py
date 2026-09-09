@@ -17,9 +17,10 @@ from urllib.parse import quote, urlparse
 import requests
 
 from ..config import load_config
+from ..discovery import _is_probable_omni_file, _is_under_model_path, discover_contexts, load_flow_metadata
 from ..exceptions import ConfigError, OmniFlowError, SecurityPolicyError
 from ..git import git_value
-from ..revision_data import FULL_SHA, REPOSITORY
+from ..revision_data import FULL_SHA, REPOSITORY, pull_request_changed_files
 from ..security import redact
 
 CHECK_NAME = "OmniFlow deployment readiness"
@@ -88,6 +89,64 @@ def _same_snapshot(api: GitHubRepository, state_api: GitHubRepository, number: i
         raise ConfigError("Deployment state changed during validation; dispatch a fresh check")
 
 
+def _readiness_route(config, changed_files: list[str]) -> tuple[str, set[str], int]:
+    """Prove applicability from trusted registrations and one immutable inventory."""
+    from ..cli import _path_under_any
+
+    flow = load_flow_metadata(missing_ok=True)
+    models = flow["models"] if flow else []
+    for path in changed_files:
+        if _is_probable_omni_file(path) and not any(
+            _is_under_model_path(path, model["model_path"]) for model in models
+        ):
+            raise ConfigError("Readiness cannot skip Omni files outside registered model paths")
+    contexts = discover_contexts(
+        auto=True, base_url=config.omni.base_url, model_id=config.omni.model_id,
+        branch_name=config.omni.branch_name, branch_id=config.omni.branch_id,
+        allow_skip=True, changed_files=changed_files,
+    )
+    selected = {context.model_id for context in contexts}
+    affected = {model["model_id"] for model in models if any(
+        _is_under_model_path(path, model["model_path"]) for path in changed_files
+    )}
+    if not affected.issubset(selected):
+        raise ConfigError("Readiness routing does not cover every changed registered Omni model")
+    dbt_count = sum(_path_under_any(path, config.breaking_change_hold.dbt_paths) for path in changed_files)
+    if contexts:
+        return "models", selected, dbt_count
+    if dbt_count:
+        if not config.dbt_impact.enabled:
+            raise ConfigError("dbt-only readiness requires enabled dbt impact validation")
+        return "dbt_impact", set(), dbt_count
+    return "not_applicable", set(), 0
+
+
+def _validate_report(report, code: int, head: str, route: str, model_ids: set[str], dbt_count: int):
+    if not isinstance(report, dict) or code != 0 or report.get("exit_code") != 0:
+        raise ConfigError("Current-head validation did not complete successfully")
+    if report.get("git_sha") != head:
+        raise ConfigError("Validation report does not identify the current PR head")
+    models = report.get("models")
+    if route == "models":
+        if report.get("policy_decision") != "pass" or not isinstance(models, list) or not models or any(
+            not isinstance(model, dict) or not isinstance(model.get("model_id"), str) for model in models
+        ) or {model["model_id"] for model in models} != model_ids or report.get("operation") == "dbt_impact":
+            raise ConfigError("Current-head validation did not pass every routed Omni model check")
+    elif route == "dbt_impact":
+        checks = report.get("model_reports")
+        if report.get("policy_decision") != "pass" or report.get("operation") != "dbt_impact" or models != [] or (
+            not isinstance(checks, list) or len(checks) != 1 or not isinstance(checks[0], dict)
+            or checks[0].get("validator") != "dbt_impact" or checks[0].get("coverage_complete") is not True
+            or checks[0].get("dbt_file_count") != dbt_count or checks[0].get("issues") != []
+            or report.get("issues") != []
+        ):
+            raise ConfigError("dbt-only readiness requires complete, passing dbt impact evidence without findings")
+    elif route != "not_applicable" or report.get("policy_decision") != "skipped" or models != [] or (
+        report.get("issues") != [] or report.get("model_reports") != [] or report.get("operation") is not None
+    ):
+        raise ConfigError("Validation report does not match the proven non-applicable route")
+
+
 def revalidate(number: int, config_path: str = ".omniflow.yml") -> int:
     if os.getenv("GITHUB_EVENT_NAME") != "workflow_dispatch" or not os.getenv("GITHUB_REF", "").startswith("refs/heads/"):
         raise SecurityPolicyError("Readiness requires an explicit protected-branch workflow dispatch")
@@ -104,6 +163,7 @@ def revalidate(number: int, config_path: str = ".omniflow.yml") -> int:
     if not isinstance(check, dict) or not isinstance(check.get("id"), int):
         raise ConfigError("GitHub did not confirm the current-head check ID")
     check_path = f"/check-runs/{check['id']}"
+    released_label = None
     try:
         state_api = GitHubRepository(repository, os.getenv("OMNIFLOW_SYNC_STATE_TOKEN", ""))
         if git_value("rev-parse", "HEAD") != pr["base"]["sha"]:
@@ -128,32 +188,39 @@ def revalidate(number: int, config_path: str = ".omniflow.yml") -> int:
                 })
                 from ..cli import main as run_validation
 
-                code = run_validation(["run", "--auto", "--config", config_path])
+                changed_files = pull_request_changed_files()
+                if changed_files is None:
+                    raise ConfigError("Readiness requires a complete immutable pull request inventory")
+                route, model_ids, dbt_count = _readiness_route(config, changed_files)
+                code = run_validation(["run", "--auto", "--config", config_path], changed_files=changed_files)
             finally:
                 os.environ.clear()
                 os.environ.update(prior)
         report = json.loads((Path(config.reporting.output_dir) / "public/report.json").read_text())
-        if code != 0 or report.get("policy_decision") != "pass" or not report.get("models"):
-            raise ConfigError("Current-head validation did not pass a non-skipped Omni model check")
-        if report.get("git_sha") != pr["head"]["sha"]:
-            raise ConfigError("Validation report does not identify the current PR head")
+        _validate_report(report, code, pr["head"]["sha"], route, model_ids, dbt_count)
         _same_snapshot(api, state_api, number, pr, sync_sha)
         label = hold.pending_label
         if label in {item.get("name") for item in pr.get("labels", []) if isinstance(item, dict)}:
+            released_label = label
             api.request("DELETE", f"/issues/{number}/labels/{quote(label, safe='')}")
         _same_snapshot(api, state_api, number, pr, sync_sha)
         api.request("PATCH", check_path, {
             "status": "completed", "conclusion": "success",
             "output": {"title": "Current-head deployment validation passed",
-                       "summary": f"Validated head {pr['head']['sha']} against synchronized commit {sync_sha}. "
+                       "summary": f"Validated {route} route at head {pr['head']['sha']} "
+                                  f"against synchronized commit {sync_sha}. "
                                   "Manual merge remains subject to all required checks and reviews."},
         })
         return 0
     except Exception as exc:
-        api.request("PATCH", check_path, {
-            "status": "completed", "conclusion": "failure",
-            "output": {"title": "Deployment readiness not established", "summary": redact(str(exc))[:1000]},
-        })
+        try:
+            if released_label is not None:
+                api.request("POST", f"/issues/{number}/labels", {"labels": [released_label]})
+        finally:
+            api.request("PATCH", check_path, {
+                "status": "completed", "conclusion": "failure",
+                "output": {"title": "Deployment readiness not established", "summary": redact(str(exc))[:1000]},
+            })
         raise
 
 

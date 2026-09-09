@@ -56,13 +56,17 @@ from .validators.yaml_lint import has_error, lint_graph
 from .yaml_pull import pull_yaml
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: list[str] | None = None, *, changed_files: list[str] | None = None) -> int:
     if os.name == "posix":
         os.umask(0o077)
     parser = build_parser()
     args = parser.parse_args(argv)
     configure_logging("DEBUG" if getattr(args, "verbose", False) else "INFO")
     try:
+        if changed_files is not None:
+            if args.func is not cmd_run:
+                raise ConfigError("An internal revision inventory is only supported for run")
+            return cmd_run(args, changed_files=changed_files)
         return args.func(args)
     except OmniFlowError as exc:
         print(redact(str(exc)), file=sys.stderr)
@@ -195,7 +199,7 @@ def _add_common_omni_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--include-personal-folders", action=argparse.BooleanOptionalAction, default=None)
 
 
-def cmd_run(args: argparse.Namespace) -> int:
+def cmd_run(args: argparse.Namespace, *, changed_files: list[str] | None = None) -> int:
     try:
         config = _override_config(load_config(args.config), args)
     except OmniFlowError as exc:
@@ -218,6 +222,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             branch_name=config.omni.branch_name,
             branch_id=config.omni.branch_id,
             allow_skip=True,
+            changed_files=changed_files,
         )
     except OmniFlowError as exc:
         _write_setup_failure_artifacts(config=config, output_dir=output_dir, exc=exc)
@@ -225,7 +230,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     if not contexts:
         # A pull request with no Omni model changes can still break Omni by
         # removing a warehouse column or model the committed YAML references.
-        impact_exit = _run_dbt_impact_check(config=config, output_dir=output_dir)
+        impact_exit = _run_dbt_impact_check(config=config, output_dir=output_dir, changed_files=changed_files)
         if impact_exit is not None:
             return impact_exit
         _write_skipped_artifacts(config=config, output_dir=output_dir)
@@ -234,7 +239,8 @@ def cmd_run(args: argparse.Namespace) -> int:
     all_reports = []
     all_issues: list[dict[str, Any]] = []
     exit_code = 0
-    changed_files = get_changed_files() if config.breaking_change_hold.enabled else []
+    if changed_files is None:
+        changed_files = get_changed_files() if config.breaking_change_hold.enabled else []
     for context in contexts:
         context_output_dir = restricted_dir(output_dir) / _safe_context_dir(context)
         _validate_context_output_layout(context_output_dir)
@@ -468,7 +474,7 @@ def _write_skipped_artifacts(
     )
 
 
-def _run_dbt_impact_check(*, config, output_dir: Path) -> int | None:
+def _run_dbt_impact_check(*, config, output_dir: Path, changed_files: list[str] | None = None) -> int | None:
     """Analyze a non-Omni pull request for dbt changes that orphan Omni references.
 
     Returns an exit code when the check ran, or None when it was not applicable so
@@ -478,7 +484,7 @@ def _run_dbt_impact_check(*, config, output_dir: Path) -> int | None:
     if not config.dbt_impact.enabled:
         return None
     dbt_paths = config.breaking_change_hold.dbt_paths
-    changed_files = get_dbt_changed_files()
+    changed_files = get_dbt_changed_files() if changed_files is None else changed_files
     if not any(_path_under_any(path, dbt_paths) for path in changed_files):
         return None
 
