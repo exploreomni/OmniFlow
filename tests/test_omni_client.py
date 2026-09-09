@@ -391,6 +391,79 @@ class OmniClientTests(unittest.TestCase):
         self.assertEqual(session.calls[0][0], "POST")
         self.assertEqual(session.calls[0][1], "https://omni.example/api/v1/ai/jobs/job-1/cancel")
 
+    def test_ai_eval_run_lifecycle_uses_documented_endpoints(self):
+        session = FakeSession(
+            [
+                FakeResponse({"run": {"id": "run-1"}}, status_code=201),
+                FakeResponse({"run": {"id": "run-2"}}, status_code=201),
+                FakeResponse({"run": {"id": "run-1", "status": "COMPLETE", "results": []}}),
+            ]
+        )
+        client = OmniClient(base_url="https://omni.example", api_key=FAKE_API_KEY, session=session)
+        main_run_id = client.start_ai_eval_run(prompt_set_id="set-1", description="baseline")
+        branch_run_id = client.start_ai_eval_run(
+            prompt_set_id="set-1", description="branch eval", branch_id="branch-1"
+        )
+        self.assertEqual(main_run_id, "run-1")
+        self.assertEqual(branch_run_id, "run-2")
+        self.assertEqual(
+            session.calls[0][2]["json"], {"prompt_set_id": "set-1", "description": "baseline"}
+        )
+        self.assertEqual(
+            session.calls[1][2]["json"],
+            {
+                "prompt_set_id": "set-1",
+                "description": "branch eval",
+                "run_config": {"branch_id": "branch-1"},
+            },
+        )
+        self.assertEqual(session.calls[0][1], "https://omni.example/api/v1/ai/eval/runs")
+        run = client.get_ai_eval_run("run-1")
+        self.assertEqual(run["status"], "COMPLETE")
+
+    def test_ai_eval_run_rejects_mismatched_id_and_missing_status(self):
+        for payload in (
+            {"run": {"id": "other-run", "status": "COMPLETE"}},
+            {"run": {"id": "run-1"}},
+            {"run": {"id": "run-1", "status": "SURPRISE"}},
+            {"run": {"id": "run-1", "status": "COMPLETE", "results": ["malformed"]}},
+        ):
+            with self.subTest(payload=payload):
+                client = OmniClient(
+                    base_url="https://omni.example",
+                    api_key=FAKE_API_KEY,
+                    session=FakeSession([FakeResponse(payload)]),
+                )
+                with self.assertRaises(OmniAPIError):
+                    client.get_ai_eval_run("run-1")
+
+    def test_ai_eval_prompt_set_preflight_and_cancellation_contracts(self):
+        session = FakeSession([
+            FakeResponse({"prompt_set": {"id": "set-1", "model_id": "model-1", "prompts": []}}),
+            FakeResponse({"run": {"id": "run-1", "status": "CANCELLED"}, "cancelled": 1, "total": 1}),
+        ])
+        client = OmniClient(base_url="https://omni.example", api_key=FAKE_API_KEY, session=session)
+        self.assertEqual(client.get_ai_eval_prompt_set("set-1")["model_id"], "model-1")
+        self.assertEqual(client.cancel_ai_eval_run("run-1")["status"], "CANCELLED")
+        self.assertEqual(session.calls[0][:2], ("GET", "https://omni.example/api/v1/ai/eval/prompt-sets/set-1"))
+        self.assertEqual(session.calls[1][:2], ("POST", "https://omni.example/api/v1/ai/eval/runs/run-1/cancel"))
+
+    def test_ai_eval_preflight_rejects_malformed_identity_and_prompts(self):
+        for prompt_set in ({}, {"id": "other"}, {"id": "set-1", "model_id": "model-1", "prompts": None}):
+            client = OmniClient(base_url="https://omni.example", api_key=FAKE_API_KEY,
+                                session=FakeSession([FakeResponse({"prompt_set": prompt_set})]))
+            with self.subTest(prompt_set=prompt_set), self.assertRaises(OmniAPIError):
+                client.get_ai_eval_prompt_set("set-1")
+
+    def test_ai_eval_does_not_persist_undocumented_result_payloads(self):
+        run = {"id": "run-1", "status": "COMPLETE", "answer": "private answer", "results": [{
+            "prompt": "prompt", "score": 1, "query_results": {"private": "rows"},
+            "agentic_job": {"state": "COMPLETE", "resultSummary": "private answer"},
+        }]}
+        client = OmniClient(base_url="https://omni.example", api_key=FAKE_API_KEY,
+                            session=FakeSession([FakeResponse({"run": run})]))
+        self.assertNotIn("private", str(client.get_ai_eval_run("run-1")))
+
     def test_yaml_write_delete_and_git_commit_use_documented_contracts(self):
         session = FakeSession(
             [

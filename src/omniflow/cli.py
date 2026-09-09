@@ -49,6 +49,7 @@ from .reporting.json_report import write_json_report
 from .reporting.writer import write_reports
 from .security import redact, validate_repo_output_path
 from .timestamps import utc_now_iso
+from .validators.ai_eval import run_ai_eval_validation
 from .validators.content import run_content_validation
 from .validators.model import run_model_validation
 from .validators.yaml_lint import has_error, lint_graph
@@ -677,6 +678,27 @@ def _run_context(
         reports.append(model_report)
         all_issues.extend(model_report.get("issues", []))
         exit_code = max(exit_code, model_exit)
+
+    if config.ai_eval.enabled and config.ai_eval.prompt_sets:
+        ai_eval_report, ai_eval_detail, ai_eval_exit = run_ai_eval_validation(
+            client=client,
+            model_id=context.model_id,
+            branch_id=branch_id,
+            prompt_sets=config.ai_eval.prompt_sets,
+            fail_on_regression=config.ai_eval.fail_on_regression,
+            poll_interval_seconds=config.ai_eval.poll_interval_seconds,
+            timeout_seconds=config.ai_eval.timeout_seconds,
+            scoring_grace_seconds=config.ai_eval.scoring_grace_seconds,
+            max_samples=config.security.max_report_samples,
+            record_runs=lambda journal: write_json_report(output_dir / "ai-eval-runs.json", journal),
+        )
+        # Full per-prompt detail (cost breakdown, conversation IDs, timing) carries
+        # customer prompt/answer content and stays restricted; only the bounded
+        # public summary below is appended to the aggregate report.
+        write_json_report(output_dir / "ai-eval-detail.json", ai_eval_detail)
+        reports.append(ai_eval_report)
+        all_issues.extend(ai_eval_report.get("issues", []))
+        exit_code = max(exit_code, ai_eval_exit)
 
     diff_report = None
     head_graph = None

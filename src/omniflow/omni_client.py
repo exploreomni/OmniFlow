@@ -19,6 +19,9 @@ MAX_PAGINATION_PAGES = 500
 MAX_PAGINATION_RECORDS = 50_000
 MAX_AI_PROMPT_BYTES = 16 * 1024
 AI_JOB_STATES = {"CANCELLED", "COMPLETE", "DELIVERING", "EXECUTING", "FAILED", "QUEUED"}
+AI_EVAL_TERMINAL_STATES = {"COMPLETE", "CANCELLED", "FAILED"}
+AI_EVAL_STATES = AI_EVAL_TERMINAL_STATES | {"RUNNING"}
+MAX_AI_EVAL_DESCRIPTION_CHARS = 200
 SCHEMA_REFRESH_STATES = {"RUNNING", "COMPLETED", "FAILED"}
 SCHEMA_REFRESH_MODEL_KINDS = {"SHARED", "SHARED_EXTENSION"}
 
@@ -308,6 +311,95 @@ class OmniClient:
         if state not in {"CANCELLED", "COMPLETE", "FAILED"}:
             raise OmniAPIError("AI job cancellation did not return a terminal state")
         return {"job_id": job_id, "state": state}
+
+    def get_ai_eval_prompt_set(self, prompt_set_id: str) -> dict[str, Any]:
+        prompt_set_id = validate_path_segment(prompt_set_id, name="prompt_set_id")
+        payload = self._request("GET", f"/api/v1/ai/eval/prompt-sets/{prompt_set_id}")
+        if not isinstance(payload, dict) or not isinstance(payload.get("prompt_set"), dict):
+            raise OmniAPIError("AI eval prompt set returned an unexpected response shape")
+        prompt_set = payload["prompt_set"]
+        if prompt_set.get("id") != prompt_set_id:
+            raise OmniAPIError("AI eval prompt set returned a mismatched ID")
+        if not isinstance(prompt_set.get("model_id"), str) or not prompt_set["model_id"].strip():
+            raise OmniAPIError("AI eval prompt set did not identify its model")
+        if not isinstance(prompt_set.get("prompts"), list):
+            raise OmniAPIError("AI eval prompt set returned an unexpected prompts shape")
+        return prompt_set
+
+    def start_ai_eval_run(
+        self,
+        *,
+        prompt_set_id: str,
+        description: str,
+        branch_id: str | None = None,
+    ) -> str:
+        prompt_set_id = validate_path_segment(prompt_set_id, name="prompt_set_id")
+        if not isinstance(description, str) or not description.strip():
+            raise ConfigError("AI eval run description must be a non-empty string")
+        description = description.strip()
+        if len(description) > MAX_AI_EVAL_DESCRIPTION_CHARS:
+            raise ConfigError(
+                f"AI eval run description must be {MAX_AI_EVAL_DESCRIPTION_CHARS} characters or fewer"
+            )
+        request_payload: dict[str, Any] = {"prompt_set_id": prompt_set_id, "description": description}
+        if branch_id:
+            request_payload["run_config"] = {"branch_id": validate_path_segment(branch_id, name="branch_id")}
+        payload = self._request(
+            "POST",
+            "/api/v1/ai/eval/runs",
+            json_payload=request_payload,
+            retry_transient=False,
+        )
+        if not isinstance(payload, dict) or not isinstance(payload.get("run"), dict):
+            raise OmniAPIError("AI eval run creation returned an unexpected response shape")
+        run_id = payload["run"].get("id")
+        if not isinstance(run_id, str) or not run_id.strip():
+            raise OmniAPIError("AI eval run creation did not return a run ID")
+        return validate_path_segment(run_id.strip(), name="run_id")
+
+    def get_ai_eval_run(self, run_id: str) -> dict[str, Any]:
+        run_id = validate_path_segment(run_id, name="run_id")
+        payload = self._request("GET", f"/api/v1/ai/eval/runs/{run_id}")
+        if not isinstance(payload, dict) or not isinstance(payload.get("run"), dict):
+            raise OmniAPIError("AI eval run status returned an unexpected response shape")
+        run = payload["run"]
+        if run.get("id") != run_id:
+            raise OmniAPIError("AI eval run status returned a mismatched run ID")
+        status = run.get("status")
+        if not isinstance(status, str) or status not in AI_EVAL_STATES:
+            raise OmniAPIError("AI eval run status returned an invalid status")
+        results = run.get("results")
+        if results is not None and not isinstance(results, list):
+            raise OmniAPIError("AI eval run status returned an unexpected results shape")
+        if isinstance(results, list) and any(not isinstance(row, dict) for row in results):
+            raise OmniAPIError("AI eval run status returned a malformed result row")
+        # Keep only documented comparison and recovery fields. Future response
+        # additions must not silently persist query results or answer content.
+        safe_run = {key: run[key] for key in ("id", "model_id", "prompt_set_id", "branch_id", "status") if key in run}
+        safe_run["results"] = None if results is None else [
+            {key: value for key, value in row.items()
+             if key in {"id", "prompt", "score", "error_reason", "timing_ms", "query_count", "cost", "scoring_cost"}}
+            for row in results
+        ]
+        for original, safe_row in zip(results or [], safe_run["results"] or [], strict=True):
+            job = original.get("agentic_job")
+            if isinstance(job, dict):
+                safe_row["agentic_job"] = {
+                    key: job[key] for key in ("id", "state", "conversation_id") if key in job
+                }
+        return safe_run
+
+    def cancel_ai_eval_run(self, run_id: str) -> dict[str, Any]:
+        run_id = validate_path_segment(run_id, name="run_id")
+        payload = self._request(
+            "POST", f"/api/v1/ai/eval/runs/{run_id}/cancel", retry_transient=False
+        )
+        if not isinstance(payload, dict) or not isinstance(payload.get("run"), dict):
+            raise OmniAPIError("AI eval cancellation returned an unexpected response shape")
+        run = payload["run"]
+        if run.get("id") != run_id or run.get("status") not in AI_EVAL_TERMINAL_STATES:
+            raise OmniAPIError("AI eval cancellation did not confirm the requested run was terminal")
+        return run
 
     def update_model_yaml(
         self,
