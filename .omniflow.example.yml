@@ -49,6 +49,23 @@ checks:
   #     - dbt_model: orders_v2
   #       sql_table_name: analytics.marts.orders
 
+  # Optional: run Omni AI eval prompt sets against main and the PR branch, and
+  # fail on any regression. Unlike every other check here, this asks Omni AI
+  # to answer real prompts rather than performing deterministic YAML
+  # validation, so it stays disabled by default. Read docs/AI_EVAL.md before
+  # enabling it.
+  # Binary scoring only; unsupported scores and incomplete results always block.
+  # Public sampling limits never change the gate. Qualify the tenant before use.
+  # ai_eval:
+  #   enabled: true
+  #   fail_on_regression: true
+  #   poll_interval_seconds: 10
+  #   timeout_seconds: 900
+  #   scoring_grace_seconds: 180
+  #   prompt_sets:
+  #     - id: 00000000-0000-0000-0000-000000000000  # replace with your own prompt set ID
+  #       label: Core revenue prompts
+
 reporting:
   formats:
     - json

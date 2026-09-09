@@ -22,6 +22,7 @@ OmniFlow uses four evidence layers. A green result in one layer must not be pres
 | Post-deployment dbt sync | Unit API contract, polling, event, branch, timeout, action, and evidence tests | Controlled refresh completes after a real dbt deployment and Git side effects are understood |
 | Breaking change hold | Unit detection, durable state, and current-head revalidation tests | A held PR stays blocked after sync until explicit fresh validation attaches success to its unchanged head; manual merge follows review |
 | dbt impact analysis | Unit manifest, bounded head acquisition, heuristic limits, relation change, and routing tests | A referenced column removal or relation move blocks; unsupported heuristic evidence remains explicitly incomplete |
+| AI eval (opt-in, binary scoring only) | Full CLI/artifact regressions for zero sampling, incomplete/unsupported results, model routing, privacy and cleanup; loopback enabled-Action CI fixture | Confirm tenant scoring/permission/quota contracts, a real controlled regression, cancellation/recovery, and final public/restricted artifacts before enabling |
 | JSON, Markdown, SARIF, and JUnit | Unit render tests and packaged action tests | Public artifact downloads open and contain only redacted evidence |
 | GitHub annotations and PR summary | Unit escaping tests | A controlled PR displays warnings or errors and updates one bot comment |
 | AI Repair development scaffold | Unit rollback and safety tests | Maintainer-only non-production failure, repair, rerun, and rollback exercises |

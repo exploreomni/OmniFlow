@@ -40,7 +40,7 @@ OMNI_KEYS = {
     "include_personal_folders",
     "timeout",
 }
-CHECK_KEYS = {"content_validation", "model_validation", "semantic_lint", "dbt_exposures", "dbt_impact"}
+CHECK_KEYS = {"content_validation", "model_validation", "semantic_lint", "dbt_exposures", "dbt_impact", "ai_eval"}
 CONTENT_KEYS = {"enabled", "fail_on_new_only", "labels"}
 MODEL_KEYS = {"enabled", "fail_on_warnings"}
 LINT_KEYS = {"enabled", "rules"}
@@ -55,6 +55,16 @@ DBT_IMPACT_KEYS = {
 }
 TABLE_MAPPING_KEYS = {"dbt_model", "omni_view", "sql_table_name"}
 MAX_TABLE_MAPPINGS = 500
+AI_EVAL_KEYS = {
+    "enabled",
+    "prompt_sets",
+    "fail_on_regression",
+    "poll_interval_seconds",
+    "timeout_seconds",
+    "scoring_grace_seconds",
+}
+PROMPT_SET_KEYS = {"id", "label", "model_id"}
+MAX_PROMPT_SETS = 20
 REPORTING_KEYS = {"formats", "output_dir"}
 SECURITY_KEYS = {
     "redact_logs",
@@ -232,6 +242,16 @@ class DbtImpactSettings:
 
 
 @dataclass
+class AiEvalSettings:
+    enabled: bool = False
+    prompt_sets: list[dict[str, str]] = field(default_factory=list)
+    fail_on_regression: bool = True
+    poll_interval_seconds: int = 10
+    timeout_seconds: int = 900
+    scoring_grace_seconds: int = 180
+
+
+@dataclass
 class ReportingSettings:
     formats: list[str] = field(default_factory=lambda: list(DEFAULT_REPORT_FORMATS))
     output_dir: str = ".omniflow"
@@ -284,6 +304,7 @@ class OmniFlowConfig:
     contracts: ContractSettings
     dbt_exposures: DbtExposureSettings
     dbt_impact: DbtImpactSettings
+    ai_eval: AiEvalSettings
     reporting: ReportingSettings
     security: SecuritySettings
     ai_repair: AIRepairSettings
@@ -315,6 +336,7 @@ def _to_config(raw: dict[str, Any], source: Path | None) -> OmniFlowConfig:
     lint_raw = _mapping(checks_raw.get("semantic_lint"), "checks.semantic_lint")
     exposures_raw = _mapping(checks_raw.get("dbt_exposures"), "checks.dbt_exposures")
     dbt_impact_raw = _mapping(checks_raw.get("dbt_impact"), "checks.dbt_impact")
+    ai_eval_raw = _mapping(checks_raw.get("ai_eval"), "checks.ai_eval")
     lint_rules = _lint_rules(lint_raw.get("rules"))
     formats = _report_formats(reporting_raw.get("formats"))
     output_dir = _output_dir(reporting_raw.get("output_dir"))
@@ -431,6 +453,34 @@ def _to_config(raw: dict[str, Any], source: Path | None) -> OmniFlowConfig:
         ),
         table_mapping=_table_mapping(dbt_impact_raw.get("table_mapping")),
     )
+    ai_eval = AiEvalSettings(
+        enabled=parse_bool("ai_eval.enabled", ai_eval_raw.get("enabled"), False),
+        prompt_sets=_prompt_sets(ai_eval_raw.get("prompt_sets")),
+        fail_on_regression=parse_bool(
+            "ai_eval.fail_on_regression", ai_eval_raw.get("fail_on_regression"), True
+        ),
+        poll_interval_seconds=_bounded_int(
+            "checks.ai_eval.poll_interval_seconds",
+            ai_eval_raw.get("poll_interval_seconds", 10),
+            minimum=2,
+            maximum=30,
+            default=10,
+        ),
+        timeout_seconds=_bounded_int(
+            "checks.ai_eval.timeout_seconds",
+            ai_eval_raw.get("timeout_seconds", 900),
+            minimum=30,
+            maximum=3_600,
+            default=900,
+        ),
+        scoring_grace_seconds=_bounded_int(
+            "checks.ai_eval.scoring_grace_seconds",
+            ai_eval_raw.get("scoring_grace_seconds", 180),
+            minimum=0,
+            maximum=600,
+            default=180,
+        ),
+    )
     reporting = ReportingSettings(
         formats=formats,
         output_dir=output_dir,
@@ -527,6 +577,7 @@ def _to_config(raw: dict[str, Any], source: Path | None) -> OmniFlowConfig:
         contracts=contracts,
         dbt_exposures=dbt_exposures,
         dbt_impact=dbt_impact,
+        ai_eval=ai_eval,
         reporting=reporting,
         security=security,
         ai_repair=ai_repair,
@@ -696,6 +747,44 @@ def _table_mapping(value: Any) -> list[dict[str, str]]:
     return mappings
 
 
+def _prompt_sets(value: Any) -> list[dict[str, str]]:
+    """Validate the ai_eval prompt sets to evaluate, modeled on _table_mapping."""
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ConfigError("checks.ai_eval.prompt_sets must be a list of prompt set mappings")
+    if len(value) > MAX_PROMPT_SETS:
+        raise SecurityPolicyError(f"checks.ai_eval.prompt_sets cannot exceed {MAX_PROMPT_SETS} entries")
+    prompt_sets: list[dict[str, str]] = []
+    seen_ids: set[str] = set()
+    for item in value:
+        if not isinstance(item, dict):
+            raise ConfigError("checks.ai_eval.prompt_sets entries must be mappings")
+        _reject_unknown_keys(item, PROMPT_SET_KEYS, "checks.ai_eval.prompt_sets entry")
+        prompt_set_id = item.get("id")
+        if not isinstance(prompt_set_id, str) or not prompt_set_id.strip() or len(prompt_set_id.strip()) > 128:
+            raise ConfigError(
+                "checks.ai_eval.prompt_sets entries require a non-empty id no longer than 128 characters"
+            )
+        prompt_set_id = prompt_set_id.strip()
+        if prompt_set_id in seen_ids:
+            raise ConfigError(f"checks.ai_eval.prompt_sets id '{prompt_set_id}' is duplicated")
+        seen_ids.add(prompt_set_id)
+        label = item.get("label")
+        if label is not None and (not isinstance(label, str) or not label.strip() or len(label.strip()) > 200):
+            raise ConfigError(
+                "checks.ai_eval.prompt_sets label must be a non-empty string no longer than 200 characters"
+            )
+        entry = {"id": prompt_set_id, "label": label.strip() if label else prompt_set_id}
+        model_id = item.get("model_id")
+        if model_id is not None:
+            if not isinstance(model_id, str) or not model_id.strip() or len(model_id.strip()) > 128:
+                raise ConfigError("checks.ai_eval.prompt_sets model_id must be a non-empty string of at most 128 characters")
+            entry["model_id"] = model_id.strip()
+        prompt_sets.append(entry)
+    return prompt_sets
+
+
 def _mapping(value: Any, name: str) -> dict[str, Any]:
     if value is None:
         return {}
@@ -755,6 +844,11 @@ def _validate_config_schema(raw: dict[str, Any]) -> None:
         _mapping(checks.get("dbt_impact"), "checks.dbt_impact"),
         DBT_IMPACT_KEYS,
         "checks.dbt_impact",
+    )
+    _reject_unknown_keys(
+        _mapping(checks.get("ai_eval"), "checks.ai_eval"),
+        AI_EVAL_KEYS,
+        "checks.ai_eval",
     )
     _reject_unknown_keys(
         _mapping(contracts.get("fail_on"), "contracts.fail_on"),

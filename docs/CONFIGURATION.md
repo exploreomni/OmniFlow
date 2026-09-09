@@ -185,6 +185,34 @@ checks:
 
 The check reuses `deployment.breaking_change_hold.dbt_paths` to identify dbt source files, so both policies stay consistent. Manifest mode is precise; SQL heuristic mode is conservative and reports nothing for `SELECT *` or unparseable statements. Column matching is case-insensitive and uses word boundaries so removing `customer` never flags a field referencing `customer_id`. See [dbt Impact Analysis](DBT_IMPACT.md).
 
+## AI Eval
+
+This optional controlled-alpha check compares configured Omni prompt sets against `main` and the pull request's Omni branch. It supports binary scores only (`1` pass, `0` fail); unsupported numeric scores and incomplete comparisons always fail operationally. It starts agentic jobs and stays disabled pending tenant acceptance. Read [AI Eval](AI_EVAL.md) in full before enabling it.
+
+```yaml
+checks:
+  ai_eval:
+    enabled: true
+    fail_on_regression: true
+    poll_interval_seconds: 10
+    timeout_seconds: 900
+    scoring_grace_seconds: 180
+    prompt_sets:
+      - id: 00000000-0000-0000-0000-000000000000  # replace with your own prompt set ID
+        label: Core revenue prompts
+```
+
+| Setting | Default | Allowed range or behavior |
+| --- | --- | --- |
+| `enabled` | `false` | Must be enabled in trusted base-branch policy. |
+| `prompt_sets` | `[]` | `{id, label, model_id}` entries for existing sets, maximum 20. Only `id` is required; optional model routing is verified against Omni. Labels stay restricted. |
+| `fail_on_regression` | `true` | `true` blocks the merge; `false` reports regressions as warnings only. |
+| `poll_interval_seconds` | `10` | Bounded 2-30 seconds. |
+| `timeout_seconds` | `900` | Bounded 30-3600 seconds. |
+| `scoring_grace_seconds` | `180` | Bounded 0-600 seconds. |
+
+Uses `OMNI_API_KEY`; verify eval permissions and service-identity capacity before enabling. Public samples contain opaque prompt IDs only, and sample limits never change regression gating. Operational failures cannot be downgraded by `fail_on_regression`. See [AI Eval](AI_EVAL.md).
+
 ## Semantic Lint
 
 `checks.semantic_lint.enabled` defaults to `true`. Every rule accepts `off`, `info`, `warn`, or `error`. Only `error` is a blocking lint severity.

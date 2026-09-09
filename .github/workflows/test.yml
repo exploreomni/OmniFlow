@@ -121,3 +121,20 @@ jobs:
           test -f .omniflow/public/report.json
           test -f .omniflow/artifact-manifest.json
           test ! -d .omniflow/restricted
+      - name: Start loopback AI eval fixture
+        run: |
+          timeout 180s python scripts/smoke_ai_eval_action.py serve &
+          python scripts/smoke_ai_eval_action.py wait
+      - name: Exercise enabled AI eval through the composite Action
+        id: eval-smoke
+        continue-on-error: true
+        uses: ./
+        with:
+          config: ${{ github.workspace }}/tests/fixtures/ai_eval/action-policy.yml
+          omni-api-key: synthetic-eval-token
+      - name: Verify regression gating and public AI eval artifacts
+        env:
+          EVAL_OUTCOME: ${{ steps.eval-smoke.outcome }}
+        run: |
+          test "$EVAL_OUTCOME" = failure
+          python scripts/smoke_ai_eval_action.py verify
