@@ -336,10 +336,12 @@ class AiEvalCliTests(unittest.TestCase):
         }
         for name, branch in cases.items():
             with self.subTest(name=name):
-                exit_code, report, _ = self.run_cli(self.make_client(branch), fail_on_regression=False)
+                exit_code, report, files = self.run_cli(self.make_client(branch), fail_on_regression=False)
                 self.assertEqual(exit_code, 4)
                 self.assertEqual(report["policy_decision"], "fail")
                 self.assertTrue(report["model_reports"][0]["check_reports"][0]["operational_failure"])
+                self.assertIn("incomplete comparison", files["public/report.md"])
+                self.assertNotIn("AI eval is disabled", files["public/report.md"])
 
     def test_warning_mode_allows_complete_regression_and_cleans_detail(self):
         client = self.make_client({"status": "COMPLETE", "results": [result("CONFIDENTIAL-PROMPT", 0)]})

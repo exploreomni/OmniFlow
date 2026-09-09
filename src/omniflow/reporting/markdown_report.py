@@ -16,6 +16,7 @@ def render_markdown_report(report: dict[str, Any]) -> str:
     coverage_gaps = _coverage_gaps(report)
     dbt_exposure_summaries = _dbt_exposure_summaries(report)
     ai_eval_summaries = _ai_eval_summaries(report)
+    ai_eval_reports = _ai_eval_reports(report)
     operation = str(report.get("operation") or "validation")
     dbt_sync_summaries = _dbt_sync_summaries(report)
     lines = [
@@ -57,7 +58,7 @@ def render_markdown_report(report: dict[str, Any]) -> str:
         "",
         "## AI Eval",
         "",
-        *_ai_eval_lines(ai_eval_summaries, decision=decision),
+        *_ai_eval_lines(ai_eval_summaries, decision=decision, check_reports=ai_eval_reports),
         "",
         "## Validation Summary",
         "",
@@ -228,8 +229,14 @@ def _dbt_exposure_lines(summaries: list[dict[str, Any]], *, decision: str) -> li
 
 def _ai_eval_summaries(report: dict[str, Any]) -> list[dict[str, Any]]:
     summaries = []
-    if report.get("validator") == "ai_eval" and isinstance(report.get("prompt_set_summaries"), list):
-        summaries.extend(report["prompt_set_summaries"])
+    for check_report in _ai_eval_reports(report):
+        if isinstance(check_report.get("prompt_set_summaries"), list):
+            summaries.extend(check_report["prompt_set_summaries"])
+    return summaries
+
+
+def _ai_eval_reports(report: dict[str, Any]) -> list[dict[str, Any]]:
+    reports = [report] if report.get("validator") == "ai_eval" else []
     for model_report in report.get("model_reports", []) if isinstance(report.get("model_reports"), list) else []:
         if not isinstance(model_report, dict):
             continue
@@ -238,18 +245,23 @@ def _ai_eval_summaries(report: dict[str, Any]) -> list[dict[str, Any]]:
         ):
             if not isinstance(check_report, dict) or check_report.get("validator") != "ai_eval":
                 continue
-            prompt_set_summaries = check_report.get("prompt_set_summaries")
-            if isinstance(prompt_set_summaries, list):
-                summaries.extend(prompt_set_summaries)
-    return summaries
+            reports.append(check_report)
+    return reports
 
 
-def _ai_eval_lines(summaries: list[dict[str, Any]], *, decision: str) -> list[str]:
+def _ai_eval_lines(
+    summaries: list[dict[str, Any]], *, decision: str, check_reports: list[dict[str, Any]]
+) -> list[str]:
+    incomplete = any(check.get("operational_failure") for check in check_reports)
+    lines = ["_AI eval produced an incomplete comparison; see validation issues and JSON evidence._"] if incomplete else []
     if not summaries:
+        if lines:
+            return lines
+        if check_reports:
+            return ["_AI eval was skipped for these model contexts; see the recorded reason in JSON evidence._"]
         if decision == "skipped":
             return ["_Not evaluated because no Omni semantic-layer changes were detected._"]
         return ["_AI eval is disabled or has no configured prompt sets._"]
-    lines = []
     for entry in summaries:
         delta = entry.get("accuracy_delta_pts")
         delta_str = "n/a" if delta is None else f"{delta:+.1f} pts"
