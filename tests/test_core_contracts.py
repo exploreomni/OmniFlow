@@ -149,11 +149,13 @@ def test_active_credentials_and_data_fields_do_not_reach_public_formats(tmp_path
         "OMNI_API_KEY": "synthetic-shared",
         "OMNIFLOW_SYNC_API_KEY": "synthetic-shared-sync",
         "OMNIFLOW_REPAIR_API_KEY": "synthetic-repair",
+        "OMNIFLOW_SYNC_STATE_TOKEN": "synthetic-sensitive-sync-state-value",
+        "OMNIFLOW_GITHUB_TOKEN": "synthetic-omniflow-github-value",
+        "GITHUB_TOKEN": "synthetic-github-value",
+        "GH_TOKEN": "synthetic-gh-value",
     }
     for name, value in secrets.items():
         monkeypatch.setenv(name, value)
-    secrets["OMNIFLOW_SYNC_STATE_TOKEN"] = "synthetic-sensitive-sync-state-value"
-    monkeypatch.setenv("OMNIFLOW_SYNC_STATE_TOKEN", secrets["OMNIFLOW_SYNC_STATE_TOKEN"])
     raw = " ".join(secrets.values())
     assert all(value not in redact(raw) for value in secrets.values())
     report = {
