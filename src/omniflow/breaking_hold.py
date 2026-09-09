@@ -17,7 +17,6 @@ import re
 
 # Git is invoked without a shell and with bounded arguments.
 import subprocess  # nosec B603,B404
-import sys
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +27,7 @@ from .git import git_executable
 VALIDATOR = "breaking_change_hold"
 SAME_PR_RULE = "breaking_change_with_dbt_in_same_pull_request"
 PENDING_RULE = "breaking_change_with_pending_dbt_deployment"
+STATE_RULE = "breaking_change_sync_state_unavailable"
 SAFE_SHA_RE = re.compile(r"^[0-9a-fA-F]{7,64}$")
 MAX_SAMPLE_CHANGES = 10
 
@@ -62,9 +62,9 @@ def evaluate_breaking_hold(
                 message=(
                     "This pull request changes dbt sources and makes breaking Omni model changes. "
                     "Omni promotes model YAML on merge, so the breaking references can reach production "
-                    "before the dbt deployment updates the warehouse. Split the change: merge the dbt "
-                    "sources first, let the protected deployment run 'omniflow dbt sync', then merge the "
-                    "Omni model changes."
+                    "before the dbt deployment updates the warehouse. Use expand/contract: deploy an "
+                    "additive warehouse change retaining old names, synchronize, then update Omni and "
+                    "all consumers. Remove old warehouse names only after consumer validation."
                 ),
                 breaking_changes=breaking_changes,
                 dbt_paths=overlapping,
@@ -72,6 +72,13 @@ def evaluate_breaking_hold(
         ]
 
     pending = _pending_dbt_paths(last_sync_sha, settings.dbt_paths)
+    if pending is None:
+        return [_issue(
+            rule=STATE_RULE, severity=severity,
+            message="Cannot establish deployment readiness: sync state is missing, unreachable, or not an ancestor "
+                    "of the trusted base. Record a verified successful sync and fetch complete base history.",
+            breaking_changes=breaking_changes, dbt_paths=[], last_sync_sha=last_sync_sha,
+        )]
     if pending:
         return [
             _issue(
@@ -151,52 +158,45 @@ def _is_under(path: str, dbt_path: str) -> bool:
     return normalized_path == normalized_dbt_path or normalized_path.startswith(f"{normalized_dbt_path}/")
 
 
-def _pending_dbt_paths(last_sync_sha: str | None, dbt_paths: list[str]) -> list[str]:
+def _pending_dbt_paths(last_sync_sha: str | None, dbt_paths: list[str]) -> list[str] | None:
     """Return dbt paths changed since the last recorded successful sync.
 
-    An unset marker means the repository has not recorded a sync yet, so the
-    pending check is skipped rather than treated as a failure. This keeps the
-    policy quiet for repositories that do not deploy dbt through OmniFlow.
+    Missing or unreachable state is incomplete evidence, never proof of readiness.
     """
     if not last_sync_sha:
-        return []
+        return None
     sha = last_sync_sha.strip()
     if not sha:
-        return []
+        return None
     if not SAFE_SHA_RE.fullmatch(sha):
         raise SecurityPolicyError(
             "OMNIFLOW_LAST_SYNC_SHA must be a hexadecimal Git commit SHA between 7 and 64 characters"
         )
     changed = _git_changed_files_since(sha)
     if changed is None:
-        # Most often a shallow checkout. Say so loudly: the operator enabled the
-        # policy expecting pending-deployment coverage, and silently downgrading
-        # to same-pull-request detection would misrepresent what was checked.
-        print(
-            "omniflow warning: breaking-change hold could not reach the recorded sync commit "
-            f"{sha}, so pending-deployment detection was skipped. Use a full-history checkout "
-            "(fetch-depth: 0) to enable it.",
-            file=sys.stderr,
-        )
-        return []
+        return None
     return _dbt_overlap(changed, dbt_paths)
 
 
 def _git_changed_files_since(sha: str) -> list[str] | None:
     """List repository paths changed between a commit and HEAD.
 
-    Returns None when the commit is unreachable in the runner's checkout so an
-    unavailable history never blocks a merge on incomplete evidence.
+    Returns None when history cannot establish the recorded deployment ancestor.
     """
     try:
+        subprocess.run(  # nosec B603
+            [git_executable(), "merge-base", "--is-ancestor", sha, "HEAD"],
+            check=True, capture_output=True, timeout=10,
+        )
         # Arguments are passed directly to Git, never through a shell.
         result = subprocess.run(  # nosec B603
-            [git_executable(), "diff", "--name-only", "--no-renames", f"{sha}...HEAD"],
+            [git_executable(), "diff", "--name-only", "--no-renames", f"{sha}..HEAD"],
             check=True,
             capture_output=True,
             text=True,
+            timeout=10,
         )
-    except (OSError, subprocess.CalledProcessError):
+    except (OSError, subprocess.SubprocessError):
         return None
     files: list[str] = []
     for line in result.stdout.splitlines():

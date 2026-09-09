@@ -14,24 +14,25 @@ run on pull requests that would otherwise be skipped for having no Omni changes.
 from __future__ import annotations
 
 import re
-
-# Git is invoked without a shell and with bounded arguments.
-import subprocess  # nosec B603,B404
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from .config import DbtImpactSettings
-from .dbt_manifest import DbtModel, diff_manifests, parse_manifest
-from .dbt_sql_diff import diff_sql_columns, model_name_from_path
+from .dbt_manifest import MAX_MANIFEST_BYTES, DbtModel, diff_manifests, parse_manifest
+from .dbt_sql_diff import MAX_SQL_BYTES, analyze_output_columns, model_name_from_path
 from .diff.yaml_loader import load_yaml_files
-from .git import git_executable
+from .exceptions import SecurityPolicyError
+from .revision_data import read_git_text, read_head_text
 from .timestamps import utc_now_iso
 
 VALIDATOR = "dbt_impact"
 ORPHANED_COLUMN_RULE = "dbt_column_removal_orphans_omni_field"
 ORPHANED_MODEL_RULE = "dbt_model_removal_orphans_omni_view"
 MAX_SAMPLES = 25
+COVERAGE_RULE = "dbt_impact_incomplete_coverage"
+MAX_DBT_FILES = 1000
+MAX_SQL_TOTAL_BYTES = 50 * 1024 * 1024
 # ${TABLE}.column, "column", or a bare word reference inside a field's SQL.
 TABLE_TOKEN_RE = re.compile(r"\$\{\s*TABLE\s*\}\s*\.\s*([A-Za-z_][A-Za-z0-9_]*)")
 
@@ -65,12 +66,14 @@ def evaluate_dbt_impact(
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     """Analyze a dbt-only change for Omni reference breakage.
 
-    Returns the impact report and its issues. An empty issue list means either
-    nothing was affected or the evidence was insufficient to make a claim.
+    Returns the impact report and its issues. Incomplete coverage is an explicit
+    issue and blocks by default; an empty finding list never hides missing evidence.
     """
     root = repo_root or Path(".")
     severity = "error" if settings.fail_on_orphaned_references else "warning"
     dbt_files = [path for path in changed_files if _under_any(path, dbt_paths)]
+    if len(dbt_files) > MAX_DBT_FILES:
+        raise SecurityPolicyError("dbt impact exceeds the 1,000-file safety limit")
 
     graph_files = _load_omni_files(root, omni_yaml_paths)
     field_refs, view_refs = _index_omni_references(graph_files)
@@ -92,6 +95,18 @@ def evaluate_dbt_impact(
             mode=mode,
         )
     )
+
+    if dbt_files and not graph_files:
+        notes.append("Incomplete coverage: no committed Omni YAML was available to index.")
+    gaps = [note for note in notes if note.startswith("Incomplete coverage:")]
+    if gaps:
+        issues.append({
+            "validator": VALIDATOR,
+            "rule": COVERAGE_RULE,
+            "severity": "error" if settings.fail_on_incomplete_coverage else "warning",
+            "message": "dbt impact could not establish complete coverage. Supply complete evidence before gating.",
+            "coverage_gaps": gaps[:MAX_SAMPLES],
+        })
     issues.extend(
         _model_issues(
             removed_models=removed_models,
@@ -106,6 +121,7 @@ def evaluate_dbt_impact(
         "validator": VALIDATOR,
         "generated_at": utc_now_iso(),
         "analysis_mode": mode,
+        "coverage_complete": not gaps,
         "dbt_files_analyzed": sorted(dbt_files)[:MAX_SAMPLES],
         "dbt_file_count": len(dbt_files),
         "omni_views_indexed": len({reference.identity for bucket in view_refs.values() for reference in bucket}),
@@ -137,6 +153,8 @@ def _resolve_dbt_changes(
     same token, the analysis mode, and human-readable notes.
     """
     notes: list[str] = []
+    if not dbt_files:
+        return {}, {}, "not_applicable", notes
     manifest_result = _manifest_changes(settings=settings, base_ref=base_ref, root=root, notes=notes)
     if manifest_result is not None:
         removed_columns, removed_models = manifest_result
@@ -157,29 +175,35 @@ def _manifest_changes(
 ) -> tuple[dict[str, set[str]], dict[str, str]] | None:
     if not settings.manifest_path:
         return None
-    manifest_file = root / settings.manifest_path
-    head_text = _read_text(manifest_file)
+    head_text = read_head_text(settings.manifest_path, root=root, max_bytes=MAX_MANIFEST_BYTES)
     if head_text is None:
         notes.append(
-            f"Configured dbt manifest '{settings.manifest_path}' was not found in the checkout; "
+            f"Incomplete coverage: configured dbt manifest '{settings.manifest_path}' was not found at the head; "
             "falling back to SQL heuristics."
         )
         return None
     if not base_ref:
         notes.append(
-            "No base ref was available to compare the dbt manifest against; "
+            "Incomplete coverage: no base ref was available to compare the dbt manifest against; "
             "falling back to SQL heuristics."
         )
         return None
-    base_text = _git_show(base_ref, settings.manifest_path)
+    base_text = _git_show(base_ref, settings.manifest_path, root=root, max_bytes=MAX_MANIFEST_BYTES)
     if base_text is None:
         notes.append(
-            f"Could not read '{settings.manifest_path}' from the base ref; falling back to SQL heuristics."
+            f"Incomplete coverage: could not read '{settings.manifest_path}' from the base ref; "
+            "falling back to SQL heuristics."
         )
         return None
 
     base_models = parse_manifest(base_text, source=f"{base_ref}:{settings.manifest_path}")
     head_models = parse_manifest(head_text, source=settings.manifest_path)
+    if not base_models:
+        notes.append("Incomplete coverage: base manifest contains no materialized nodes.")
+    if any(not model.contract_enforced or not model.columns for model in (*base_models.values(), *head_models.values())):
+        notes.append("Incomplete coverage: manifest columns require enforced, nonempty dbt contracts on both revisions.")
+    if base_text == head_text:
+        notes.append("Incomplete coverage: the committed manifest is unchanged despite dbt source changes.")
     removed_model_nodes, removed_column_nodes = diff_manifests(base_models, head_models)
 
     removed_columns: dict[str, set[str]] = {}
@@ -204,22 +228,32 @@ def _sql_changes(
     removed_columns: dict[str, set[str]] = {}
     removed_models: dict[str, str] = {}
     if not base_ref:
-        notes.append("No base ref was available, so dbt SQL could not be compared.")
+        notes.append("Incomplete coverage: no base ref was available, so dbt SQL could not be compared.")
         return removed_columns, removed_models
 
+    total_bytes = 0
     for path in dbt_files:
         model_name = model_name_from_path(path)
-        if not model_name:
+        if not model_name or not path.lower().endswith(".sql") or "macros" in Path(path).parts:
+            notes.append(f"Incomplete coverage: '{path}' requires manifest analysis.")
             continue
-        base_sql = _git_show(base_ref, path)
-        head_sql = _read_text(root / path)
+        base_sql = _git_show(base_ref, path, root=root, max_bytes=MAX_SQL_BYTES)
+        head_sql = read_head_text(path, root=root, max_bytes=MAX_SQL_BYTES)
+        total_bytes += len((base_sql or "").encode()) + len((head_sql or "").encode())
+        if total_bytes > MAX_SQL_TOTAL_BYTES:
+            raise SecurityPolicyError("dbt SQL comparison exceeds the 50 MiB safety limit")
         if base_sql is None:
             # New model file: nothing existed before, so nothing can be orphaned.
             continue
         if head_sql is None:
             removed_models[model_name] = model_name
             continue
-        missing = diff_sql_columns(base_sql, head_sql)
+        base_columns, base_complete = analyze_output_columns(base_sql)
+        head_columns, head_complete = analyze_output_columns(head_sql)
+        if not base_complete or not head_complete:
+            notes.append(f"Incomplete coverage: unsupported SQL projection in '{path}'.")
+            continue
+        missing = base_columns - head_columns
         if missing:
             removed_columns.setdefault(model_name, set()).update(missing)
     if not removed_columns and not removed_models:
@@ -536,28 +570,10 @@ def _under_any(path: str, prefixes: list[str]) -> bool:
         cleaned = prefix.strip().strip("/")
         if not cleaned:
             continue
-        if normalized == cleaned or normalized.startswith(f"{cleaned}/"):
+        if cleaned == "." or normalized == cleaned or normalized.startswith(f"{cleaned}/"):
             return True
     return False
 
 
-def _read_text(path: Path) -> str | None:
-    try:
-        return path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
-        return None
-
-
-def _git_show(ref: str, path: str) -> str | None:
-    """Read a file at a Git ref. Returns None when it is unavailable."""
-    try:
-        # Arguments are passed directly to Git, never through a shell.
-        result = subprocess.run(  # nosec B603
-            [git_executable(), "show", f"{ref}:{path}"],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-    except (OSError, subprocess.CalledProcessError):
-        return None
-    return result.stdout
+def _git_show(ref: str, path: str, *, root: Path = Path("."), max_bytes: int = MAX_SQL_BYTES) -> str | None:
+    return read_git_text(ref, path, root=root, max_bytes=max_bytes)

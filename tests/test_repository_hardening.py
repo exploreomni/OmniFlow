@@ -80,9 +80,9 @@ class RepositoryHardeningTests(unittest.TestCase):
         self.assertTrue(any("omniflow repair ai --auto" in script for script in scripts))
         self.assertTrue(any("omniflow dbt sync --auto" in script for script in scripts))
 
-    def test_example_workflow_uses_minimal_checkout_and_uploads_only_public_evidence(self):
+    def test_example_workflow_uses_trusted_history_and_uploads_only_public_evidence(self):
         text = (ROOT / ".github/workflow-examples/omniflow.yml").read_text(encoding="utf-8")
-        self.assertIn("fetch-depth: 1", text)
+        self.assertIn("fetch-depth: 0", text)
         self.assertIn("persist-credentials: false", text)
         self.assertIn("timeout-minutes: 30", text)
         self.assertIn("cancel-in-progress: true", text)

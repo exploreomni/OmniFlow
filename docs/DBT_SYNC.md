@@ -104,7 +104,9 @@ Exit behavior:
 
 ## Single-Branch Monorepos
 
-Repositories that keep dbt and Omni model YAML on the same protected branch can pair this stage with the [breaking change hold](BREAKING_CHANGE_HOLD.md). The hold blocks a pull request that would promote breaking Omni changes before this deployment reaches the warehouse, and [omniflow-dbt-sync-with-release.yml](../.github/workflow-examples/omniflow-dbt-sync-with-release.yml) extends the job below to record the synchronized commit and release the held pull request after a successful refresh.
+Repositories that keep dbt and Omni model YAML on the same protected branch can pair this stage with the [breaking change hold](BREAKING_CHANGE_HOLD.md). The hold blocks unsafe promotion when deployment evidence is pending or unavailable. [omniflow-dbt-sync-with-release.yml](../.github/workflow-examples/omniflow-dbt-sync-with-release.yml) records and rereads the synchronized commit after a successful refresh; missing credentials or failed persistence fail the workflow. It never releases a PR itself. Dispatch [omniflow-revalidate-held.yml](../.github/workflow-examples/omniflow-revalidate-held.yml) for fresh validation of the current PR head before a human merges. Adopt the required `OmniFlow deployment readiness` check and up-to-date branch protection explicitly.
+
+For destructive changes, deploy an additive expansion first while retaining old warehouse names, synchronize, migrate Omni and other consumers, validate adoption, then remove obsolete names. Deploying a destructive dbt rename before updating consumers is not a safe sequence.
 
 ## Official Omni References
 

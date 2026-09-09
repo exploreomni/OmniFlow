@@ -38,7 +38,7 @@ from .discovery import (
 from .downstream import generate_downstream_dependencies
 from .exceptions import ConfigError, ExitCodes, OmniAuthError, OmniFlowError, SecurityPolicyError
 from .exposures import run_dbt_exposure_enrichment
-from .git import current_branch, current_sha, event_name, git_executable, pr_number
+from .git import current_branch, current_sha, event_name, git_executable, git_value, pr_number
 from .github.annotations import annotation_lines
 from .github.repair_attempt import GitHubRepairAttemptGuard, load_repair_event
 from .logging import configure_logging
@@ -47,6 +47,7 @@ from .repair.orchestrator import run_ai_repair, validate_ai_repair_policy
 from .repair.reporting import write_repair_artifacts
 from .reporting.json_report import write_json_report
 from .reporting.writer import write_reports
+from .revision_data import pull_request_changed_files, pull_request_revision
 from .security import redact, validate_repo_output_path
 from .timestamps import utc_now_iso
 from .validators.ai_eval import run_ai_eval_validation
@@ -56,13 +57,17 @@ from .validators.yaml_lint import has_error, lint_graph
 from .yaml_pull import pull_yaml
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: list[str] | None = None, *, changed_files: list[str] | None = None) -> int:
     if os.name == "posix":
         os.umask(0o077)
     parser = build_parser()
     args = parser.parse_args(argv)
     configure_logging("DEBUG" if getattr(args, "verbose", False) else "INFO")
     try:
+        if changed_files is not None:
+            if args.func is not cmd_run:
+                raise ConfigError("An internal revision inventory is only supported for run")
+            return cmd_run(args, changed_files=changed_files)
         return args.func(args)
     except OmniFlowError as exc:
         print(redact(str(exc)), file=sys.stderr)
@@ -195,7 +200,7 @@ def _add_common_omni_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--include-personal-folders", action=argparse.BooleanOptionalAction, default=None)
 
 
-def cmd_run(args: argparse.Namespace) -> int:
+def cmd_run(args: argparse.Namespace, *, changed_files: list[str] | None = None) -> int:
     try:
         config = _override_config(load_config(args.config), args)
     except OmniFlowError as exc:
@@ -218,6 +223,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             branch_name=config.omni.branch_name,
             branch_id=config.omni.branch_id,
             allow_skip=True,
+            changed_files=changed_files,
         )
     except OmniFlowError as exc:
         _write_setup_failure_artifacts(config=config, output_dir=output_dir, exc=exc)
@@ -225,7 +231,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     if not contexts:
         # A pull request with no Omni model changes can still break Omni by
         # removing a warehouse column or model the committed YAML references.
-        impact_exit = _run_dbt_impact_check(config=config, output_dir=output_dir)
+        impact_exit = _run_dbt_impact_check(config=config, output_dir=output_dir, changed_files=changed_files)
         if impact_exit is not None:
             return impact_exit
         _write_skipped_artifacts(config=config, output_dir=output_dir)
@@ -234,7 +240,8 @@ def cmd_run(args: argparse.Namespace) -> int:
     all_reports = []
     all_issues: list[dict[str, Any]] = []
     exit_code = 0
-    changed_files = get_changed_files() if config.breaking_change_hold.enabled else []
+    if changed_files is None:
+        changed_files = get_changed_files() if config.breaking_change_hold.enabled else []
     for context in contexts:
         context_output_dir = restricted_dir(output_dir) / _safe_context_dir(context)
         _validate_context_output_layout(context_output_dir)
@@ -324,18 +331,24 @@ def cmd_route(args: argparse.Namespace) -> int:
         _write_setup_failure_artifacts(config=config, output_dir=output_dir, exc=exc)
         raise
 
-    should_run = bool(contexts)
+    requires_omni = bool(contexts)
+    dbt_impact_needed = config.dbt_impact.enabled and any(
+        _path_under_any(path, config.breaking_change_hold.dbt_paths) for path in get_dbt_changed_files()
+    )
+    should_run = requires_omni or dbt_impact_needed
     reason = "" if should_run else "no Omni PR context or changed Omni model files detected"
     if not should_run:
         _write_skipped_artifacts(config=config, output_dir=output_dir, reason=reason)
 
     payload = {
         "should_run": should_run,
+        "requires_omni": requires_omni,
         "reason": reason,
         "model_count": len(contexts),
     }
     if args.format == "github":
         print(f"should_run={'true' if should_run else 'false'}")
+        print(f"requires_omni={'true' if requires_omni else 'false'}")
         print(f"reason={reason}")
         print(f"model_count={len(contexts)}")
     elif args.format == "json":
@@ -462,7 +475,7 @@ def _write_skipped_artifacts(
     )
 
 
-def _run_dbt_impact_check(*, config, output_dir: Path) -> int | None:
+def _run_dbt_impact_check(*, config, output_dir: Path, changed_files: list[str] | None = None) -> int | None:
     """Analyze a non-Omni pull request for dbt changes that orphan Omni references.
 
     Returns an exit code when the check ran, or None when it was not applicable so
@@ -472,26 +485,22 @@ def _run_dbt_impact_check(*, config, output_dir: Path) -> int | None:
     if not config.dbt_impact.enabled:
         return None
     dbt_paths = config.breaking_change_hold.dbt_paths
-    changed_files = get_changed_files()
+    changed_files = get_dbt_changed_files() if changed_files is None else changed_files
     if not any(_path_under_any(path, dbt_paths) for path in changed_files):
         return None
 
     omni_yaml_paths = config.dbt_impact.omni_yaml_paths or _flow_model_paths()
-    if not omni_yaml_paths:
-        print(
-            "omniflow warning: dbt impact analysis is enabled but no Omni model path is available. "
-            "Add checks.dbt_impact.omni_yaml_paths or model_path entries to .omni/flow.json.",
-            file=sys.stderr,
+    try:
+        report, issues = evaluate_dbt_impact(
+            changed_files=changed_files,
+            dbt_paths=dbt_paths,
+            settings=config.dbt_impact,
+            omni_yaml_paths=omni_yaml_paths,
+            base_ref=_base_ref(),
         )
-        return None
-
-    report, issues = evaluate_dbt_impact(
-        changed_files=changed_files,
-        dbt_paths=dbt_paths,
-        settings=config.dbt_impact,
-        omni_yaml_paths=omni_yaml_paths,
-        base_ref=_base_ref(),
-    )
+    except OmniFlowError as exc:
+        _write_setup_failure_artifacts(config=config, output_dir=output_dir, exc=exc)
+        raise
     exit_code = (
         ExitCodes.VALIDATION_FAILED
         if any(issue.get("severity") == "error" for issue in issues)
@@ -569,6 +578,11 @@ def _run_dbt_impact_check(*, config, output_dir: Path) -> int | None:
     return exit_code
 
 
+def get_dbt_changed_files() -> list[str]:
+    exact = pull_request_changed_files()
+    return exact if exact is not None else get_changed_files()
+
+
 def _flow_model_paths() -> list[str]:
     """Read model paths from trusted base-branch metadata."""
     try:
@@ -597,6 +611,9 @@ def _base_ref() -> str | None:
     None means no comparison base is available and the caller reports that rather
     than guessing.
     """
+    revision = pull_request_revision("base")
+    if revision is not None:
+        return revision[0]
     candidates: list[str] = []
     base_branch = os.getenv("GITHUB_BASE_REF")
     if base_branch:
@@ -604,7 +621,7 @@ def _base_ref() -> str | None:
     candidates.append("HEAD~1")
     for candidate in candidates:
         if _ref_exists(candidate):
-            return candidate
+            return git_value("rev-parse", candidate)
     return None
 
 

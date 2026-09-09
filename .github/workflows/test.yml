@@ -77,6 +77,33 @@ jobs:
           /tmp/omniflow-wheel-test/bin/python -m pip check
           /tmp/omniflow-wheel-test/bin/omniflow --version
 
+  dbt-action-integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          path: .omniflow-tooling
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: "3.11"
+      - name: Prepare trusted consumer fixture
+        id: fixture
+        run: |
+          python .omniflow-tooling/scripts/smoke_dbt_action.py prepare \
+            --event "$RUNNER_TEMP/omniflow-dbt-event.json"
+      - name: Exercise actual dbt-only action without Omni credentials
+        id: dbt
+        continue-on-error: true
+        uses: ./.omniflow-tooling
+      - name: Verify expected failure and immutable-data boundary
+        env:
+          ACTION_OUTCOME: ${{ steps.dbt.outcome }}
+        run: |
+          test "$ACTION_OUTCOME" = failure
+          python .omniflow-tooling/scripts/smoke_dbt_action.py verify
+
   action-install:
     runs-on: ubuntu-latest
     timeout-minutes: 10

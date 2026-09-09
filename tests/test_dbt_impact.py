@@ -7,6 +7,7 @@ from unittest import mock
 
 from omniflow.config import DbtImpactSettings, load_config
 from omniflow.dbt_impact import (
+    COVERAGE_RULE,
     ORPHANED_COLUMN_RULE,
     ORPHANED_MODEL_RULE,
     VALIDATOR,
@@ -62,7 +63,7 @@ def model_node(name, columns, *, schema="marts", database="analytics", resource_
         "schema": schema,
         "alias": name,
         "relation_name": f'"{database}"."{schema}"."{name}"',
-        "config": {"materialized": "table"},
+        "config": {"materialized": "table", "contract": {"enforced": True}},
         "columns": {column: {"name": column} for column in columns},
     }
 
@@ -189,6 +190,12 @@ class ManifestTests(unittest.TestCase):
 
 
 class CrossReferenceTests(unittest.TestCase):
+    def setUp(self):
+        # These are local-file fixtures, not the CI runner's enclosing real PR.
+        context = mock.patch.dict(os.environ, {"GITHUB_EVENT_NAME": ""})
+        context.start()
+        self.addCleanup(context.stop)
+
     def _repo(self, directory, *, views=None, manifest_text=None):
         root = Path(directory)
         model_dir = root / "omni/my_model/views"
@@ -396,14 +403,15 @@ class CrossReferenceTests(unittest.TestCase):
                     repo_root=root,
                 )
         self.assertEqual(report["analysis_mode"], "sql_heuristic")
-        self.assertEqual(issues, [])
+        self.assertEqual(issues[0]["rule"], COVERAGE_RULE)
+        self.assertFalse(report["coverage_complete"])
         self.assertTrue(any("was not found" in note for note in report["notes"]))
 
     def test_table_mapping_override_links_model_to_view(self):
         base_manifest = manifest(
             {"model.p.orders_v2": model_node("orders_v2", ["customer_id"], schema="staging")}
         )
-        head_manifest = manifest({"model.p.orders_v2": model_node("orders_v2", [], schema="staging")})
+        head_manifest = manifest({"model.p.orders_v2": model_node("orders_v2", ["customer_key"], schema="staging")})
         with tempfile.TemporaryDirectory() as directory:
             root = self._repo(directory, manifest_text=head_manifest)
             with mock.patch("omniflow.dbt_impact._git_show", return_value=base_manifest):
@@ -423,7 +431,7 @@ class CrossReferenceTests(unittest.TestCase):
         self.assertEqual(len(issues), 1)
         self.assertEqual(issues[0]["column"], "customer_id")
 
-    def test_missing_omni_yaml_directory_produces_no_issues(self):
+    def test_missing_omni_yaml_directory_blocks_incomplete_coverage(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             with mock.patch(
@@ -438,7 +446,8 @@ class CrossReferenceTests(unittest.TestCase):
                     base_ref="origin/main",
                     repo_root=root,
                 )
-        self.assertEqual(issues, [])
+        self.assertEqual(issues[0]["rule"], COVERAGE_RULE)
+        self.assertEqual(issues[0]["severity"], "error")
         self.assertEqual(report["omni_views_indexed"], 0)
 
 
