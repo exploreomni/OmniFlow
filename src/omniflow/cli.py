@@ -26,8 +26,7 @@ from .contracts import evaluate_contracts
 from .dbt_impact import evaluate_dbt_impact
 from .dbt_sync import run_dbt_sync, validate_dbt_sync_environment
 from .diff.diff_engine import diff_graphs
-from .diff.semantic_graph import build_graph
-from .diff.yaml_loader import load_yaml_files
+from .diff.semantic_graph import load_yaml_graph
 from .discovery import (
     ModelContext,
     discover_contexts,
@@ -738,8 +737,8 @@ def _run_context(
             branch_id=branch_id,
             output_dir=head_yaml_dir,
         )
-        base_graph = build_graph(load_yaml_files(base_yaml_dir))
-        head_graph = build_graph(load_yaml_files(head_yaml_dir))
+        base_graph = load_yaml_graph(base_yaml_dir, require_view_names=True)
+        head_graph = load_yaml_graph(head_yaml_dir, require_view_names=True)
         diff_report = diff_graphs(base_graph, head_graph)
         write_json_report(output_dir / "semantic-diff.json", diff_report)
 
@@ -1213,8 +1212,8 @@ def cmd_dbt_sync(args: argparse.Namespace) -> int:
 
 
 def cmd_diff(args: argparse.Namespace) -> int:
-    base_graph = build_graph(load_yaml_files(args.base))
-    head_graph = build_graph(load_yaml_files(args.head))
+    base_graph = load_yaml_graph(args.base)
+    head_graph = load_yaml_graph(args.head)
     report = diff_graphs(base_graph, head_graph)
     if args.report_out:
         write_json_report(args.report_out, report)

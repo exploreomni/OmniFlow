@@ -1,10 +1,28 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
 from ..exceptions import ConfigError, SecurityPolicyError
 from ..yaml_security import MAX_YAML_FILE_BYTES, MAX_YAML_FILES, MAX_YAML_TOTAL_BYTES, parse_secure_yaml
+
+
+def load_view_names(root: str | Path) -> dict[str, str] | None:
+    path = Path(root) / "manifest.json"
+    if path.is_symlink():
+        raise SecurityPolicyError("Omni YAML snapshot manifests must not be symbolic links")
+    if not path.exists():
+        return None
+    if path.stat().st_size > MAX_YAML_FILE_BYTES:
+        raise SecurityPolicyError("Omni YAML snapshot manifest exceeds the 5 MiB safety limit")
+    try:
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise ConfigError("Invalid Omni YAML snapshot manifest; refresh the snapshot") from exc
+    if not isinstance(manifest, dict) or not isinstance(manifest.get("view_names"), dict):
+        raise ConfigError("YAML snapshot is missing canonical viewNames metadata; pull a fresh snapshot")
+    return manifest["view_names"]
 
 
 def load_yaml_files(root: str | Path) -> dict[str, Any]:

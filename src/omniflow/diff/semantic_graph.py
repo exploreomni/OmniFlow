@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from ..exceptions import ConfigError
+from ..view_identity import validate_view_names
+from .yaml_loader import load_view_names, load_yaml_files
 
 
 @dataclass
@@ -16,11 +19,33 @@ class SemanticGraph:
     files: dict[str, Any] = field(default_factory=dict)
 
 
-def build_graph(files: dict[str, Any]) -> SemanticGraph:
+def load_yaml_graph(root: str | Path, *, require_view_names: bool = False) -> SemanticGraph:
+    files = load_yaml_files(root)
+    view_names = load_view_names(root)
+    if view_names is None and require_view_names:
+        raise ConfigError("Missing canonical viewNames metadata; pull a fresh YAML snapshot")
+    if view_names is None and any(
+        "/" in path and _infer_kind(path, payload) == "view"
+        and "__" not in _name(path, {}) and "." not in _name(path, {})
+        for path, payload in files.items()
+    ):
+        raise ConfigError("Scoped view identity is unresolved; use a YAML pull snapshot with viewNames metadata")
+    return build_graph(files, view_names=view_names)
+
+
+def build_graph(files: dict[str, Any], *, view_names: dict[str, str] | None = None) -> SemanticGraph:
     graph = SemanticGraph()
+    names_by_path = {}
+    if view_names is not None:
+        names_by_path = {path: name for name, path in validate_view_names(view_names, files).items()}
+        if any(_infer_kind(path, files[path]) != "view" for path in names_by_path):
+            raise ConfigError("Omni viewNames metadata targets a non-view file")
     for file_path, payload in files.items():
         graph.files[file_path] = payload
         kind = _infer_kind(file_path, payload)
+        if kind == "view" and view_names is not None:
+            if file_path not in names_by_path or not isinstance(payload, dict):
+                raise ConfigError("Incomplete canonical view identity coverage; refresh the YAML snapshot")
         if kind == "model":
             if isinstance(payload, dict):
                 if graph.model:
@@ -33,14 +58,14 @@ def build_graph(files: dict[str, Any]) -> SemanticGraph:
             continue
         if not isinstance(payload, dict):
             continue
-        name = _name(file_path, payload)
+        name = names_by_path.get(file_path) or _name(file_path, payload)
         if kind == "topic":
             _require_unique(graph.topics, name, kind="topic")
             graph.topics[name] = {"file": file_path, **payload}
             _add_relationships(graph, file_path, payload, scope=f"topic:{name}")
         else:
             _require_unique(graph.views, name, kind="view")
-            graph.views[name] = {"file": file_path, **payload}
+            graph.views[name] = {**payload, "file": file_path, "name": name}
             _add_fields(graph, file_path, name, payload)
             _add_relationships(graph, file_path, payload, scope=f"view:{name}")
     return graph
@@ -77,7 +102,7 @@ def _name(file_path: str, payload: dict[str, Any]) -> str:
         if name.lower().endswith(suffix):
             name = name[: -len(suffix)]
             break
-    for suffix in (".view", ".topic", ".composite_topic"):
+    for suffix in (".query.view", ".view", ".topic", ".composite_topic"):
         if name.lower().endswith(suffix):
             name = name[: -len(suffix)]
             break
@@ -89,12 +114,12 @@ def _require_unique(items: dict[str, Any], name: str, *, kind: str) -> None:
         raise ConfigError(f"Ambiguous semantic {kind} identity; duplicate definitions cannot be compared safely")
 
 
-def _iter_field_groups(payload: dict[str, Any]) -> list[dict[str, Any]]:
+def _iter_field_groups(payload: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
     groups = []
-    for key in ("fields", "dimensions", "measures"):
+    for key, kind in (("fields", "field"), ("dimensions", "dimension"), ("measures", "measure"), ("filters", "filter")):
         value = payload.get(key)
         if isinstance(value, dict):
-            groups.append(value)
+            groups.append((kind, value))
         elif isinstance(value, list):
             group = {}
             for item in value:
@@ -102,18 +127,20 @@ def _iter_field_groups(payload: dict[str, Any]) -> list[dict[str, Any]]:
                     name = str(item["name"])
                     _require_unique(group, name, kind="field")
                     group[name] = item
-            groups.append(group)
+            groups.append((kind, group))
     return groups
 
 
 def _add_fields(graph: SemanticGraph, file_path: str, view_name: str, payload: dict[str, Any]) -> None:
-    for group in _iter_field_groups(payload):
+    for kind, group in _iter_field_groups(payload):
         for field_name, definition in group.items():
             if not isinstance(definition, dict):
                 continue
             key = f"{view_name}.{field_name}"
             _require_unique(graph.fields, key, kind="field")
-            graph.fields[key] = {"file": file_path, "view": view_name, "name": field_name, **definition}
+            graph.fields[key] = {
+                **definition, "file": file_path, "view": view_name, "name": field_name, "field_kind": kind,
+            }
 
 
 def _add_relationships(

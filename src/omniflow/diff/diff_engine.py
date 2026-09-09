@@ -25,7 +25,10 @@ def diff_graphs(base: SemanticGraph, head: SemanticGraph) -> dict[str, Any]:
 def _diff_named(kind: str, base_items: dict[str, Any], head_items: dict[str, Any]) -> list[dict[str, Any]]:
     changes = []
     for name in sorted(set(head_items) - set(base_items)):
-        changes.append(_change(f"{kind}_added", head_items[name], name, "info", f"Added {kind} {name}."))
+        change = _change(f"{kind}_added", head_items[name], name, "info", f"Added {kind} {name}.")
+        if kind == "relationship":
+            change["affected_views"] = _relationship_views(head_items[name])
+        changes.append(change)
     for name in sorted(set(base_items) - set(head_items)):
         risk = "breaking" if kind in {"field", "view", "topic", "relationship"} else "warning"
         change = _change(
@@ -36,7 +39,10 @@ def _diff_named(kind: str, base_items: dict[str, Any], head_items: dict[str, Any
         changes.append(change)
     for name in sorted(set(base_items) & set(head_items)):
         if _normalized(base_items[name]) != _normalized(head_items[name]):
-            changes.append(_change(f"{kind}_modified", head_items[name], name, "warning", f"Modified {kind} {name}."))
+            change = _change(f"{kind}_modified", head_items[name], name, "warning", f"Modified {kind} {name}.")
+            if kind == "relationship":
+                change["affected_views"] = _relationship_views(base_items[name], head_items[name])
+            changes.append(change)
     return changes
 
 

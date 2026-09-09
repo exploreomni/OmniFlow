@@ -357,6 +357,17 @@ omniflow exposures pull --base-url https://example.omniapp.co --model-id <id>
 omniflow diff --base path/to/base/yaml --head path/to/head/yaml
 ```
 
+YAML pull snapshots preserve Omni's `viewNames` map in their restricted `manifest.json`.
+Validation and snapshot diffs use this canonical-name → exact file-path mapping, including
+scoped names and query views; folder names are not used to invent schema prefixes.
+Missing, incomplete, or ambiguous snapshot identity metadata fails closed. Re-pull older
+snapshots that lack this map. Standalone diffs of raw files still accept flat or already-qualified
+filenames, but unresolved nested view names require an API snapshot. Do not add a `name:`
+parameter to view YAML to work around identity errors. See Omni's
+[documented view-to-file resolution](https://docs.omni.co/guides/api/data-lineage-integration#resolve-topics-and-views-from-model-yaml).
+Top-level view `filters` are analyzed as filter-only fields; nested measure/topic filter
+expressions are not treated as separate field definitions.
+
 Explicit identity flags are for local debugging. The customer workflow uses `omniflow run --auto`.
 
 Exit codes are `0` success, `1` validation failure, `2` configuration error, `3` authentication or authorization error, `4` Omni API error, `5` security policy violation, and `6` internal error.

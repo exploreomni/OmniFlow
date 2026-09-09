@@ -405,8 +405,8 @@ class HoldOrchestrationTests(unittest.TestCase):
                             return_value=(mock.Mock(), None),
                         ):
                             # An enabled hold requires a semantic diff, so the YAML
-                            # pull and diff are stubbed for these orchestration tests.
-                            with mock.patch("omniflow.cli.pull_yaml"):
+                            # snapshot loading and diff are stubbed for these orchestration tests.
+                            with mock.patch("omniflow.cli.pull_yaml"), mock.patch("omniflow.cli.load_yaml_graph"):
                                 with mock.patch(
                                     "omniflow.cli.diff_graphs",
                                     return_value={"risk_level": "info", "changes": []},
@@ -550,7 +550,10 @@ class HoldOrchestrationTests(unittest.TestCase):
                                     "omniflow.cli._client_and_branch_for_context",
                                     return_value=(mock.Mock(), None),
                                 ):
-                                    with mock.patch("omniflow.cli.pull_yaml") as pull:
+                                    with (
+                                        mock.patch("omniflow.cli.pull_yaml") as pull,
+                                        mock.patch("omniflow.cli.load_yaml_graph"),
+                                    ):
                                         with mock.patch(
                                             "omniflow.cli.diff_graphs",
                                             return_value={"risk_level": "info", "changes": []},
