@@ -97,7 +97,9 @@ class OmniClient:
             params["find"] = find
         if find_type:
             params["find_type"] = _content_validator_find_type(find_type)
-        return self._request("GET", f"/api/v1/models/{model_id}/content-validator", params=params)
+        payload = self._request("GET", f"/api/v1/models/{model_id}/content-validator", params=params)
+        _validate_content_response_identity(payload, model_id=model_id, branch_id=branch_id or None)
+        return payload
 
     def search_content_references(
         self,
@@ -584,6 +586,40 @@ def _retry_after_seconds(value: str | None) -> int | None:
         return max(0, min(60, int(value)))
     except ValueError:
         return None
+
+
+def _validate_content_response_identity(payload: Any, *, model_id: str, branch_id: str | None) -> None:
+    """Reject contradictory optional identity metadata shared by validation and searches.
+
+    The API documents model_id and branch {id, name} | null. Omitted metadata
+    cannot establish identity, but must not be confused with explicit main/null.
+    Content envelope validation remains with the existing content parser.
+    """
+    if not isinstance(payload, dict):
+        return
+    if "model_id" in payload:
+        actual_model_id = payload["model_id"]
+        if not isinstance(actual_model_id, str) or not actual_model_id.strip():
+            raise OmniAPIError("Content Validator response contains an invalid model identity")
+        if actual_model_id != model_id:
+            raise OmniAPIError("Content Validator response identifies a different model")
+    if "branch" not in payload:
+        return
+    branch = payload["branch"]
+    if branch is None:
+        if branch_id is not None:
+            raise OmniAPIError("Content Validator response identifies main instead of the requested branch")
+        return
+    if not isinstance(branch, dict):
+        raise OmniAPIError("Content Validator response contains invalid branch metadata")
+    if branch_id is None:
+        raise OmniAPIError("Content Validator response identifies a branch instead of main")
+    if "id" in branch:
+        actual_branch_id = branch["id"]
+        if not isinstance(actual_branch_id, str) or not actual_branch_id.strip():
+            raise OmniAPIError("Content Validator response contains an invalid branch identity")
+        if actual_branch_id != branch_id:
+            raise OmniAPIError("Content Validator response identifies a different branch")
 
 
 def _content_validator_find_type(value: str) -> str:

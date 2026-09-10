@@ -368,6 +368,23 @@ parameter to view YAML to work around identity errors. See Omni's
 Top-level view `filters` are analyzed as filter-only fields; nested measure/topic filter
 expressions are not treated as separate field definitions.
 
+Snapshot reads use only the current manifest's file inventory and verify SHA-256 hashes.
+Stale files left by an earlier pull are excluded, not deleted; missing or changed snapshot
+files require a fresh pull. Explicit `.view` types take precedence over names like `model`
+and `relationships`.
+
+When inheritance is present, validation retains the authored snapshot and separately pulls
+Omni's `fullyResolved=true` YAML for impact analysis. Pre-sync comparisons preserve that
+resolved baseline before refresh. Standalone diffs reject unresolved inheritance: use
+`omniflow yaml pull --fully-resolved` for those inputs. No local inheritance rules are invented.
+See the [resolved YAML contract](https://docs.omni.co/api/models/get-model-yaml).
+
+Same-name changes between field kinds (dimension, measure, filter) follow
+`contracts.fail_on.referenced_field_type_changes`. New relationship diff events verify both
+endpoint roles in every relevant revision, including self-joins. Supplied Content Validator
+model/branch identities must match the request; absent optional identity metadata remains
+unverified rather than being treated as a contradiction.
+
 Explicit identity flags are for local debugging. The customer workflow uses `omniflow run --auto`.
 
 Exit codes are `0` success, `1` validation failure, `2` configuration error, `3` authentication or authorization error, `4` Omni API error, `5` security policy violation, and `6` internal error.

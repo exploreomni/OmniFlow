@@ -6,7 +6,7 @@ from typing import Any
 
 from ..exceptions import ConfigError
 from ..view_identity import validate_view_names
-from .yaml_loader import load_view_names, load_yaml_files
+from .yaml_loader import load_yaml_snapshot
 
 
 @dataclass
@@ -20,8 +20,10 @@ class SemanticGraph:
 
 
 def load_yaml_graph(root: str | Path, *, require_view_names: bool = False) -> SemanticGraph:
-    files = load_yaml_files(root)
-    view_names = load_view_names(root)
+    files, manifest = load_yaml_snapshot(root)
+    view_names = manifest.get("view_names") if manifest is not None else None
+    if manifest is not None and not isinstance(view_names, dict):
+        raise ConfigError("YAML snapshot is missing canonical viewNames metadata; pull a fresh snapshot")
     if view_names is None and require_view_names:
         raise ConfigError("Missing canonical viewNames metadata; pull a fresh YAML snapshot")
     if view_names is None and any(
@@ -30,10 +32,25 @@ def load_yaml_graph(root: str | Path, *, require_view_names: bool = False) -> Se
         for path, payload in files.items()
     ):
         raise ConfigError("Scoped view identity is unresolved; use a YAML pull snapshot with viewNames metadata")
-    return build_graph(files, view_names=view_names)
+    return build_graph(files, view_names=view_names, fully_resolved=bool(manifest and manifest.get("fully_resolved") is True))
 
 
-def build_graph(files: dict[str, Any], *, view_names: dict[str, str] | None = None) -> SemanticGraph:
+def has_inheritance(value: Any) -> bool:
+    if isinstance(value, dict):
+        return any(
+            (key == "extends" and isinstance(child, (str, list)) and bool(child)) or has_inheritance(child)
+            for key, child in value.items()
+        )
+    if isinstance(value, list):
+        return any(has_inheritance(child) for child in value)
+    return False
+
+
+def build_graph(
+    files: dict[str, Any], *, view_names: dict[str, str] | None = None, fully_resolved: bool = False,
+) -> SemanticGraph:
+    if not fully_resolved and has_inheritance(files):
+        raise ConfigError("Unresolved inheritance prevents complete impact analysis; pull fully-resolved YAML")
     graph = SemanticGraph()
     names_by_path = {}
     if view_names is not None:
@@ -74,6 +91,18 @@ def build_graph(files: dict[str, Any], *, view_names: dict[str, str] | None = No
 def _infer_kind(file_path: str, payload: Any) -> str:
     lower = file_path.lower()
     basename = lower.rsplit("/", 1)[-1]
+    typed_name = basename
+    for suffix in (".yaml", ".yml"):
+        if typed_name.endswith(suffix):
+            typed_name = typed_name[:-len(suffix)]
+            break
+    # Explicit Omni file types outrank reserved basenames and payload hints.
+    if typed_name.endswith(".view"):
+        return "view"
+    if typed_name.endswith((".topic", ".composite_topic")):
+        return "topic"
+    if typed_name.endswith(".relationships"):
+        return "relationship"
     stem = basename.rsplit(".", 1)[0]
     if stem == "model" or (isinstance(payload, dict) and payload.get("type") == "model"):
         return "model"
