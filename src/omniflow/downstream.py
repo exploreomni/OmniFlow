@@ -92,13 +92,18 @@ def _coverage_gaps_from_diff(diff_result: dict[str, Any]) -> list[dict[str, str]
     for change in diff_result.get("changes", []):
         if not isinstance(change, dict):
             continue
-        if str(change.get("type", "")).startswith("relationship_") and not change.get("affected_views"):
+        # Legacy diff inputs only carry affected_views. New diffs also prove that
+        # neither endpoint role is missing in any required before/after revision.
+        if str(change.get("type", "")).startswith("relationship_") and (
+            not change.get("affected_views") or change.get("relationship_endpoints_complete", True) is not True
+        ):
             gaps.append(
                 {
                     "type": "relationship",
                     "name": str(change.get("name") or change.get("field") or ""),
                     "message": (
-                        "Relationship impact could not be derived because the semantic diff did not identify joined views."
+                        "Relationship impact could not be derived because the semantic diff did not identify joined views. "
+                        "Both endpoint roles must be available in each required revision."
                     ),
                 }
             )

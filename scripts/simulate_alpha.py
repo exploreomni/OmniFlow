@@ -457,7 +457,11 @@ def route_request(
                 files = SYNC_HEAD_FILES
             else:
                 files = HEAD_FILES if query.get("branchId") == [branch_id_for(model_id)] else BASE_FILES
-            return {"files": files, "checksums": {name: f"checksum-{name}" for name in files}}, 200
+            return {
+                "files": files,
+                "viewNames": {"orders": "views/orders.view"},
+                "checksums": {name: f"checksum-{name}" for name in files},
+            }, 200
         if method == "GET" and path == f"/api/v1/models/{model_id}/content-validator":
             if query.get("find") == ["orders.revenue"] and query.get("find_type") == ["FIELD"]:
                 return content_payload("Executive Revenue", "alice@example.com"), 200

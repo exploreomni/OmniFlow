@@ -26,7 +26,7 @@ from .contracts import evaluate_contracts
 from .dbt_impact import evaluate_dbt_impact
 from .dbt_sync import run_dbt_sync, validate_dbt_sync_environment
 from .diff.diff_engine import diff_graphs
-from .diff.semantic_graph import build_graph
+from .diff.semantic_graph import has_inheritance, load_yaml_graph
 from .diff.yaml_loader import load_yaml_files
 from .discovery import (
     ModelContext,
@@ -726,20 +726,20 @@ def _run_context(
         base_yaml_dir = comparison_base_yaml_dir or output_dir / "yaml-base"
         head_yaml_dir = output_dir / "yaml-head"
         if comparison_base_yaml_dir is None:
-            pull_yaml(
+            base_yaml_dir = _pull_analysis_yaml(
                 client=client,
                 model_id=context.model_id,
                 branch_id=None,
                 output_dir=base_yaml_dir,
             )
-        pull_yaml(
+        head_yaml_dir = _pull_analysis_yaml(
             client=client,
             model_id=context.model_id,
             branch_id=branch_id,
             output_dir=head_yaml_dir,
         )
-        base_graph = build_graph(load_yaml_files(base_yaml_dir))
-        head_graph = build_graph(load_yaml_files(head_yaml_dir))
+        base_graph = load_yaml_graph(base_yaml_dir, require_view_names=True)
+        head_graph = load_yaml_graph(head_yaml_dir, require_view_names=True)
         diff_report = diff_graphs(base_graph, head_graph)
         write_json_report(output_dir / "semantic-diff.json", diff_report)
 
@@ -834,6 +834,21 @@ def _run_context(
     report["check_reports"] = reports
     write_json_report(output_dir / "report.json", report)
     return report, exit_code
+
+
+def _pull_analysis_yaml(*, client, model_id: str, branch_id: str | None, output_dir: Path) -> Path:
+    """Retain authored evidence; use Omni's resolved representation for inheritance."""
+    pull_yaml(client=client, model_id=model_id, branch_id=branch_id, output_dir=output_dir)
+    if has_inheritance(load_yaml_files(output_dir)):
+        # Keep derived evidence outside the authored namespace: an authored
+        # file may legitimately live at resolved/orders.view.
+        resolved_dir = output_dir.with_name(f"{output_dir.name}-resolved")
+        pull_yaml(
+            client=client, model_id=model_id, branch_id=branch_id,
+            output_dir=resolved_dir, fully_resolved=True,
+        )
+        return resolved_dir
+    return output_dir
 
 
 def _write_context_failure_artifacts(
@@ -1013,13 +1028,13 @@ def cmd_dbt_sync(args: argparse.Namespace) -> int:
                 context = prepared["context"]
                 snapshot_dir = restricted_dir(output_dir) / _safe_context_dir(context) / "pre-sync-yaml"
                 _validate_context_output_layout(snapshot_dir)
-                pull_yaml(
+                analysis_dir = _pull_analysis_yaml(
                     client=prepared["client"],
                     model_id=context.model_id,
                     branch_id=prepared["branch_id"],
                     output_dir=snapshot_dir,
                 )
-                prepared["comparison_base_yaml_dir"] = snapshot_dir
+                prepared["comparison_base_yaml_dir"] = analysis_dir
     except OmniFlowError as exc:
         if not config.security.retain_restricted_artifacts:
             _purge_restricted_path(restricted_dir(output_dir))
@@ -1213,8 +1228,8 @@ def cmd_dbt_sync(args: argparse.Namespace) -> int:
 
 
 def cmd_diff(args: argparse.Namespace) -> int:
-    base_graph = build_graph(load_yaml_files(args.base))
-    head_graph = build_graph(load_yaml_files(args.head))
+    base_graph = load_yaml_graph(args.base)
+    head_graph = load_yaml_graph(args.head)
     report = diff_graphs(base_graph, head_graph)
     if args.report_out:
         write_json_report(args.report_out, report)

@@ -75,9 +75,9 @@ The policy file is optional and must not contain credentials. In a privileged Gi
 | --- | --- |
 | `deleted_referenced_fields` | Fails when downstream content references a deleted field. |
 | `renamed_referenced_fields` | Fails when downstream content references a field that appears renamed. |
-| `referenced_field_type_changes` | Fails when a referenced field changes type. |
+| `referenced_field_type_changes` | Fails when a referenced field changes type or kind (dimension, measure, filter). |
 | `referenced_join_cardinality_changes` | Fails when a referenced relationship changes cardinality. |
-| `coverage_gaps` | Fails when OmniFlow cannot complete a required dependency search. |
+| `coverage_gaps` | Fails when OmniFlow cannot complete a required dependency search, including incomplete relationship endpoint roles or contradictory supplied API response identity. |
 
 An unreferenced breaking change remains visible as risk but does not fail the default contract gate.
 

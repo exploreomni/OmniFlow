@@ -9,6 +9,7 @@ BREAKING_RULES = {
     "field_deleted": "deleted_referenced_fields",
     "field_renamed": "renamed_referenced_fields",
     "field_type_changed": "referenced_field_type_changes",
+    "field_kind_changed": "referenced_field_type_changes",
     "relationship_cardinality_changed": "referenced_join_cardinality_changes",
     "relationship_deleted": "referenced_join_cardinality_changes",
 }

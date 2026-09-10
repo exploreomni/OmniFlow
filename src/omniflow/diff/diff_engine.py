@@ -25,7 +25,11 @@ def diff_graphs(base: SemanticGraph, head: SemanticGraph) -> dict[str, Any]:
 def _diff_named(kind: str, base_items: dict[str, Any], head_items: dict[str, Any]) -> list[dict[str, Any]]:
     changes = []
     for name in sorted(set(head_items) - set(base_items)):
-        changes.append(_change(f"{kind}_added", head_items[name], name, "info", f"Added {kind} {name}."))
+        change = _change(f"{kind}_added", head_items[name], name, "info", f"Added {kind} {name}.")
+        if kind == "relationship":
+            change["affected_views"] = _relationship_views(head_items[name])
+            change["relationship_endpoints_complete"] = _relationship_endpoints_complete(head_items[name])
+        changes.append(change)
     for name in sorted(set(base_items) - set(head_items)):
         risk = "breaking" if kind in {"field", "view", "topic", "relationship"} else "warning"
         change = _change(
@@ -33,10 +37,17 @@ def _diff_named(kind: str, base_items: dict[str, Any], head_items: dict[str, Any
         )
         if kind == "relationship":
             change["affected_views"] = _relationship_views(base_items[name])
+            change["relationship_endpoints_complete"] = _relationship_endpoints_complete(base_items[name])
         changes.append(change)
     for name in sorted(set(base_items) & set(head_items)):
         if _normalized(base_items[name]) != _normalized(head_items[name]):
-            changes.append(_change(f"{kind}_modified", head_items[name], name, "warning", f"Modified {kind} {name}."))
+            change = _change(f"{kind}_modified", head_items[name], name, "warning", f"Modified {kind} {name}.")
+            if kind == "relationship":
+                change["affected_views"] = _relationship_views(base_items[name], head_items[name])
+                change["relationship_endpoints_complete"] = _relationship_endpoints_complete(
+                    base_items[name], head_items[name]
+                )
+            changes.append(change)
     return changes
 
 
@@ -47,6 +58,10 @@ def _field_property_changes(base_fields: dict[str, Any], head_fields: dict[str, 
         head = head_fields[name]
         if base.get("type") != head.get("type"):
             changes.append(_change("field_type_changed", head, name, "breaking", "Field type changed."))
+        if base.get("field_kind") != head.get("field_kind"):
+            change = _change("field_kind_changed", head, name, "breaking", "Field kind changed.")
+            change.update({"previous_kind": base.get("field_kind"), "kind": head.get("field_kind")})
+            changes.append(change)
         if base.get("aggregate_type") != head.get("aggregate_type"):
             changes.append(
                 _change("measure_aggregation_changed", head, name, "warning", "Measure aggregation changed.")
@@ -97,6 +112,7 @@ def _relationship_property_changes(
                     "Join relationship/cardinality changed.",
                 )
                 change["affected_views"] = _relationship_views(base, head)
+                change["relationship_endpoints_complete"] = _relationship_endpoints_complete(base, head)
                 changes.append(change)
                 break
     return changes
@@ -119,6 +135,15 @@ def _relationship_views(*relationships: dict[str, Any]) -> list[str]:
             if isinstance(value, str) and value and value not in views:
                 views.append(value)
     return views
+
+
+def _relationship_endpoints_complete(*relationships: dict[str, Any]) -> bool:
+    # Check roles before deduplication: a self-join has two endpoints but one name.
+    return all(
+        any(isinstance(value := relationship.get(key), str) and value and value == value.strip() for key in keys)
+        for relationship in relationships
+        for keys in (("join_from_view", "from_view"), ("join_to_view", "to_view"))
+    )
 
 
 def _governance_property_changes(
