@@ -111,7 +111,12 @@ def test_api_to_cli_reports_incomplete_evidence_and_preserves_privacy(tmp_path, 
     monkeypatch.chdir(tmp_path)
     action_sha, input_sha = "a" * 40, "b" * 40
     monkeypatch.setenv("OMNIFLOW_ACTION_REF", action_sha)
-    monkeypatch.setenv("GITHUB_SHA", input_sha)
+    # Model the PR head separately from the merge ref, without inheriting the
+    # runner's real pull_request event during repository CI.
+    monkeypatch.setenv("GITHUB_SHA", "c" * 40)
+    event_path = tmp_path / "event.json"
+    event_path.write_text(json.dumps({"pull_request": {"head": {"sha": input_sha}}}), encoding="utf-8")
+    monkeypatch.setenv("GITHUB_EVENT_PATH", str(event_path))
     config = load_config(None)
     config.content_validation.fail_on_new_only = True
     config.security.redaction_level = "strict" if privacy == "strict" else "standard"
