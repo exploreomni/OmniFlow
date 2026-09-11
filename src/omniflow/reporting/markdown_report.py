@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import re
 from pathlib import Path
 from typing import Any
@@ -13,7 +12,8 @@ def render_markdown_report(report: dict[str, Any]) -> str:
     decision = str(report.get("policy_decision") or "unknown")
     exit_reason = str(report.get("exit_code_reason") or "")
     issues = report.get("issues", [])
-    incomplete_content = any(issue.get("type") == "content_evidence_unavailable" for issue in issues)
+    incomplete = _execution_incomplete(report)
+    incomplete_downstream = _checks_incomplete(report, {"semantic_diff", "downstream", "contracts"})
     blocking = [issue for issue in issues if _is_blocking(issue)]
     failed = decision == "fail" or isinstance(report.get("exit_code"), int) and report["exit_code"] > 0
     uncertain_warnings = [
@@ -54,12 +54,17 @@ def render_markdown_report(report: dict[str, Any]) -> str:
         f"- Blocking issues (all checks): `{len(blocking)}`",
         f"- Advisory warnings (not blocking): `{len(warnings)}`",
         f"- Downstream impacts: `{len(impacts)}` recorded; analysis incomplete."
-        if incomplete_content else f"- Downstream impacts: `{len(impacts)}`",
-        f"- Coverage gaps: `{len(coverage_gaps)}`",
+        if incomplete_downstream else f"- Downstream impacts: `{len(impacts)}`",
+        f"- Coverage gaps: `{len(coverage_gaps)}` recorded; check coverage is incomplete or unknown."
+        if incomplete else f"- Coverage gaps: `{len(coverage_gaps)}`",
         "",
         "## Model Context",
         "",
         *_model_lines(report),
+        "",
+        "## Check Execution",
+        "",
+        *_execution_lines(report),
         "",
         "## dbt Synchronization",
         "",
@@ -78,19 +83,19 @@ def render_markdown_report(report: dict[str, Any]) -> str:
         "## Downstream Contract Impact",
         "",
         *([
-            "_No downstream result is available for the context that stopped at unreadable Content Validator "
-            "evidence. Recorded findings from other contexts do not establish complete analysis._",
+            "_No downstream result is available for the context that stopped before completing dependency analysis. "
+            "Recorded findings from completed checks or other contexts do not establish complete analysis._",
             "",
-        ] if incomplete_content else []),
+        ] if incomplete_downstream else []),
         *_impact_lines(
-            blocking_impacts, coverage_unavailable=bool(coverage_gaps),
+            blocking_impacts, coverage_unavailable=bool(coverage_gaps) or incomplete_downstream,
             empty="_No blocking downstream findings were recorded; analysis is incomplete._"
-            if incomplete_content else "_No blocking downstream contract impacts; see advisory changes below._",
+            if incomplete_downstream else "_No blocking downstream contract impacts; see advisory changes below._",
         ),
         "",
         "## Coverage Gaps",
         "",
-        *_coverage_gap_lines(coverage_gaps),
+        *_coverage_gap_lines(coverage_gaps, incomplete=incomplete),
         "",
         "## dbt Exposure Coverage",
         "",
@@ -107,7 +112,7 @@ def render_markdown_report(report: dict[str, Any]) -> str:
         f"- Warnings: `{_safe_code(summary.get('warnings', 0))}`",
         *_content_state_lines(report, issues),
         "- Semantic risk: unestablished for incomplete contexts; any results from other contexts are partial."
-        if incomplete_content else f"- Risk level: `{_safe_code(summary.get('risk_level', 'info'))}`",
+        if incomplete else f"- Risk level: `{_safe_code(summary.get('risk_level', 'info'))}`",
         "",
         "<details>",
         "<summary>Advisory and historical detail (not blocking)</summary>",
@@ -117,9 +122,9 @@ def render_markdown_report(report: dict[str, Any]) -> str:
         "### Non-blocking downstream changes",
         "",
         *_impact_lines(
-            advisory_impacts, coverage_unavailable=bool(coverage_gaps),
+            advisory_impacts, coverage_unavailable=bool(coverage_gaps) or incomplete_downstream,
             empty="_No non-blocking downstream findings were recorded; analysis is incomplete._"
-            if incomplete_content else "_No non-blocking downstream changes._",
+            if incomplete_downstream else "_No non-blocking downstream changes._",
         ),
         "",
         "</details>",
@@ -127,6 +132,8 @@ def render_markdown_report(report: dict[str, Any]) -> str:
         "## Reviewer Actions",
         "",
         *_reviewer_actions(decision, blocking, impacts, coverage_gaps, operation=operation),
+        *(["- Resolve the failed or unavailable execution state and rerun enabled checks that did not complete; "
+           "missing results are not successful checks."] if incomplete else []),
         "",
         "## Audit Metadata",
         "",
@@ -184,6 +191,109 @@ def _model_lines(report: dict[str, Any]) -> list[str]:
     return ["_Model context unavailable._"]
 
 
+def _execution_contexts(report: dict[str, Any]) -> list[dict[str, Any]]:
+    models = report.get("model_reports")
+    contexts = [model for model in models if isinstance(model, dict)] if isinstance(models, list) else []
+    resolved = []
+    for context in contexts or [report]:
+        validation = context.get("post_sync_validation")
+        if not isinstance(validation, dict):
+            resolved.append(context)
+            continue
+        nested = _with_context(validation, context)
+        outer_states = _check_states(context)
+        nested["check_states"] = outer_states + _check_states(validation)
+        refresh = context.get("refresh")
+        wrapper_incomplete = context.get("validation_complete") is False or any(
+            state.get("status") not in ("completed", "disabled") for state in outer_states
+        ) or isinstance(refresh, dict) and refresh.get("status") != "completed"
+        if wrapper_incomplete:
+            nested["validation_complete"] = False
+            nested["execution_wrapper_incomplete"] = True
+        resolved.append(nested)
+    return resolved
+
+
+def _check_states(context: dict[str, Any]) -> list[dict[str, Any]]:
+    states = context.get("check_states")
+    return [state for state in states if isinstance(state, dict)] if isinstance(states, list) else []
+
+
+def _context_incomplete(context: dict[str, Any], *, failed: bool) -> bool:
+    states = _check_states(context)
+    if context.get("validation_complete") is False or any(
+        state.get("status") not in ("completed", "disabled") for state in states
+    ):
+        return True
+    if context.get("validation_complete") is True or states:
+        return False
+    # A legacy failed aggregate cannot establish that every enabled check ran.
+    # Individual completed results remain usable through _checks_incomplete.
+    return failed and not context.get("validator")
+
+
+def _execution_incomplete(report: dict[str, Any]) -> bool:
+    if report.get("validation_complete") is False or any(
+        issue.get("type") == "content_evidence_unavailable" for issue in report.get("issues", [])
+    ):
+        return True
+    failed = report.get("policy_decision") == "fail" or (
+        isinstance(report.get("exit_code"), int) and report["exit_code"] > 0
+    )
+    return any(_context_incomplete(context, failed=failed) for context in _execution_contexts(report))
+
+
+def _checks_incomplete(report: dict[str, Any], validators: set[str]) -> bool:
+    if any(issue.get("type") == "content_evidence_unavailable" for issue in report.get("issues", [])):
+        return True
+    failed = report.get("policy_decision") == "fail" or (
+        isinstance(report.get("exit_code"), int) and report["exit_code"] > 0
+    )
+    for context in _execution_contexts(report):
+        states = _check_states(context)
+        matching = [state for state in states if state.get("validator") in validators]
+        if matching:
+            if any(state.get("status") not in ("completed", "disabled") for state in matching):
+                return True
+            continue
+        issues = context.get("issues", [])
+        if any(issue.get("type") == "content_evidence_unavailable" for issue in issues):
+            return True
+        checks = context.get("check_reports")
+        if isinstance(checks, list) and any(
+            isinstance(check, dict) and check.get("validator") in validators for check in checks
+        ):
+            continue
+        # Preserve recorded legacy content history, without treating a context failure as evidence.
+        if validators == {"content"} and not states and any(
+            issue.get("validator") == "content" and issue.get("state") in ("new", "existing", "resolved")
+            for issue in issues
+        ) and not any(issue.get("validator") == "context" for issue in issues):
+            continue
+        if _context_incomplete(context, failed=failed):
+            return True
+    return False
+
+
+def _execution_lines(report: dict[str, Any]) -> list[str]:
+    lines = []
+    labels = {"completed": "completed", "failed": "failed operationally", "not_run": "not run", "disabled": "disabled"}
+    for context in _execution_contexts(report):
+        scope = "; ".join(_scope_parts(context)) or "Context identity unavailable"
+        states = _check_states(context)
+        if context.get("execution_wrapper_incomplete"):
+            lines.append(f"- {scope}: outer refresh or post-sync wrapper evidence is incomplete or unavailable.")
+        if not states:
+            lines.append(f"- {scope}: execution status was not recorded; missing results do not establish completed checks.")
+        for state in states:
+            status = state.get("status")
+            label = labels.get(status, "status unavailable") if isinstance(status, str) else "status unavailable"
+            lines.append(f"- {scope} · `{_safe_code(state.get('validator'))}`: {label}.")
+    if any(_check_states(context) for context in _execution_contexts(report)):
+        lines.append("Completed describes execution only; recorded findings may still block under configured policy.")
+    return lines
+
+
 def _issue_lines(issues: list[dict[str, Any]], *, empty: str, limit: int) -> list[str]:
     if not issues:
         return [empty]
@@ -216,48 +326,60 @@ def _impact_lines(
     for issue in impacts[:20]:
         impact_level = issue.get("impact_level") or "unknown"
         target = issue.get("field") or issue.get("previous_field") or issue.get("name") or ""
+        scope = "; ".join(_scope_parts(issue))
+        scope = f" · {scope}" if scope else ""
         referenced = issue.get("referenced_content") if isinstance(issue.get("referenced_content"), list) else []
         if coverage_unavailable and not referenced:
             lines.append(
-                f"- **Coverage unavailable** `{_safe_code(target)}`: no references established; "
+                f"- **Coverage unavailable** `{_safe_code(target)}`{scope}: no references established; "
                 "absence of downstream dependencies is not proven."
             )
             continue
-        lines.append(f"- **{_safe_text(impact_level)}** `{_safe_code(target)}` referenced content: `{len(referenced)}`")
+        lines.append(f"- **{_safe_text(impact_level)}** `{_safe_code(target)}`{scope} referenced content: `{len(referenced)}`")
     if len(impacts) > 20:
         lines.append(f"- _{len(impacts) - 20} more impact(s) omitted from PR summary._")
     return lines
 
 
 def _coverage_gaps(report: dict[str, Any]) -> list[dict[str, Any]]:
-    gaps = []
+    candidates = []
     for key in ("coverage_gaps", "dependency_coverage_gaps"):
         value = report.get(key)
         if isinstance(value, list):
-            gaps.extend(item for item in value if isinstance(item, dict))
-    for model_report in report.get("model_reports", []) if isinstance(report.get("model_reports"), list) else []:
-        if not isinstance(model_report, dict):
-            continue
+            candidates.extend(_with_context(item, report) for item in value if isinstance(item, dict))
+    for model_report in _execution_contexts(report):
         for check_report in (
             model_report.get("check_reports", []) if isinstance(model_report.get("check_reports"), list) else []
         ):
             value = check_report.get("coverage_gaps") if isinstance(check_report, dict) else None
             if isinstance(value, list):
-                gaps.extend(item for item in value if isinstance(item, dict))
+                context = _with_context(check_report, model_report)
+                candidates.extend(_with_context(item, context) for item in value if isinstance(item, dict))
     for issue in report.get("issues", []):
-        if _is_coverage_gap(issue) and not any(
-            gap.get("name") == issue.get("name")
-            and gap.get("document_id") == issue.get("document_id")
-            and gap.get("validation_scope") == issue.get("validation_scope")
-            and gap.get("message") == issue.get("message")
-            for gap in gaps
-        ):
-            gaps.append(issue)
-    return gaps
+        if _is_coverage_gap(issue):
+            candidates.append(_with_context(issue, report))
+    gaps = {}
+    for gap in candidates:
+        key = (
+            _first_identity(gap, ("model_id",)), _branch_identity(gap),
+            _first_identity(gap, ("document_id", "document_identifier", "content_id")),
+            _first_identity(gap, ("query_id", "query_identifier", "query_name")),
+            _first_identity(gap, ("name",)), _first_identity(gap, ("validation_scope",)),
+            _first_identity(gap, ("message",)),
+        )
+        # Flat findings can add category/severity omitted from legacy nested gap summaries.
+        gaps[key] = {**gaps.get(key, {}), **gap}
+    return list(gaps.values())
 
 
-def _coverage_gap_lines(gaps: list[dict[str, Any]]) -> list[str]:
+def _with_context(item: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
+    return {**{key: context[key] for key in ("model_id", "branch_id", "branch_name") if key in context}, **item}
+
+
+def _coverage_gap_lines(gaps: list[dict[str, Any]], *, incomplete: bool = False) -> list[str]:
     if not gaps:
+        if incomplete:
+            return ["_No dependency coverage gaps were recorded; incomplete or unavailable checks do not establish full coverage._"]
         return ["_No dependency coverage gaps._"]
     lines = []
     for gap in gaps[:10]:
@@ -549,28 +671,45 @@ def _affected_object(issue: dict[str, Any]) -> str:
         parts.append(f"document ID `{_safe_code(identifier)}`")
     if query:
         parts.append(f"query `{_safe_code(query)}`")
-    if parts:
-        return "; ".join(parts)
-    location = _first_identity(issue, ("file", "yaml_path", "field", "previous_field", "name", "model_id"))
-    return f"Object `{_safe_code(location)}`" if location else "Object identity unavailable"
+    if not parts:
+        location = _first_identity(issue, ("file", "yaml_path", "field", "previous_field", "name"))
+        parts.append(f"Object `{_safe_code(location)}`" if location else "Object identity unavailable")
+    return "; ".join(parts + _scope_parts(issue))
+
+
+def _branch_identity(issue: dict[str, Any]) -> str | None:
+    branch = _first_identity(issue, ("branch_id", "branch_name"))
+    if branch:
+        return branch
+    return "main" if "branch_id" in issue and issue["branch_id"] is None else None
+
+
+def _scope_parts(issue: dict[str, Any]) -> list[str]:
+    model = _first_identity(issue, ("model_id",))
+    branch = _branch_identity(issue)
+    return ([f"Model `{_safe_code(model)}`"] if model else []) + (
+        [f"branch `{_safe_code(branch)}`"] if branch else []
+    )
 
 
 def _readable_message(value: Any) -> str | None:
     if not isinstance(value, str) or value.strip().lower() in {"", "null", "none", "[redacted]"}:
         return None
-    # Legacy summaries sometimes stringify an object. Do not interpret or dump
-    # that undocumented structure; fixed category guidance remains actionable.
-    try:
-        if isinstance(json.loads(value), (dict, list)):
-            return None
-    except ValueError:
-        pass
-    return value
+    # Object-like legacy diagnostics may be JSON, Python reprs, truncated, or
+    # deeply nested. Never parse or dump them; fixed category guidance is safer.
+    bounded = value[:2000].strip()
+    if bounded.startswith("{") or re.match(
+        r'''\[\s*(?:[\[\]{'"\d-]|(?:true|false|null|None|True|False|NaN|Infinity)\b)''', bounded
+    ):
+        return None
+    # Ordinary labels and Markdown links such as [warning] or [details](...)
+    # are human diagnostics, not serialized arrays; the renderer still escapes them.
+    return bounded
 
 
 def _content_state_lines(report: dict[str, Any], issues: list[dict[str, Any]]) -> list[str]:
     content = [issue for issue in issues if issue.get("validator") == "content"]
-    incomplete = any(issue.get("type") == "content_evidence_unavailable" for issue in issues)
+    incomplete = _checks_incomplete(report, {"content"})
     summary = report.get("summary", {})
     counts = {
         state: sum(issue.get("state") == state for issue in content)
@@ -583,7 +722,7 @@ def _content_state_lines(report: dict[str, Any], issues: list[dict[str, Any]]) -
         return [
             f"- Content comparison partial: recorded new `{_safe_code(counts['new'])}`, "
             f"existing `{_safe_code(counts['existing'])}`, resolved `{_safe_code(counts['resolved'])}`; "
-            "contexts with unreadable evidence are not counted."
+            "contexts with incomplete or unavailable evidence are not counted."
         ]
     return [
         f"- Content issue history only: new `{_safe_code(counts['new'])}`, "

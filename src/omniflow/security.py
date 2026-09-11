@@ -52,6 +52,7 @@ STANDARD_PUBLIC_REDACT_KEYS = {
     "folder_name",
 }
 STRICT_PUBLIC_REDACT_KEYS = STANDARD_PUBLIC_REDACT_KEYS | {
+    "auto_fix",
     "owner",
     "document_owner",
     "owner_name",

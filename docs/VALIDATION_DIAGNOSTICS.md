@@ -7,6 +7,7 @@
 | Content validation / Dashboard filter or Query | Omni returned a readable validation issue. | Inspect that document/query in the same model and branch before changing a filter or field. |
 | Content validation / coverage unavailable | OmniFlow could not read the issue details. This is incomplete evidence, not proof of a particular content defect. | Keep the gate blocked; gather sanitized original evidence privately. |
 | Downstream contracts / Coverage unavailable | Dependency analysis could not establish the affected consumers. | Verify the Action revision, relationship endpoints, model identity and reference-search access. |
+| Validation execution failed / incomplete | A check could not finish because of an API, context, or internal failure. | Retain completed findings, resolve the failed check, then rerun. Later checks marked “not run” are not successful. |
 | Advisory warning | The finding does not block under the recorded policy. | Review separately from blockers. Model warnings still block when `model_validation.fail_on_warnings` is enabled. |
 
 No returned references is not proof of no consumers when coverage is unavailable. Content history counts (new/existing/resolved) describe content validation only; they are not the total blocking count across model, lint, contract and other checks. Missing optional results do not establish that those checks ran successfully.
@@ -49,6 +50,24 @@ Do not assume a draft document is invalid merely because it is a draft: the [Con
 
 Once an original sanitized example is available, confirm the contract with the API owner. Only then add any necessary adapter, a fixture based on the actual response, and one compatibility regression. Until then, the precise underlying filter defect and whether a new adapter is needed remain unconfirmed.
 
+## Evidence must be valid before it can pass
+
+- Model validation requires a list of issue objects with string messages. A present `is_warning` must be a real boolean; values such as `"false"`, `0`, or `null` are rejected rather than interpreted as warnings. An omitted flag conservatively remains an error. Optional YAML paths and documented auto-fix descriptions must have the expected types.
+- Content catalog pages require a `records` list containing objects. Malformed envelopes, rows, or continuation metadata produce an API failure rather than an empty catalog. An absent `pageInfo` remains compatible with single-page responses; a valid empty `records` list is still valid evidence. Label filtering additionally requires usable record identifiers.
+- Unknown model auto-fix metadata is discarded. Strict public redaction removes the complete `auto_fix` value, including description text, from JSON, JUnit, and other public reports. Standard mode retains the supported descriptions under its existing redaction policy.
+
+These checks intentionally expose previously hidden upstream response problems. Do not weaken the gate or convert malformed evidence to an empty list to obtain a pass.
+
+## How content comparisons stay in scope
+
+Content issues are matched by occurrence, not just by membership in a set. If one identical error becomes two, the additional occurrence is new. Query comparisons use stable document-scoped identity (`query_presentation_id`, then `query_id_map_key`, then supported `query_id`). Missing or duplicate query identity cannot establish that an issue is preexisting; such current findings remain new even when the message is unchanged. Query names alone are insufficient.
+
+Persisted history now has a versioned schema and must match the current model, branch, explicit user ID, personal-folder setting, and labels. Label ordering does not matter. Legacy history or a different version/context is invalidated, not reused to suppress findings. Corrupt history fails with exit `4`. History reuse also requires an explicit `omni.user_id` (or `OMNI_USER_ID`): when it is absent, OmniFlow cannot prove that a later run uses the same authenticated principal and invalidates the baseline. It does not persist credentials or infer user identity from them.
+
+This can cause a one-time increase in findings after an upgrade, or repeated new findings when historical comparison lacks an explicit user scope. Review the findings and confirm the intended validation user; do not substitute an arbitrary user ID merely to restore an old comparison. Branch validation with `fail_on_new_only` still compares against a freshly retrieved base-model result using the same client and does not depend on persisted history.
+
+The content check's JSON includes `comparison_source`, `history_status`, and `comparison_ambiguous_issues` so a reviewer can distinguish an accepted comparison from an invalidated or ambiguous baseline. Historical/resolved evidence is reprocessed under the current privacy settings before appearing in a report.
+
 ## Reading the improved report
 
 - Blockers are expanded with a check/category, affected object, and next investigation step. Advisory/historical details are collapsed; missing details never become a raw JSON dump.
@@ -56,5 +75,10 @@ Once an original sanitized example is available, confirm the contract with the A
 - **Input/PR Git SHA** identifies the code being checked. **OmniFlow Action revision** identifies a full-SHA Action reference supplied at runtime. They are separate.
 - Local installs, floating Action tags/branches, and older runs may show Action revision as unavailable. The tool never substitutes the customer checkout SHA or claims independent attestation of an environment-supplied reference.
 - Public JSON and evidence include the Action revision when available. The aggregate exit reason preserves operational API failures rather than mislabeling them ordinary validation failures.
+- **Check Execution** records completed, failed operationally, not run, and disabled checks for each model/branch. “Completed” means execution finished, not that the check passed its configured policy. JSON records these as `completed`, `failed`, `not_run`, and `disabled`; `validation_complete` describes execution completeness separately from the pass/fail decision.
+- When one check fails, completed findings remain visible. Unfinished analysis is explicitly incomplete; zero recorded impacts or gaps is not proof of no impact. Older failed reports without execution metadata remain unknown rather than being treated as complete.
+- Identical findings in different model/branch contexts retain separate attribution and coverage counts. Long or object-like diagnostic messages use bounded formatting and safe category guidance.
+- A warning can block under policy without becoming an error. GitHub annotations say **Blocks under configured policy**, and SARIF records `properties.policy_blocking` separately from severity.
+- If unexpected execution or report generation fails, OmniFlow writes fresh minimal failed JSON, Markdown, SARIF, JUnit, and evidence outputs, without exposing raw exception details or reusing the failed renderer. This replaces stale standard reports on writable, approved paths; rejected or unwritable paths still fail closed and require operator attention. Do not upload old artifacts after a filesystem failure.
 
 The PR20 baseline above fixes the relationship defect but does **not** include this later diagnostic/reporting enhancement. Consumers need a separately reviewed, published revision containing these improvements to receive the revised report. Local tests establish development confidence; a fresh consumer workflow and live branch check establish customer acceptance.

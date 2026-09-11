@@ -12,6 +12,8 @@ def annotation_lines(issues: list[dict[str, Any]]) -> list[str]:
         level = "error" if severity == "error" else ("warning" if severity in {"warning", "warn"} else "notice")
         file_path = _escape_property(issue.get("file") or "omniflow")
         message = _escape_data(issue.get("message") or issue.get("summary") or "OmniFlow issue")
+        if issue.get("blocking") is True:
+            message = f"Blocks under configured policy: {message}"
         lines.append(f"::{level} file={file_path},line=1::{message}")
     return lines
 

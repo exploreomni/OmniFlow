@@ -13,7 +13,14 @@ from pathlib import Path
 from typing import Any
 
 from . import __version__
-from .artifacts import public_dir, restricted_dir, write_artifact_manifest, write_public_json, write_public_reports
+from .artifacts import (
+    public_dir,
+    restricted_dir,
+    write_artifact_manifest,
+    write_emergency_failure,
+    write_public_json,
+    write_public_reports,
+)
 from .breaking_hold import evaluate_breaking_hold, hold_triggered
 from .config import (
     DEFAULT_REPORT_FORMATS,
@@ -37,6 +44,7 @@ from .discovery import (
 )
 from .downstream import generate_downstream_dependencies
 from .exceptions import ConfigError, ExitCodes, OmniAuthError, OmniFlowError, SecurityPolicyError
+from .execution import ValidationProgress, scope_findings
 from .exposures import run_dbt_exposure_enrichment
 from .git import current_branch, current_sha, event_name, git_executable, git_value, pr_number
 from .github.annotations import annotation_lines
@@ -208,6 +216,17 @@ def cmd_run(args: argparse.Namespace, *, changed_files: list[str] | None = None)
         raise
     output_dir = Path(config.reporting.output_dir)
     _validate_run_output_layout(output_dir)
+    try:
+        return _execute_run(args, config=config, output_dir=output_dir, changed_files=changed_files)
+    except OmniFlowError:
+        raise
+    except Exception:
+        # Do not repeat an unsafe formatter or echo an arbitrary exception.
+        write_emergency_failure(output_dir=output_dir)
+        return ExitCodes.INTERNAL_ERROR
+
+
+def _execute_run(args, *, config, output_dir: Path, changed_files: list[str] | None) -> int:
     if not config.security.retain_restricted_artifacts:
         _purge_restricted_path(restricted_dir(output_dir))
     if args.skip_reason:
@@ -254,7 +273,7 @@ def cmd_run(args: argparse.Namespace, *, changed_files: list[str] | None = None)
                     changed_files=changed_files,
                     enforce_breaking_hold=True,
                 )
-            except OmniFlowError as exc:
+            except Exception as exc:
                 context_report, context_exit = _write_context_failure_artifacts(
                     config=config,
                     context=context,
@@ -291,6 +310,7 @@ def cmd_run(args: argparse.Namespace, *, changed_files: list[str] | None = None)
         "policy_decision": "fail" if exit_code else "pass",
         "exit_code": exit_code,
         "exit_code_reason": _exit_code_reason(exit_code),
+        "validation_complete": report["validation_complete"],
         "timestamp": utc_now_iso(),
     }
     write_public_json(output_dir / "evidence.json", evidence, redaction_level=config.security.redaction_level)
@@ -661,12 +681,33 @@ def _run_context(
     changed_files: list[str] | None = None,
     enforce_breaking_hold: bool = False,
 ) -> tuple[dict[str, Any], int]:
+    progress = ValidationProgress(config, branch_id=context.branch_id, enforce_breaking_hold=enforce_breaking_hold)
+    try:
+        return _run_context_steps(
+            config=config, context=context, output_dir=output_dir, api_key=api_key,
+            comparison_base_yaml_dir=comparison_base_yaml_dir, changed_files=changed_files,
+            enforce_breaking_hold=enforce_breaking_hold, progress=progress,
+        )
+    except Exception as exc:
+        progress.fail(exc)
+        exc.omniflow_progress = progress
+        raise
+
+
+def _run_context_steps(
+    *, config, context: ModelContext, output_dir: Path, api_key: str | None,
+    comparison_base_yaml_dir: Path | None, changed_files: list[str] | None,
+    enforce_breaking_hold: bool, progress: ValidationProgress,
+) -> tuple[dict[str, Any], int]:
     client, branch_id = _client_and_branch_for_context(context, config.omni.timeout, api_key=api_key)
-    all_issues: list[dict[str, Any]] = []
-    reports: list[dict[str, Any]] = []
+    progress.branch_id = branch_id
+    progress.complete("context")
+    all_issues = progress.issues
+    reports = progress.reports
     exit_code = 0
 
     if config.content_validation.enabled:
+        progress.begin("content")
         content_report, content_exit = run_content_validation(
             client=client,
             model_id=context.model_id,
@@ -685,8 +726,10 @@ def _run_context(
         reports.append(content_report)
         all_issues.extend(content_report.get("issues", []))
         exit_code = max(exit_code, content_exit)
+        progress.complete("content", content_exit)
 
     if config.model_validation.enabled:
+        progress.begin("model")
         model_report, model_exit = run_model_validation(
             client=client,
             model_id=context.model_id,
@@ -696,8 +739,10 @@ def _run_context(
         reports.append(model_report)
         all_issues.extend(model_report.get("issues", []))
         exit_code = max(exit_code, model_exit)
+        progress.complete("model", model_exit)
 
     if config.ai_eval.enabled and config.ai_eval.prompt_sets:
+        progress.begin("ai_eval")
         ai_eval_report, ai_eval_detail, ai_eval_exit = run_ai_eval_validation(
             client=client,
             model_id=context.model_id,
@@ -717,6 +762,7 @@ def _run_context(
         reports.append(ai_eval_report)
         all_issues.extend(ai_eval_report.get("issues", []))
         exit_code = max(exit_code, ai_eval_exit)
+        progress.complete("ai_eval", ai_eval_exit)
 
     diff_report = None
     head_graph = None
@@ -724,6 +770,7 @@ def _run_context(
     # request one even when semantic lint and contracts are both disabled.
     needs_breaking_hold = enforce_breaking_hold and config.breaking_change_hold.enabled
     if config.semantic_lint.enabled or config.contracts.enabled or needs_breaking_hold:
+        progress.begin("semantic_diff")
         base_yaml_dir = comparison_base_yaml_dir or output_dir / "yaml-base"
         head_yaml_dir = output_dir / "yaml-head"
         if comparison_base_yaml_dir is None:
@@ -743,8 +790,10 @@ def _run_context(
         head_graph = load_yaml_graph(head_yaml_dir, require_view_names=True)
         diff_report = diff_graphs(base_graph, head_graph)
         write_json_report(output_dir / "semantic-diff.json", diff_report)
+        progress.complete("semantic_diff")
 
     if config.semantic_lint.enabled and head_graph is not None:
+        progress.begin("semantic_lint")
         lint_issues = lint_graph(
             head_graph,
             configured_rules=config.semantic_lint.rules,
@@ -767,8 +816,10 @@ def _run_context(
         reports.append(lint_report)
         all_issues.extend(lint_issues)
         exit_code = max(exit_code, 1 if has_error(lint_issues) else 0)
+        progress.complete("semantic_lint", 1 if has_error(lint_issues) else 0)
 
     if config.contracts.enabled and diff_report is not None:
+        progress.begin("downstream")
         dependencies = generate_downstream_dependencies(
             client=client,
             model_id=context.model_id,
@@ -778,6 +829,8 @@ def _run_context(
             include_personal_folders=config.omni.include_personal_folders,
         )
         write_json_report(output_dir / "dependencies.json", dependencies)
+        progress.complete("downstream")
+        progress.begin("contracts")
         contract_report, contract_exit = evaluate_contracts(
             diff_result=diff_report,
             dependencies=dependencies,
@@ -788,8 +841,10 @@ def _run_context(
         reports.append(contract_report)
         all_issues.extend(contract_report.get("issues", []))
         exit_code = max(exit_code, contract_exit)
+        progress.complete("contracts", contract_exit)
 
     if config.dbt_exposures.enabled:
+        progress.begin("dbt_exposures")
         exposure_report, exposure_exit = run_dbt_exposure_enrichment(
             client=client,
             model_id=context.model_id,
@@ -800,8 +855,10 @@ def _run_context(
         reports.append(exposure_report)
         all_issues.extend(exposure_report.get("issues", []))
         exit_code = max(exit_code, exposure_exit)
+        progress.complete("dbt_exposures", exposure_exit)
 
     if enforce_breaking_hold and config.breaking_change_hold.enabled:
+        progress.begin("breaking_change_hold")
         hold_issues = evaluate_breaking_hold(
             diff_result=diff_report,
             changed_files=changed_files or [],
@@ -829,10 +886,15 @@ def _run_context(
             all_issues.extend(hold_issues)
             if config.breaking_change_hold.action == "fail":
                 exit_code = max(exit_code, ExitCodes.VALIDATION_FAILED)
+        progress.complete("breaking_change_hold", 1 if any(issue.get("severity") == "error" for issue in hold_issues) else 0)
 
+    progress.begin("reporting")
+    progress.complete("reporting")
+    scope_findings(all_issues, model_id=context.model_id, branch_id=branch_id, branch_name=context.branch_name)
     summary = _summarize(all_issues)
     report = _base_report(config, context, branch_id, exit_code, all_issues, summary)
     report["check_reports"] = reports
+    report.update(progress.evidence())
     write_json_report(output_dir / "report.json", report)
     return report, exit_code
 
@@ -857,24 +919,33 @@ def _write_context_failure_artifacts(
     config,
     context: ModelContext,
     output_dir: Path,
-    exc: OmniFlowError,
+    exc: Exception,
 ) -> tuple[dict[str, Any], int]:
+    progress = getattr(exc, "omniflow_progress", None)
+    if not isinstance(progress, ValidationProgress):
+        progress = ValidationProgress(config, branch_id=context.branch_id, enforce_breaking_hold=False)
+        progress.fail(exc)
+    code = exc.exit_code if isinstance(exc, OmniFlowError) else ExitCodes.INTERNAL_ERROR
     issue = {
         "severity": "error",
-        "validator": "context",
-        "message": redact(str(exc)),
+        "validator": progress.current,
+        "type": "validation_execution_failed",
+        "message": redact(str(exc)) if isinstance(exc, OmniFlowError) else "An internal validation error interrupted this context.",
     }
     if isinstance(exc, ContentEvidenceError):
         issue = exc.report_issue(redact_document_names=config.security.redact_document_names)
-    summary = _summarize([issue])
-    report = _base_report(config, context, context.branch_id, exc.exit_code, [issue], summary)
-    report["check_reports"] = (
-        [{"validator": "content", "coverage_complete": False, "issues": [issue]}]
-        if isinstance(exc, ContentEvidenceError) else []
-    )
-    report["exit_code_reason"] = _exit_code_reason(exc.exit_code)
+    issues = [*progress.issues, issue]
+    scope_findings(issues, model_id=context.model_id, branch_id=progress.branch_id, branch_name=context.branch_name)
+    summary = _summarize(issues)
+    report = _base_report(config, context, progress.branch_id, code, issues, summary)
+    report["check_reports"] = [*progress.reports, {
+        "validator": issue["validator"], "coverage_complete": False, "issues": [issue],
+    }]
+    report.update(progress.evidence())
+    report["validation_complete"] = False
+    report["exit_code_reason"] = _exit_code_reason(code)
     write_json_report(output_dir / "report.json", report)
-    return report, exc.exit_code
+    return report, code
 
 
 def cmd_content_validate(args: argparse.Namespace) -> int:
@@ -1104,7 +1175,7 @@ def cmd_dbt_sync(args: argparse.Namespace) -> int:
                         api_key=sync_api_key,
                         comparison_base_yaml_dir=prepared.get("comparison_base_yaml_dir"),
                     )
-                except OmniFlowError as exc:
+                except Exception as exc:
                     validation_report, validation_exit = _write_context_failure_artifacts(
                         config=config,
                         context=context,
@@ -1480,6 +1551,7 @@ def _aggregate_report(config, contexts, exit_code, issues, summary, reports):
         "summary": summary,
         "issues": issues,
         "model_reports": reports,
+        "validation_complete": bool(reports) and all(report.get("validation_complete") is True for report in reports),
         "policy_decision": "fail" if exit_code else "pass",
         "exit_code": exit_code,
         "exit_code_reason": _exit_code_reason(exit_code),

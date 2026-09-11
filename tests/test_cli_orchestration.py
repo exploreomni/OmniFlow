@@ -187,8 +187,10 @@ class CliOrchestrationTests(unittest.TestCase):
                 with mock.patch("omniflow.cli.load_config", return_value=config):
                     with mock.patch("omniflow.cli.discover_contexts", return_value=[context]):
                         with mock.patch("omniflow.cli._run_context", side_effect=fail_with_restricted_file):
-                            with self.assertRaises(RuntimeError):
-                                cmd_run(args)
+                            self.assertEqual(cmd_run(args), 6)
+                failed_report = json.loads(Path(".omniflow/public/report.json").read_text())
+                self.assertEqual(failed_report["policy_decision"], "fail")
+                self.assertFalse(failed_report["validation_complete"])
                 restricted = Path(".omniflow/restricted")
                 self.assertFalse(stale.exists())
                 self.assertFalse(any(restricted.rglob("*")) if restricted.exists() else False)

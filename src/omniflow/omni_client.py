@@ -10,6 +10,7 @@ import requests
 
 from . import __version__
 from .exceptions import ConfigError, OmniAPIError, OmniAuthError
+from .model_response import normalize_model_response
 from .model_yaml import validate_editable_yaml_file_name
 from .security import redact, validate_base_url, validate_path_segment
 
@@ -72,9 +73,7 @@ class OmniClient:
         model_id = validate_path_segment(model_id, name="model_id")
         params = {"branchId": branch_id} if branch_id else None
         payload = self._request("GET", f"/api/v1/models/{model_id}/validate", params=params)
-        if not isinstance(payload, list):
-            raise OmniAPIError("Model validation returned an unexpected response shape")
-        return [item for item in payload if isinstance(item, dict)]
+        return normalize_model_response(payload)
 
     def validate_content(
         self,
@@ -507,20 +506,30 @@ class OmniClient:
             if cursor:
                 page_params["cursor"] = cursor
             payload = self._request("GET", path, params=page_params)
-            page_records = payload.get("records", []) if isinstance(payload, dict) else []
+            if not isinstance(payload, Mapping):
+                raise OmniAPIError("Omni pagination returned an unexpected response shape")
+            page_records = payload.get("records")
             if not isinstance(page_records, list):
                 raise OmniAPIError("Omni pagination returned an unexpected records shape")
+            if any(not isinstance(item, dict) for item in page_records):
+                raise OmniAPIError("Omni pagination returned an invalid record")
             record_count += len(page_records)
             if record_count > MAX_PAGINATION_RECORDS:
                 raise OmniAPIError("Omni pagination exceeded the 50,000 record safety limit")
-            records.extend(item for item in page_records if isinstance(item, dict))
-            page_info = payload.get("pageInfo", {}) if isinstance(payload, dict) else {}
-            if not isinstance(page_info, dict):
+            records.extend(page_records)
+            # Preserve single-page compatibility when pageInfo is omitted;
+            # explicit malformed metadata cannot establish a complete inventory.
+            page_info = payload.get("pageInfo", {})
+            if not isinstance(page_info, Mapping):
                 raise OmniAPIError("Omni pagination returned an unexpected pageInfo shape")
+            if "hasNextPage" in page_info and not isinstance(page_info["hasNextPage"], bool):
+                raise OmniAPIError("Omni pagination returned an invalid hasNextPage flag")
             next_cursor = page_info.get("nextCursor")
             if next_cursor is not None and (not isinstance(next_cursor, str) or not next_cursor.strip()):
                 raise OmniAPIError("Omni pagination returned an invalid cursor")
             cursor = next_cursor.strip() if isinstance(next_cursor, str) else None
+            if "hasNextPage" in page_info and page_info["hasNextPage"] != bool(cursor):
+                raise OmniAPIError("Omni pagination returned inconsistent continuation metadata")
             if not cursor:
                 return records
             if cursor in seen_cursors:

@@ -4,7 +4,8 @@ import json
 from pathlib import Path
 from typing import Any
 
-from .exceptions import SecurityPolicyError
+from . import __version__
+from .exceptions import OmniFlowError, SecurityPolicyError
 from .git import tool_revision
 from .reporting.writer import write_reports
 from .security import public_safe, secure_write_text
@@ -31,10 +32,52 @@ def write_public_reports(
 ) -> dict[str, Any]:
     report = dict(report)
     report.setdefault("tool_revision", tool_revision())
-    safe_report = public_safe(report, redaction_level=redaction_level)
-    write_reports(safe_report, output_dir=output_dir, formats=formats)
-    write_reports(safe_report, output_dir=public_dir(output_dir), formats=formats)
+    try:
+        safe_report = public_safe(report, redaction_level=redaction_level)
+        write_reports(safe_report, output_dir=output_dir, formats=formats)
+        write_reports(safe_report, output_dir=public_dir(output_dir), formats=formats)
+    except SecurityPolicyError:
+        # Never retry an output path rejected by the filesystem safety checks.
+        raise
+    except Exception as exc:
+        write_emergency_failure(output_dir=output_dir)
+        raise OmniFlowError("Report generation failed; current validation evidence is incomplete.") from exc
     return safe_report
+
+
+def write_emergency_failure(*, output_dir: str | Path) -> None:
+    """Replace stale standard outputs without invoking the failed report pipeline.
+
+    Deliberately fixed text: arbitrary exceptions, payloads and partial model
+    metadata must never be serialized by this last-resort public path.
+    """
+    message = "OmniFlow could not complete this run. Current validation evidence is incomplete; do not merge."
+    issue = {"validator": "execution", "type": "internal_execution_failure", "severity": "error", "message": message}
+    report = {
+        "tool": "omniflow", "tool_version": __version__, "generated_at": utc_now_iso(),
+        "tool_revision": tool_revision(), "policy_decision": "fail", "validation_complete": False,
+        "exit_code": 6, "exit_code_reason": "internal tool error", "issues": [issue],
+        "summary": {"total_issues": 1, "errors": 1, "warnings": 0},
+        "check_states": [{"validator": "execution", "status": "failed", "exit_code": 6}],
+    }
+    markdown = f"# OmniFlow\n\n## Decision\n\n**Fail: validation incomplete.**\n\n{message}\n"
+    sarif = {
+        "version": "2.1.0", "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+        "runs": [{"tool": {"driver": {"name": "omniflow", "version": __version__}},
+                  "results": [{"ruleId": "internal_execution_failure", "level": "error", "message": {"text": message}}]}],
+    }
+    junit = (
+        '<testsuite name="omniflow" tests="1" failures="1"><testcase name="internal_execution_failure">'
+        f'<failure message="Validation incomplete">{message}</failure></testcase></testsuite>\n'
+    )
+    contents = {
+        "report.json": json.dumps(report, indent=2) + "\n", "report.md": markdown,
+        "report.sarif": json.dumps(sarif, indent=2) + "\n", "junit.xml": junit,
+        "evidence.json": json.dumps({**report, "validation_status": "failed"}, indent=2) + "\n",
+    }
+    for directory in (Path(output_dir), public_dir(output_dir)):
+        for name, content in contents.items():
+            secure_write_text(directory / name, content)
 
 
 def write_public_json(

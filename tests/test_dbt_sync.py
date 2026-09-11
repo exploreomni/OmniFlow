@@ -293,6 +293,12 @@ class DbtSyncTests(unittest.TestCase):
                 1,
                 "failed",
             ),
+            (
+                ({"status": "completed", "issues": [], "raw_query_results_stored": False}, 0),
+                RuntimeError("PRIVATE-POST-SYNC-FAILURE"),
+                6,
+                "failed",
+            ),
         )
         original = os.getcwd()
         for refresh_outcome, validation_outcome, expected_exit, validation_status in cases:
@@ -343,6 +349,7 @@ class DbtSyncTests(unittest.TestCase):
                                                 with mock.patch(
                                                     "omniflow.cli._run_context",
                                                     return_value=validation_outcome,
+                                                    side_effect=validation_outcome if isinstance(validation_outcome, Exception) else None,
                                                 ) as validation:
                                                     exit_code = cmd_dbt_sync(args)
                         self.assertEqual(exit_code, expected_exit)
@@ -351,6 +358,9 @@ class DbtSyncTests(unittest.TestCase):
                         self.assertEqual(report["model_reports"][0]["post_sync_validation_status"], validation_status)
                         if expected_exit == 4:
                             validation.assert_not_called()
+                        if expected_exit == 6:
+                            self.assertFalse(report["model_reports"][0]["post_sync_validation"]["validation_complete"])
+                            self.assertNotIn("PRIVATE-POST-SYNC-FAILURE", json.dumps(report))
                     finally:
                         os.chdir(original)
 
