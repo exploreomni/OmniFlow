@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import json
+import re
 from pathlib import Path
 from typing import Any
 
-from ..security import secure_write_text
+from ..security import redact, secure_write_text
 
 
 def render_markdown_report(report: dict[str, Any]) -> str:
@@ -11,8 +13,29 @@ def render_markdown_report(report: dict[str, Any]) -> str:
     decision = str(report.get("policy_decision") or "unknown")
     exit_reason = str(report.get("exit_code_reason") or "")
     issues = report.get("issues", [])
+    incomplete_content = any(issue.get("type") == "content_evidence_unavailable" for issue in issues)
     blocking = [issue for issue in issues if _is_blocking(issue)]
-    impacts = [issue for issue in issues if issue.get("validator") == "contracts" or issue.get("impact_level")]
+    failed = decision == "fail" or isinstance(report.get("exit_code"), int) and report["exit_code"] > 0
+    uncertain_warnings = [
+        issue for issue in issues
+        if failed and not blocking and issue.get("active", True) and issue.get("severity") in {"warn", "warning"}
+        and not isinstance(issue.get("blocking"), bool)
+    ]
+    advisory = [
+        issue for issue in issues
+        if not _is_blocking(issue) and not _is_coverage_gap(issue) and issue not in uncertain_warnings
+    ]
+    warnings = [
+        issue for issue in issues
+        if issue.get("active", True) and issue.get("severity") in {"warn", "warning"}
+        and not _is_blocking(issue) and issue not in uncertain_warnings
+    ]
+    impacts = [
+        issue for issue in issues
+        if (issue.get("validator") == "contracts" or issue.get("impact_level")) and not _is_coverage_gap(issue)
+    ]
+    blocking_impacts = [issue for issue in impacts if _is_blocking(issue)]
+    advisory_impacts = [issue for issue in impacts if not _is_blocking(issue) and issue not in uncertain_warnings]
     coverage_gaps = _coverage_gaps(report)
     dbt_exposure_summaries = _dbt_exposure_summaries(report)
     ai_eval_summaries = _ai_eval_summaries(report)
@@ -28,8 +51,10 @@ def render_markdown_report(report: dict[str, Any]) -> str:
         "",
         f"- Policy decision: `{_safe_code(decision)}`",
         f"- Exit code reason: `{_safe_code(exit_reason)}`",
-        f"- Blocking issues: `{len(blocking)}`",
-        f"- Downstream impacts: `{len(impacts)}`",
+        f"- Blocking issues (all checks): `{len(blocking)}`",
+        f"- Advisory warnings (not blocking): `{len(warnings)}`",
+        f"- Downstream impacts: `{len(impacts)}` recorded; analysis incomplete."
+        if incomplete_content else f"- Downstream impacts: `{len(impacts)}`",
         f"- Coverage gaps: `{len(coverage_gaps)}`",
         "",
         "## Model Context",
@@ -42,11 +67,26 @@ def render_markdown_report(report: dict[str, Any]) -> str:
         "",
         "## Blocking Issues",
         "",
-        *_issue_lines(blocking, empty="_No blocking issues._", limit=20),
+        *_issue_lines(
+            blocking,
+            empty="_No confirmed blockers; warning policy needs review below._"
+            if uncertain_warnings else "_No blocking issues._",
+            limit=20,
+        ),
+        *_uncertain_warning_lines(uncertain_warnings),
         "",
         "## Downstream Contract Impact",
         "",
-        *_impact_lines(impacts),
+        *([
+            "_No downstream result is available for the context that stopped at unreadable Content Validator "
+            "evidence. Recorded findings from other contexts do not establish complete analysis._",
+            "",
+        ] if incomplete_content else []),
+        *_impact_lines(
+            blocking_impacts, coverage_unavailable=bool(coverage_gaps),
+            empty="_No blocking downstream findings were recorded; analysis is incomplete._"
+            if incomplete_content else "_No blocking downstream contract impacts; see advisory changes below._",
+        ),
         "",
         "## Coverage Gaps",
         "",
@@ -62,13 +102,27 @@ def render_markdown_report(report: dict[str, Any]) -> str:
         "",
         "## Validation Summary",
         "",
-        f"- Total issues: `{summary.get('total_issues', 0)}`",
-        f"- Errors: `{summary.get('errors', 0)}`",
-        f"- Warnings: `{summary.get('warnings', 0)}`",
-        f"- New issues: `{summary.get('new_issues', 0)}`",
-        f"- Existing issues: `{summary.get('existing_issues', 0)}`",
-        f"- Resolved issues: `{summary.get('resolved_issues', 0)}`",
-        f"- Risk level: `{summary.get('risk_level', 'info')}`",
+        f"- Total issues: `{_safe_code(summary.get('total_issues', 0))}`",
+        f"- Errors: `{_safe_code(summary.get('errors', 0))}`",
+        f"- Warnings: `{_safe_code(summary.get('warnings', 0))}`",
+        *_content_state_lines(report, issues),
+        "- Semantic risk: unestablished for incomplete contexts; any results from other contexts are partial."
+        if incomplete_content else f"- Risk level: `{_safe_code(summary.get('risk_level', 'info'))}`",
+        "",
+        "<details>",
+        "<summary>Advisory and historical detail (not blocking)</summary>",
+        "",
+        *_issue_lines(advisory, empty="_No advisory or historical issues._", limit=20),
+        "",
+        "### Non-blocking downstream changes",
+        "",
+        *_impact_lines(
+            advisory_impacts, coverage_unavailable=bool(coverage_gaps),
+            empty="_No non-blocking downstream findings were recorded; analysis is incomplete._"
+            if incomplete_content else "_No non-blocking downstream changes._",
+        ),
+        "",
+        "</details>",
         "",
         "## Reviewer Actions",
         "",
@@ -78,7 +132,8 @@ def render_markdown_report(report: dict[str, Any]) -> str:
         "",
         f"- Tool version: `{_safe_code(report.get('tool_version', 'unknown'))}`",
         f"- Generated at: `{_safe_code(report.get('generated_at', ''))}`",
-        f"- Git SHA: `{_safe_code(report.get('git_sha', ''))}`",
+        *_tool_revision_lines(report),
+        f"- Input/PR Git SHA: `{_safe_code(report.get('git_sha', ''))}`",
         f"- Git branch: `{_safe_code(report.get('git_branch', ''))}`",
         f"- Config hash: `{_safe_code(report.get('config_hash', ''))}`",
     ]
@@ -135,24 +190,39 @@ def _issue_lines(issues: list[dict[str, Any]], *, empty: str, limit: int) -> lis
     lines = []
     for issue in issues[:limit]:
         severity = issue.get("severity") or issue.get("risk") or "info"
-        location = issue.get("file") or issue.get("yaml_path") or issue.get("field") or issue.get("name") or ""
+        if not issue.get("active", True):
+            severity = f"inactive {severity}"
+        elif severity in {"warn", "warning"} and _is_blocking(issue):
+            severity = "policy-blocking warning"
+        category, guidance = _issue_guidance(issue)
+        message = _readable_message(issue.get("message")) or _readable_message(issue.get("summary"))
+        if not message:
+            message = "Details are unavailable; use the check category and affected object to investigate."
         lines.append(
-            f"- **{_safe_text(severity)}** `{_safe_code(location)}` "
-            f"{_safe_text(issue.get('message') or issue.get('summary') or '')}"
+            f"- **{_safe_text(severity)} — {_safe_text(category)}** · {_affected_object(issue)}. "
+            f"{_safe_text(message)} {guidance}"
         )
     if len(issues) > limit:
         lines.append(f"- _{len(issues) - limit} more issue(s) omitted from PR summary._")
     return lines
 
 
-def _impact_lines(impacts: list[dict[str, Any]]) -> list[str]:
+def _impact_lines(
+    impacts: list[dict[str, Any]], *, coverage_unavailable: bool = False, empty: str = "_No downstream contract impacts._",
+) -> list[str]:
     if not impacts:
-        return ["_No downstream contract impacts._"]
+        return [empty]
     lines = []
     for issue in impacts[:20]:
         impact_level = issue.get("impact_level") or "unknown"
         target = issue.get("field") or issue.get("previous_field") or issue.get("name") or ""
         referenced = issue.get("referenced_content") if isinstance(issue.get("referenced_content"), list) else []
+        if coverage_unavailable and not referenced:
+            lines.append(
+                f"- **Coverage unavailable** `{_safe_code(target)}`: no references established; "
+                "absence of downstream dependencies is not proven."
+            )
+            continue
         lines.append(f"- **{_safe_text(impact_level)}** `{_safe_code(target)}` referenced content: `{len(referenced)}`")
     if len(impacts) > 20:
         lines.append(f"- _{len(impacts) - 20} more impact(s) omitted from PR summary._")
@@ -174,6 +244,15 @@ def _coverage_gaps(report: dict[str, Any]) -> list[dict[str, Any]]:
             value = check_report.get("coverage_gaps") if isinstance(check_report, dict) else None
             if isinstance(value, list):
                 gaps.extend(item for item in value if isinstance(item, dict))
+    for issue in report.get("issues", []):
+        if _is_coverage_gap(issue) and not any(
+            gap.get("name") == issue.get("name")
+            and gap.get("document_id") == issue.get("document_id")
+            and gap.get("validation_scope") == issue.get("validation_scope")
+            and gap.get("message") == issue.get("message")
+            for gap in gaps
+        ):
+            gaps.append(issue)
     return gaps
 
 
@@ -182,10 +261,17 @@ def _coverage_gap_lines(gaps: list[dict[str, Any]]) -> list[str]:
         return ["_No dependency coverage gaps._"]
     lines = []
     for gap in gaps[:10]:
-        lines.append(
-            f"- `{_safe_code(gap.get('type', ''))}` `{_safe_code(gap.get('name', ''))}` "
-            f"{_safe_text(gap.get('message', ''))}"
-        )
+        if gap.get("type") == "content_evidence_unavailable":
+            lines.append(
+                f"- **Content Validator coverage unavailable** · {_affected_object(gap)}. "
+                "See the expanded Content validation finding in Blocking Issues."
+            )
+        else:
+            message = _readable_message(gap.get("message")) or "Dependency evidence is incomplete."
+            lines.append(
+                f"- **Coverage unavailable** · {_affected_object(gap)}. {_safe_text(message)} "
+                "Verify model identity, dependency-search access, and supported references before rerunning."
+            )
     if len(gaps) > 10:
         lines.append(f"- _{len(gaps) - 10} more coverage gap(s) omitted from PR summary._")
     return lines
@@ -261,6 +347,8 @@ def _ai_eval_lines(
             return ["_AI eval was skipped for these model contexts; see the recorded reason in JSON evidence._"]
         if decision == "skipped":
             return ["_Not evaluated because no Omni semantic-layer changes were detected._"]
+        if decision != "pass":
+            return ["_No AI eval result was produced; its enablement or execution cannot be established from this report._"]
         return ["_AI eval is disabled or has no configured prompt sets._"]
     for entry in summaries:
         delta = entry.get("accuracy_delta_pts")
@@ -337,29 +425,180 @@ def _reviewer_actions(
     *,
     operation: str,
 ) -> list[str]:
+    content_gaps = [gap for gap in coverage_gaps if gap.get("type") == "content_evidence_unavailable"]
+    dependency_gaps = [gap for gap in coverage_gaps if gap.get("type") != "content_evidence_unavailable"]
+    coverage_actions = []
+    if content_gaps:
+        coverage_actions.append(
+            "- Restore readable Content Validator evidence for the affected context and rerun the configured checks; "
+            "do not treat the content comparison or later checks as complete."
+        )
+    if dependency_gaps:
+        coverage_actions.append("- Re-run or inspect dependency coverage gaps; impact analysis may be incomplete.")
     if operation == "dbt_sync":
         if decision == "pass":
-            return ["- Confirm refreshed metadata and any Omni-generated Git change before closing deployment."]
-        return ["- Keep deployment open and resolve the refresh or post-sync validation failure."]
+            return ["- Confirm refreshed metadata and any Omni-generated Git change before closing deployment."] + coverage_actions
+        return ["- Keep deployment open and resolve the refresh or post-sync validation failure."] + coverage_actions
     if decision == "pass":
         actions = ["- Review semantic diff and downstream impact artifacts before approving."]
-        if coverage_gaps:
-            actions.append("- Review dependency coverage gaps before treating impact analysis as complete.")
-        return actions
+        return actions + coverage_actions
     if decision == "skipped":
         return ["- No reviewer action needed for OmniFlow unless this PR was expected to contain Omni changes."]
     actions = []
-    if blocking:
+    if any(issue.get("type") != "content_evidence_unavailable" for issue in blocking):
         actions.append("- Resolve blocking validation, lint, or contract issues before merge.")
     if impacts:
         actions.append("- Review referenced dashboards, reports, and queries before approving semantic changes.")
-    if coverage_gaps:
-        actions.append("- Re-run or inspect dependency coverage gaps; impact analysis may be incomplete.")
+    actions.extend(coverage_actions)
     return actions or ["- Review OmniFlow artifacts for setup or configuration errors."]
 
 
 def _is_blocking(issue: dict[str, Any]) -> bool:
-    return issue.get("active", True) and issue.get("severity") == "error"
+    return issue.get("active", True) and (issue.get("severity") == "error" or issue.get("blocking") is True)
+
+
+def _uncertain_warning_lines(issues: list[dict[str, Any]]) -> list[str]:
+    if not issues:
+        return []
+    return [
+        "",
+        "### Warnings requiring policy review",
+        "",
+        "This run failed, but the blocking status of these warnings was not recorded. "
+        "Do not assume they are advisory; inspect the configured warning policy and structured evidence.",
+        "",
+        *_issue_lines(issues, empty="", limit=20),
+    ]
+
+
+def _is_coverage_gap(issue: dict[str, Any]) -> bool:
+    return issue.get("impact_level") == "coverage_gap" or issue.get("type") in {
+        "dependency_coverage_gap", "content_evidence_unavailable",
+    }
+
+
+def _issue_guidance(issue: dict[str, Any]) -> tuple[str, str]:
+    if issue.get("validator") == "content" or issue.get("type") in {
+        "content_validation_issue", "content_evidence_unavailable",
+    }:
+        kind = {
+            "dashboard_filter": "Dashboard filter",
+            "query": "Query",
+        }.get(issue.get("issue_type"), "Content")
+        scope = {
+            "branch": "the validated Omni branch",
+            "base": "the validated main/base model",
+        }.get(issue.get("validation_scope"), "the validated model context")
+        if issue.get("type") == "content_evidence_unavailable":
+            return (
+                f"Content validation / {kind} — coverage unavailable",
+                f"Rerun Content Validator against {scope} and inspect the original response privately. "
+                "This evidence does not identify a specific defect; do not guess which filter or field to change.",
+            )
+        if kind == "Dashboard filter":
+            guidance = (
+                f"In {scope}, inspect the affected document's dashboard filter mappings and referenced fields. "
+                "Confirm the exact failing filter in Omni before editing."
+            )
+        elif kind == "Query":
+            guidance = (
+                f"In {scope}, inspect the affected query's field and topic references in Content Validator "
+                "before editing."
+            )
+        else:
+            guidance = f"In {scope}, inspect the affected document in Content Validator before editing."
+        return f"Content validation / {kind}", guidance
+    if _is_coverage_gap(issue):
+        return (
+            "Downstream contracts / Coverage unavailable",
+            "Verify model identity, dependency-search access, and supported references before rerunning. "
+            "Missing coverage does not prove that a change has no consumers.",
+        )
+    return {
+        "model": ("Model validation", "Inspect the indicated model YAML and rerun model validation."),
+        "semantic_lint": ("Semantic lint", "Review the indicated YAML and the configured lint rule."),
+        "contracts": (
+            "Downstream contracts",
+            "Review the semantic change and affected consumers; restore compatibility or update them through review.",
+        ),
+        "ai_eval": (
+            "AI eval",
+            "Review comparison completeness and approved restricted run evidence; reconcile owned jobs before retrying.",
+        ),
+        "dbt_impact": ("dbt impact", "Review the dbt relation change, Omni references, and coverage evidence."),
+        "dbt_sync": ("dbt synchronization", "Inspect refresh and post-sync evidence before closing deployment."),
+    }.get(issue.get("validator"), ("Validation", "Inspect this check's structured evidence before rerunning."))
+
+
+def _first_identity(issue: dict[str, Any], keys: tuple[str, ...]) -> str | None:
+    for key in keys:
+        value = issue.get(key)
+        if isinstance(value, str) and value.strip() and value.strip() != "[REDACTED]":
+            return value.strip()
+    return None
+
+
+def _affected_object(issue: dict[str, Any]) -> str:
+    document = _first_identity(issue, ("document_name", "content_name"))
+    identifier = _first_identity(issue, ("document_id", "document_identifier", "content_id"))
+    query = _first_identity(issue, ("query_name",))
+    parts = []
+    if document:
+        parts.append(f"Document `{_safe_code(document)}`")
+    if identifier:
+        parts.append(f"document ID `{_safe_code(identifier)}`")
+    if query:
+        parts.append(f"query `{_safe_code(query)}`")
+    if parts:
+        return "; ".join(parts)
+    location = _first_identity(issue, ("file", "yaml_path", "field", "previous_field", "name", "model_id"))
+    return f"Object `{_safe_code(location)}`" if location else "Object identity unavailable"
+
+
+def _readable_message(value: Any) -> str | None:
+    if not isinstance(value, str) or value.strip().lower() in {"", "null", "none", "[redacted]"}:
+        return None
+    # Legacy summaries sometimes stringify an object. Do not interpret or dump
+    # that undocumented structure; fixed category guidance remains actionable.
+    try:
+        if isinstance(json.loads(value), (dict, list)):
+            return None
+    except ValueError:
+        pass
+    return value
+
+
+def _content_state_lines(report: dict[str, Any], issues: list[dict[str, Any]]) -> list[str]:
+    content = [issue for issue in issues if issue.get("validator") == "content"]
+    incomplete = any(issue.get("type") == "content_evidence_unavailable" for issue in issues)
+    summary = report.get("summary", {})
+    counts = {
+        state: sum(issue.get("state") == state for issue in content)
+        if content else summary.get(f"{state}_issues", 0)
+        for state in ("new", "existing", "resolved")
+    }
+    if incomplete:
+        if not any(counts.values()):
+            return ["- Content comparison unavailable: new, existing, and resolved issue counts were not established."]
+        return [
+            f"- Content comparison partial: recorded new `{_safe_code(counts['new'])}`, "
+            f"existing `{_safe_code(counts['existing'])}`, resolved `{_safe_code(counts['resolved'])}`; "
+            "contexts with unreadable evidence are not counted."
+        ]
+    return [
+        f"- Content issue history only: new `{_safe_code(counts['new'])}`, "
+        f"existing `{_safe_code(counts['existing'])}`, resolved `{_safe_code(counts['resolved'])}`. "
+        "These counts are not the blocking total across all checks."
+    ]
+
+
+def _tool_revision_lines(report: dict[str, Any]) -> list[str]:
+    revision = report.get("tool_revision")
+    if isinstance(revision, dict) and revision.get("source") == "github_action_ref":
+        commit = revision.get("commit")
+        if isinstance(commit, str) and re.fullmatch(r"[0-9a-fA-F]{40}", commit):
+            return [f"- OmniFlow Action revision: `{commit}` (source: `github_action_ref`)"]
+    return ["- OmniFlow Action revision: unavailable (not inferred from the input/PR Git SHA)."]
 
 
 def _safe_text(value: Any) -> str:
@@ -370,12 +609,14 @@ def _safe_text(value: Any) -> str:
 
 
 def _safe_code(value: Any) -> str:
-    return _normalized_text(value).replace("`", "'").replace("@", "&#64;")
+    return (_normalized_text(value).strip() or "unavailable").replace("`", "'").replace("@", "&#64;")
 
 
 def _normalized_text(value: Any) -> str:
+    if not isinstance(value, (str, int, float)):
+        return ""
     return (
-        str(value or "")
+        redact(str(value))
         .replace("\r", " ")
         .replace("\n", " ")
         .replace("&", "&amp;")

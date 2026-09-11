@@ -51,7 +51,7 @@ from .revision_data import pull_request_changed_files, pull_request_revision
 from .security import redact, validate_repo_output_path
 from .timestamps import utc_now_iso
 from .validators.ai_eval import run_ai_eval_validation
-from .validators.content import run_content_validation
+from .validators.content import ContentEvidenceError, run_content_validation
 from .validators.model import run_model_validation
 from .validators.yaml_lint import has_error, lint_graph
 from .yaml_pull import pull_yaml
@@ -290,6 +290,7 @@ def cmd_run(args: argparse.Namespace, *, changed_files: list[str] | None = None)
         "validation_status": "failed" if exit_code else "passed",
         "policy_decision": "fail" if exit_code else "pass",
         "exit_code": exit_code,
+        "exit_code_reason": _exit_code_reason(exit_code),
         "timestamp": utc_now_iso(),
     }
     write_public_json(output_dir / "evidence.json", evidence, redaction_level=config.security.redaction_level)
@@ -863,9 +864,14 @@ def _write_context_failure_artifacts(
         "validator": "context",
         "message": redact(str(exc)),
     }
+    if isinstance(exc, ContentEvidenceError):
+        issue = exc.report_issue(redact_document_names=config.security.redact_document_names)
     summary = _summarize([issue])
     report = _base_report(config, context, context.branch_id, exc.exit_code, [issue], summary)
-    report["check_reports"] = []
+    report["check_reports"] = (
+        [{"validator": "content", "coverage_complete": False, "issues": [issue]}]
+        if isinstance(exc, ContentEvidenceError) else []
+    )
     report["exit_code_reason"] = _exit_code_reason(exc.exit_code)
     write_json_report(output_dir / "report.json", report)
     return report, exc.exit_code
@@ -1455,7 +1461,7 @@ def _base_report(
         "issues": issues,
         "policy_decision": "fail" if exit_code else "pass",
         "exit_code": exit_code,
-        "exit_code_reason": "validation failed" if exit_code else "success",
+        "exit_code_reason": _exit_code_reason(exit_code),
     }
 
 
@@ -1476,7 +1482,7 @@ def _aggregate_report(config, contexts, exit_code, issues, summary, reports):
         "model_reports": reports,
         "policy_decision": "fail" if exit_code else "pass",
         "exit_code": exit_code,
-        "exit_code_reason": "validation failed" if exit_code else "success",
+        "exit_code_reason": _exit_code_reason(exit_code),
     }
 
 

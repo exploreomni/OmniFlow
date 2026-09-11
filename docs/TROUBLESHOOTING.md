@@ -2,6 +2,8 @@
 
 Start with the exact exit code and the redacted public report. Do not paste an API key, raw Omni payload, private model YAML, customer URLs, or restricted artifacts into an issue.
 
+For the 0.4.0 relationship-coverage defect, unreadable dashboard-filter errors, and the revised report, see [Validation Diagnostics and Upgrading](VALIDATION_DIAGNOSTICS.md).
+
 ## Quick Diagnostic
 
 From a trusted local checkout, an administrator can make `OMNI_API_KEY` available through the organization's approved local secret-injection method, then run:

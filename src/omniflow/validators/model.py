@@ -32,6 +32,8 @@ def run_model_validation(
     issues = parse_model_issues(client.validate_model(model_id, branch_id=branch_id))
     error_count = sum(1 for issue in issues if issue["severity"] == "error")
     warning_count = sum(1 for issue in issues if issue["severity"] == "warning")
+    for issue in issues:
+        issue["blocking"] = issue["severity"] == "error" or (fail_on_warnings and issue["severity"] == "warning")
     report = {
         "tool": "omniflow",
         "validator": "model",

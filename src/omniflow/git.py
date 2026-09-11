@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 
 # Git is invoked without a shell and with bounded arguments.
@@ -35,6 +36,18 @@ def current_sha() -> str | None:
     pull_request = _pull_request_payload()
     head_sha = (pull_request.get("head") or {}).get("sha")
     return head_sha or os.getenv("GITHUB_SHA") or git_value("rev-parse", "HEAD")
+
+
+def tool_revision() -> dict[str, str | None]:
+    """Record a pinned Action ref, never the adopter checkout's input SHA.
+
+    This is runtime provenance, not a signature or independent attestation.
+    Local installs and floating Action refs cannot establish a tool commit here.
+    """
+    action_ref = os.getenv("OMNIFLOW_ACTION_REF", "")
+    if re.fullmatch(r"[0-9a-fA-F]{40}", action_ref):
+        return {"commit": action_ref.lower(), "source": "github_action_ref"}
+    return {"commit": None, "source": "unavailable"}
 
 
 def current_branch() -> str | None:

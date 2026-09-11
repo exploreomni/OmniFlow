@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from .exceptions import SecurityPolicyError
+from .git import tool_revision
 from .reporting.writer import write_reports
 from .security import public_safe, secure_write_text
 from .timestamps import utc_now_iso
@@ -28,6 +29,8 @@ def write_public_reports(
     formats: list[str],
     redaction_level: str,
 ) -> dict[str, Any]:
+    report = dict(report)
+    report.setdefault("tool_revision", tool_revision())
     safe_report = public_safe(report, redaction_level=redaction_level)
     write_reports(safe_report, output_dir=output_dir, formats=formats)
     write_reports(safe_report, output_dir=public_dir(output_dir), formats=formats)
@@ -40,6 +43,9 @@ def write_public_json(
     *,
     redaction_level: str,
 ) -> dict[str, Any]:
+    if payload.get("tool") == "omniflow":
+        payload = dict(payload)
+        payload.setdefault("tool_revision", tool_revision())
     safe_payload = public_safe(payload, redaction_level=redaction_level)
     target = Path(path)
     secure_write_text(target, json.dumps(safe_payload, indent=2, sort_keys=True) + "\n")

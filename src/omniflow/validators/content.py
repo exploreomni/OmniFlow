@@ -47,11 +47,59 @@ def extract_owner(record: dict[str, Any]) -> dict[str, str] | None:
     return normalized or None
 
 
-def _issue_list(value: Any) -> list[Any]:
-    if not isinstance(value, list) or any(not isinstance(item, (str, dict)) for item in value):
-        raise OmniAPIError("Content Validator response contains an invalid issue list")
-    if any(isinstance(item, dict) and "message" in item and not isinstance(item["message"], str) for item in value):
-        raise OmniAPIError("Content Validator response contains an invalid issue message")
+class ContentEvidenceError(OmniAPIError):
+    """Unreadable API evidence, with allowlisted context and no raw response."""
+
+    def __init__(
+        self, *, issue_type: str = "content", document: dict[str, Any] | None = None,
+        query: dict[str, Any] | None = None,
+    ) -> None:
+        category = {"dashboard_filter": "dashboard-filter", "query": "query"}.get(issue_type, "content")
+        super().__init__(
+            f"Content Validator response contains unreadable {category} issue details. "
+            "Validation evidence is incomplete; a specific content defect cannot be determined."
+        )
+        self.issue_type = issue_type if issue_type in {"dashboard_filter", "query"} else "content"
+        self.validation_scope: str | None = None
+        self.context: dict[str, str] = {}
+        for source, mapping in (
+            (document or {}, {"document_id": "document_id", "identifier": "document_identifier", "name": "document_name"}),
+            (query or {}, {"query_presentation_id": "query_presentation_id", "query_name": "query_name"}),
+        ):
+            for key, target in mapping.items():
+                value = source.get(key)
+                if isinstance(value, str) and value.strip():
+                    self.context[target] = redact(value.strip())[:512]
+
+    def report_issue(self, *, redact_document_names: bool = False) -> dict[str, Any]:
+        context = dict(self.context)
+        if redact_document_names:
+            for key in ("document_name", "query_name"):
+                if key in context:
+                    context[key] = "[REDACTED]"
+        return {
+            **context,
+            "validator": "content",
+            "type": "content_evidence_unavailable",
+            "issue_type": self.issue_type,
+            "validation_scope": self.validation_scope,
+            "severity": "error",
+            "message": str(self),
+        }
+
+
+def _issue_list(
+    value: Any, *, issue_type: str = "content", document: dict[str, Any] | None = None,
+    query: dict[str, Any] | None = None,
+) -> list[Any]:
+    if not isinstance(value, list):
+        raise ContentEvidenceError(issue_type=issue_type, document=document, query=query)
+    for item in value:
+        # The published API uses strings; retain the existing message-object
+        # compatibility, but never guess undocumented nested error structures.
+        message = item.get("message") if isinstance(item, dict) else item
+        if not isinstance(message, str) or not message.strip():
+            raise ContentEvidenceError(issue_type=issue_type, document=document, query=query)
     return value
 
 
@@ -66,7 +114,7 @@ def content_documents(payload: Any) -> list[dict[str, Any]]:
             if key in document and (not isinstance(document[key], str) or not document[key].strip()):
                 raise OmniAPIError("Content Validator response contains an invalid document identity")
         if "dashboard_filter_issues" in document:
-            _issue_list(document["dashboard_filter_issues"])
+            _issue_list(document["dashboard_filter_issues"], issue_type="dashboard_filter", document=document)
         if "queries_and_issues" in document:
             queries = document["queries_and_issues"]
             if not isinstance(queries, list) or any(not isinstance(query, dict) for query in queries):
@@ -76,7 +124,7 @@ def content_documents(payload: Any) -> list[dict[str, Any]]:
                     if key in query and (not isinstance(query[key], str) or not query[key].strip()):
                         raise OmniAPIError("Content Validator response contains an invalid query identity")
                 if "issues" in query:
-                    _issue_list(query["issues"])
+                    _issue_list(query["issues"], issue_type="query", document=document, query=query)
     return payload["content"]
 
 
@@ -172,8 +220,6 @@ def issue_summary(issue: Any) -> str:
         return issue
     if isinstance(issue, dict):
         message = issue.get("message")
-        if message is not None and not isinstance(message, str):
-            message = str(message)
         if isinstance(message, str) and message.strip():
             prefix = " / ".join(
                 part.strip()
@@ -185,8 +231,8 @@ def issue_summary(issue: Any) -> str:
             value = issue.get(key)
             if isinstance(value, str) and value.strip():
                 return value
-        return json.dumps(issue, sort_keys=True)
-    return str(issue)
+        return "Content Validator issue details are unavailable; inspect the same model and branch in Omni."
+    return "Content Validator issue details are unavailable; inspect the same model and branch in Omni."
 
 
 def normalize_issues(issues: Iterable[Any]) -> list[dict[str, Any]]:
@@ -303,7 +349,9 @@ def run_content_validation(
         user_id=user_id,
     )
     records_by_identifier = index_content_records(records)
-    payload = _prepare_validator_payload(payload, labels, records_by_identifier)
+    payload = _prepare_validator_payload(
+        payload, labels, records_by_identifier, validation_scope="branch" if branch_id else "base",
+    )
 
     safe_issues = _sanitize_issues(
         extract_issues(payload),
@@ -319,7 +367,9 @@ def run_content_validation(
             user_id=user_id,
             include_personal_folders=include_personal_folders,
         )
-        baseline_payload = _prepare_validator_payload(baseline_payload, labels, records_by_identifier)
+        baseline_payload = _prepare_validator_payload(
+            baseline_payload, labels, records_by_identifier, validation_scope="base",
+        )
         previous = normalize_issues(
             _sanitize_issues(
                 extract_issues(baseline_payload),
@@ -336,6 +386,11 @@ def run_content_validation(
     existing_severity = "info" if fail_on_new_only else "error"
     report_existing = [_report_issue(item, state="existing", severity=existing_severity) for item in existing_items]
     report_resolved = [_report_issue(item, state="resolved", severity="info", active=False) for item in resolved_items]
+    for issue in [*report_new, *report_existing]:
+        issue["validation_scope"] = "branch" if branch_id else "base"
+    if comparison_source == "base_model":
+        for issue in report_resolved:
+            issue["validation_scope"] = "base"
     generated_at = utc_now_iso()
     report = {
         "tool": "omniflow",
@@ -379,8 +434,14 @@ def _prepare_validator_payload(
     payload: Any,
     labels: list[str],
     records_by_identifier: dict[str, dict[str, Any]],
+    *,
+    validation_scope: str | None = None,
 ) -> Any:
-    extract_issues(payload)
+    try:
+        extract_issues(payload)
+    except ContentEvidenceError as exc:
+        exc.validation_scope = validation_scope
+        raise
     if not isinstance(payload, dict) or not isinstance(payload.get("content"), list):
         return payload
     if labels:
@@ -395,9 +456,19 @@ def _report_issue(
     severity: str,
     active: bool = True,
 ) -> dict[str, Any]:
+    raw = item.get("raw")
+    context = {
+        key: raw[key]
+        for key in ("document_id", "document_identifier", "document_name", "query_name", "query_presentation_id")
+        if isinstance(raw, dict) and isinstance(raw.get(key), str)
+    }
+    issue_type = raw.get("issue_type") if isinstance(raw, dict) else None
     return {
         **item,
+        **context,
         "validator": "content",
+        "type": "content_validation_issue",
+        "issue_type": issue_type if issue_type in {"dashboard_filter", "query"} else "content",
         "severity": severity,
         "message": item.get("summary") or "Omni content validation issue",
         "state": state,
