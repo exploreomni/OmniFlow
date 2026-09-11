@@ -20,6 +20,10 @@ def to_sarif(report: dict[str, Any]) -> dict[str, Any]:
             {
                 "ruleId": rule_id,
                 "level": level,
+                "properties": {
+                    "policy_blocking": bool(issue.get("active", True))
+                    and (issue.get("severity") == "error" or issue.get("blocking") is True),
+                },
                 "message": {"text": issue.get("message") or issue.get("summary") or "OmniFlow issue"},
                 "locations": [
                     {

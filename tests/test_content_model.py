@@ -100,8 +100,8 @@ class ContentModelTests(unittest.TestCase):
                     "identifier": "dash-1",
                     "name": "Revenue",
                     "queries_and_issues": [
-                        {"query_name": "Existing", "issues": [{"message": "Existing issue"}]},
-                        {"query_name": "New", "issues": [{"message": "New issue"}]},
+                        {"query_name": "Existing", "query_presentation_id": "existing", "issues": [{"message": "Existing issue"}]},
+                        {"query_name": "New", "query_presentation_id": "new", "issues": [{"message": "New issue"}]},
                     ],
                 }
             ]
@@ -111,7 +111,7 @@ class ContentModelTests(unittest.TestCase):
                 {
                     "identifier": "dash-1",
                     "name": "Revenue",
-                    "queries_and_issues": [{"query_name": "Existing", "issues": [{"message": "Existing issue"}]}],
+                    "queries_and_issues": [{"query_name": "Existing", "query_presentation_id": "existing", "issues": [{"message": "Existing issue"}]}],
                 }
             ]
         }

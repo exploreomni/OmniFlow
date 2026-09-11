@@ -2,21 +2,22 @@ from __future__ import annotations
 
 from typing import Any
 
+from ..model_response import normalize_model_response
 from ..omni_client import OmniClient
 from ..timestamps import utc_now_iso
 
 
-def parse_model_issues(payload: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def parse_model_issues(payload: Any) -> list[dict[str, Any]]:
     issues = []
-    for item in payload:
-        is_warning = bool(item.get("is_warning"))
+    for item in normalize_model_response(payload):
+        is_warning = item["is_warning"]
         issues.append(
             {
                 "validator": "model",
                 "severity": "warning" if is_warning else "error",
-                "message": str(item.get("message") or ""),
-                "yaml_path": item.get("yaml_path"),
-                "auto_fix": item.get("auto_fix") if isinstance(item.get("auto_fix"), dict) else None,
+                "message": item["message"],
+                "yaml_path": item["yaml_path"],
+                "auto_fix": item["auto_fix"],
             }
         )
     return issues
@@ -32,6 +33,8 @@ def run_model_validation(
     issues = parse_model_issues(client.validate_model(model_id, branch_id=branch_id))
     error_count = sum(1 for issue in issues if issue["severity"] == "error")
     warning_count = sum(1 for issue in issues if issue["severity"] == "warning")
+    for issue in issues:
+        issue["blocking"] = issue["severity"] == "error" or (fail_on_warnings and issue["severity"] == "warning")
     report = {
         "tool": "omniflow",
         "validator": "model",

@@ -39,4 +39,4 @@ def write_junit_report(path: str | Path, report: dict[str, Any]) -> None:
 
 
 def _is_failure(issue: dict[str, Any]) -> bool:
-    return issue.get("active", True) and issue.get("severity") == "error"
+    return issue.get("active", True) and (issue.get("severity") == "error" or issue.get("blocking") is True)
