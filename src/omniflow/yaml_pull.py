@@ -9,7 +9,7 @@ from typing import Any
 from .exceptions import ConfigError, OmniAPIError, SecurityPolicyError
 from .omni_client import OmniClient
 from .security import secure_mkdir, secure_write_text
-from .view_identity import validate_view_names
+from .view_identity import normalize_api_view_names
 from .yaml_security import MAX_YAML_FILE_BYTES, MAX_YAML_FILES, MAX_YAML_TOTAL_BYTES
 
 SUPPORTED_YAML_MODES = {"extension", "staged", "combined"}
@@ -42,7 +42,7 @@ def pull_yaml(
     if not files:
         raise OmniAPIError("Omni model YAML response did not contain any authored files")
     validated_files = _validate_file_map(root, files)
-    view_names = validate_view_names(payload["viewNames"], files) if "viewNames" in payload else None
+    view_names = normalize_api_view_names(payload["viewNames"], files) if "viewNames" in payload else None
     secure_mkdir(root, enforce_private=True)
     checksums = _extract_checksums(payload)
     manifest_files: dict[str, dict[str, str | None]] = {}
@@ -114,12 +114,16 @@ def _extract_file_map(payload: dict[str, Any]) -> dict[str, str]:
     files: dict[str, str] = {}
     if isinstance(candidates, dict):
         for key, value in candidates.items():
+            if not isinstance(key, str):
+                raise OmniAPIError("Omni YAML file inventory contains a non-string file path")
             if isinstance(value, str):
                 files[key] = value
             elif isinstance(value, dict) and isinstance(value.get("contents"), str):
                 files[key] = value["contents"]
             elif isinstance(value, dict) and isinstance(value.get("content"), str):
                 files[key] = value["content"]
+            else:
+                raise OmniAPIError("Omni YAML file inventory contains an entry without supported string content")
     return files
 
 

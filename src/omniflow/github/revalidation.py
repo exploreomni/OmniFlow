@@ -89,11 +89,21 @@ def _same_snapshot(api: GitHubRepository, state_api: GitHubRepository, number: i
         raise ConfigError("Deployment state changed during validation; dispatch a fresh check")
 
 
+def _require_legacy_readiness_flow(flow: dict | None) -> None:
+    if flow is not None and flow.get("version") == 2:
+        raise SecurityPolicyError(
+            "Version 2 environment-scoped targets are validation-only. Deployment readiness and hold release "
+            "require independently verified, per-environment deployment state; the repository-wide "
+            "OMNIFLOW_LAST_SYNC_SHA must not authorize another environment."
+        )
+
+
 def _readiness_route(config, changed_files: list[str]) -> tuple[str, set[str], int]:
     """Prove applicability from trusted registrations and one immutable inventory."""
     from ..cli import _path_under_any
 
     flow = load_flow_metadata(missing_ok=True)
+    _require_legacy_readiness_flow(flow)
     models = flow["models"] if flow else []
     for path in changed_files:
         if _is_probable_omni_file(path) and not any(
@@ -152,6 +162,9 @@ def revalidate(number: int, config_path: str = ".omniflow.yml") -> int:
         raise SecurityPolicyError("Readiness requires an explicit protected-branch workflow dispatch")
     if number < 1:
         raise ConfigError("Pull request number must be positive")
+    # Reject unsupported environment state before publishing a check or reading
+    # a legacy sync SHA. The protected dispatch checkout is the trusted source.
+    _require_legacy_readiness_flow(load_flow_metadata(missing_ok=True))
     repository = os.getenv("GITHUB_REPOSITORY", "")
     token = os.getenv("OMNIFLOW_GITHUB_TOKEN", "")
     api = GitHubRepository(repository, token)

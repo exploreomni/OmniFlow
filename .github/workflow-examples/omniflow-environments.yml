@@ -1,0 +1,55 @@
+name: OmniFlow environment validation
+
+on: # zizmor: ignore[dangerous-triggers] trusted-base workflow never executes PR-head code
+  pull_request_target:
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: omniflow-environment-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  omniflow:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # Match both branches' complete version 2 registry. Unknown targets fail routing.
+    environment: ${{ github.base_ref == 'main' && 'production' || 'development' }}
+    steps:
+      - name: Checkout trusted base only
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
+        with:
+          python-version: "3.11"
+
+      - name: Validate same-repository candidate
+        if: github.event.pull_request.head.repo.full_name == github.repository
+        uses: exploreomni/OmniFlow@<pinned-commit-sha> # zizmor: ignore[unpinned-uses] replace with reviewed release
+        with:
+          config: .omniflow.yml
+          validation-environment: ${{ github.base_ref == 'main' && 'production' || 'development' }}
+          # Each GitHub environment owns its own secret with this name.
+          omni-api-key: ${{ secrets.OMNI_API_KEY }}
+
+      - name: Route fork candidate without Omni credentials
+        if: github.event.pull_request.head.repo.full_name != github.repository
+        uses: exploreomni/OmniFlow@<pinned-commit-sha> # zizmor: ignore[unpinned-uses] replace with reviewed release
+        with:
+          config: .omniflow.yml
+          # Relevant fork changes fail closed; no automatic credentialed replay.
+
+      - name: Upload public evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: omniflow-environment-public-summary
+          path: .omniflow/public/
+          if-no-files-found: ignore
+          include-hidden-files: true

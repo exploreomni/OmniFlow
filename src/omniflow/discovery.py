@@ -6,7 +6,7 @@ import re
 
 # Git is invoked without a shell and with bounded arguments.
 import subprocess  # nosec B404
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -23,6 +23,7 @@ PR_MARKER_RE = re.compile(r"<!--\s*omniflow-context\s+({.*?})\s*-->", re.DOTALL)
 PR_MARKER_KEYS = {"model_id", "model_path", "branch_name", "base_url"}
 FLOW_KEYS = {"version", "models"}
 MODEL_KEYS = {"base_url", "model_id", "model_path", "base_branch", "git_provider", "web_url"}
+TARGET_MODEL_KEYS = MODEL_KEYS | {"environment", "git_follower"}
 MAX_FLOW_MODELS = 500
 MAX_MARKER_BYTES = 4 * 1024
 MAX_CHANGED_FILES = 10_000
@@ -49,6 +50,9 @@ class ModelContext:
     base_branch: str | None = None
     git_provider: str | None = None
     web_url: str | None = None
+    environment: str | None = None
+    git_follower: bool | None = None
+    candidate_verification: dict[str, Any] = field(default_factory=dict)
 
 
 def discover_contexts(
@@ -64,6 +68,27 @@ def discover_contexts(
     changed_files: list[str] | None = None,
 ) -> list[ModelContext]:
     branch = branch_name or discover_branch_name()
+    # Inspect trusted metadata before explicit identity can bypass the registry.
+    flow = load_flow_metadata(flow_path, missing_ok=True)
+    if flow and flow["version"] == 2:
+        if not auto or any((base_url, model_id, model_path, branch_name, branch_id)):
+            raise SecurityPolicyError(
+                "Version 2 validation requires --auto without identity overrides; "
+                "the trusted target registry owns host, model, path, and candidate branch."
+            )
+        branch = os.getenv("GITHUB_HEAD_REF") if is_pull_request_event() else branch
+        if is_pull_request_event():
+            event_head = (github_event_payload().get("pull_request") or {}).get("head", {}).get("ref")
+            if not branch or event_head != branch:
+                raise ConfigError("Version 2 validation requires the exact GitHub PR head branch")
+            if changed_files is None:
+                from .revision_data import pull_request_changed_files
+
+                changed_files = pull_request_changed_files()
+        return select_model_contexts(
+            flow, changed_files=get_changed_files() if changed_files is None else changed_files,
+            marker=load_pr_marker(), branch_name=branch, allow_skip=allow_skip,
+        )
     if base_url and model_id:
         context = _model_from_payload(
             {"base_url": base_url, "model_id": model_id, "model_path": model_path or ""},
@@ -83,7 +108,8 @@ def discover_contexts(
         )
 
     changed_files = get_changed_files() if changed_files is None else changed_files
-    flow = load_flow_metadata(flow_path, missing_ok=allow_skip and not marker)
+    if flow is None and not (allow_skip and not marker):
+        flow = load_flow_metadata(flow_path)
     if flow is None:
         if any(_is_probable_omni_file(path) for path in changed_files):
             raise ConfigError(
@@ -122,6 +148,12 @@ def discover_deployment_contexts(
 ) -> list[ModelContext]:
     if is_pull_request_event():
         raise SecurityPolicyError("dbt synchronization is prohibited for pull request events")
+    registered_flow = load_flow_metadata(flow_path, missing_ok=True)
+    if registered_flow and registered_flow["version"] == 2:
+        raise SecurityPolicyError(
+            "Version 2 environment targets are validation-only; dbt synchronization requires "
+            "separately designed environment-scoped deployment state."
+        )
     deployment_branch = discover_branch_name()
     if auto:
         flow = load_flow_metadata(flow_path)
@@ -199,13 +231,17 @@ def load_flow_metadata(path: str | Path = FLOW_PATH, *, missing_ok: bool = False
     models = payload.get("models")
     if not isinstance(models, list) or not models:
         raise ConfigError(f"Metadata file {candidate} must include a non-empty models list")
-    if payload.get("version") != 1:
-        raise ConfigError(f"Metadata file {candidate} must use version 1")
+    version = payload.get("version")
+    if type(version) is not int or version not in {1, 2}:
+        raise ConfigError(f"Metadata file {candidate} must use version 1 or 2")
     if any(not isinstance(item, dict) for item in models):
         raise ConfigError(f"Metadata file {candidate} models must all be JSON objects")
     if len(models) > MAX_FLOW_MODELS:
         raise SecurityPolicyError(f"Metadata file {candidate} contains more than 500 models")
-    contexts = [_model_from_payload(item, branch_name=None) for item in models]
+    contexts = [_model_from_payload(item, branch_name=None, version=version) for item in models]
+    if version == 2:
+        _validate_target_registry(contexts)
+        return payload
     model_ids = [context.model_id for context in contexts]
     model_paths = [context.model_path for context in contexts]
     if len(model_ids) != len(set(model_ids)):
@@ -321,7 +357,11 @@ def select_model_contexts(
     branch_name: str | None = None,
     allow_skip: bool = False,
 ) -> list[ModelContext]:
-    models = [_model_from_payload(item, branch_name=branch_name) for item in flow["models"]]
+    version = flow.get("version", 1)
+    models = [_model_from_payload(item, branch_name=branch_name, version=version) for item in flow["models"]]
+    if version == 2:
+        _validate_target_registry(models)
+        return _select_target_contexts(models, changed_files, marker or {}, allow_skip=allow_skip)
     marker = marker or {}
     if marker.get("model_id"):
         matching = [context for context in models if context.model_id == marker["model_id"]]
@@ -369,9 +409,9 @@ def select_model_contexts(
 
 
 def _model_from_payload(
-    payload: dict[str, Any], *, branch_name: str | None, require_model_path: bool = True
+    payload: dict[str, Any], *, branch_name: str | None, require_model_path: bool = True, version: int = 1
 ) -> ModelContext:
-    _reject_unknown_keys(payload, MODEL_KEYS, "OmniFlow model context")
+    _reject_unknown_keys(payload, TARGET_MODEL_KEYS if version == 2 else MODEL_KEYS, "OmniFlow model context")
     keys = ("base_url", "model_id", "model_path") if require_model_path else ("base_url", "model_id")
     for key in keys:
         if not isinstance(payload.get(key), str) or not payload[key].strip():
@@ -406,6 +446,21 @@ def _model_from_payload(
             or parsed_web_url.fragment
         ):
             raise ConfigError("OmniFlow web_url must be a trusted HTTPS repository URL")
+    environment = None
+    follower = None
+    if version == 2:
+        environment = payload.get("environment")
+        if not isinstance(environment, str) or not re.fullmatch(r"[a-z][a-z0-9-]{0,62}", environment):
+            raise ConfigError("Version 2 environment must be a lowercase name using letters, digits, and hyphens")
+        follower = payload.get("git_follower")
+        if not base_branch or type(follower) is not bool or not web_url:
+            raise ConfigError("Version 2 targets require base_branch, web_url, and boolean git_follower")
+        raw_path = payload["model_path"]
+        if raw_path != normalized_model_path or (raw_path != "." and any(
+            part in {"", ".", ".."} for part in raw_path.split("/")
+        )):
+            raise ConfigError("Version 2 model_path must be a canonical repository-relative path")
+        git_provider = "github"
     return ModelContext(
         base_url=base_url,
         model_id=model_id,
@@ -414,7 +469,81 @@ def _model_from_payload(
         base_branch=base_branch,
         git_provider=git_provider,
         web_url=web_url,
+        environment=environment,
+        git_follower=follower,
     )
+
+
+def _validate_target_registry(contexts: list[ModelContext]) -> None:
+    for index, context in enumerate(contexts):
+        for other in contexts[:index]:
+            if context.environment == other.environment and (
+                context.base_branch != other.base_branch or context.base_url != other.base_url
+            ):
+                raise ConfigError("Each version 2 environment must identify exactly one base branch and Omni host")
+            if context.base_branch != other.base_branch:
+                continue
+            if context.environment != other.environment or context.base_url != other.base_url:
+                raise ConfigError("A version 2 base branch must select exactly one environment and Omni host")
+            if context.model_id == other.model_id:
+                raise ConfigError("Version 2 target contains duplicate model_id values")
+            paths = (context.model_path, other.model_path)
+            if "." in paths or paths[0] == paths[1] or any(
+                left.startswith(right + "/") for left, right in (paths, paths[::-1])
+            ):
+                raise ConfigError("Version 2 target contains overlapping or duplicate model_path values")
+
+
+def validation_target_branch() -> str:
+    if is_pull_request_event():
+        target = os.getenv("GITHUB_BASE_REF")
+        event_base = (github_event_payload().get("pull_request") or {}).get("base", {}).get("ref")
+        if not target or event_base != target:
+            raise ConfigError("Version 2 routing requires a consistent GitHub PR base branch")
+    else:
+        target = os.getenv("OMNIFLOW_TARGET_BRANCH") or discover_branch_name()
+    if not target:
+        raise ConfigError("Set OMNIFLOW_TARGET_BRANCH for local version 2 discovery")
+    return validate_branch_name(target)
+
+
+def _select_target_contexts(
+    models: list[ModelContext], changed_files: list[str], marker: dict[str, Any], *, allow_skip: bool,
+) -> list[ModelContext]:
+    target = validation_target_branch()
+    registered = models
+    models = [context for context in models if context.base_branch == target]
+    if not models:
+        raise ConfigError(f"No trusted version 2 validation target is registered for base branch '{target}'")
+    if marker.get("base_url"):
+        raise SecurityPolicyError("PR markers cannot redirect a version 2 target host")
+    selected = []
+    if marker:
+        matching = [context for context in models if context.model_id == marker.get("model_id")]
+        if len(matching) != 1:
+            raise ConfigError("PR marker model_id does not identify a model in the selected target environment")
+        context = matching[0]
+        if marker.get("model_path", context.model_path) != context.model_path or (
+            marker.get("branch_name", context.branch_name) != context.branch_name
+        ):
+            raise SecurityPolicyError("PR marker does not match the trusted target path and PR head branch")
+        selected.append(context)
+    for path in changed_files:
+        matching = [context for context in models if _is_under_model_path(path, context.model_path) or (
+            context.model_path == "." and Path(path).suffix.lower() in {".yaml", ".yml"}
+        )]
+        if not matching and (_is_probable_omni_file(path) or any(
+            _is_under_model_path(path, context.model_path) for context in registered
+        )):
+            raise ConfigError("Omni files changed outside every model_path in the selected target environment")
+        for context in matching:
+            if context not in selected:
+                selected.append(context)
+    if not selected and not allow_skip:
+        selected = models  # Local doctor checks all models in the explicitly selected target.
+    for context in selected:
+        _clear_base_branch_context(context)
+    return selected
 
 
 def _validate_pull_request_base_branch(contexts: list[ModelContext]) -> None:
@@ -449,9 +578,9 @@ def _is_probable_omni_file(path: str) -> bool:
     normalized = path.strip().strip("/").lower()
     candidate = Path(normalized)
     name = candidate.name
-    if name in {"model.yaml", "model.yml", "relationships.yaml", "relationships.yml"}:
+    if name in {"model", "model.yaml", "model.yml", "relationships", "relationships.yaml", "relationships.yml"}:
         return True
-    if any(name.endswith(suffix) for suffix in (".view", ".topic", ".relationships")):
+    if any(name.endswith(suffix) for suffix in (".view", ".topic", ".composite_topic", ".relationships")):
         return True
     parts = candidate.parts
     return bool(

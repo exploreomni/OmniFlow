@@ -13,6 +13,11 @@ from .timestamps import utc_now_iso
 def validate_dbt_sync_environment(contexts: list[Any]) -> str:
     if not contexts:
         raise ConfigError("dbt synchronization requires at least one Omni model context")
+    if any(getattr(context, "environment", None) is not None for context in contexts):
+        raise SecurityPolicyError(
+            "Version 2 environment-scoped targets are validation-only; dbt synchronization is unsupported. "
+            "Use an independently reviewed deployment workflow with per-environment deployment state."
+        )
     if is_pull_request_event():
         raise SecurityPolicyError("dbt synchronization is prohibited for pull request events")
 

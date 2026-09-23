@@ -35,8 +35,9 @@ Required model fields are `base_url`, `model_id`, and `model_path`. `base_branch
 
 Rules:
 
-- `version` must be `1`.
-- Model IDs and model paths must be unique.
+- `version: 1` uses the single-target rules shown above; IDs and paths must be unique.
+- Opt-in `version: 2` supports branch-scoped environment targets. See the
+  [complete schema, workflow and adoption boundaries](ENVIRONMENT_TARGETS.md).
 - Paths must stay inside the repository.
 - `base_url` must be an HTTPS Omni origin in GitHub Actions.
 - Secret-like keys are rejected.
@@ -129,7 +130,7 @@ The sync token is read only from `OMNIFLOW_SYNC_API_KEY`. It must be a dedicated
 
 ## Breaking Change Hold
 
-This optional pull-request policy lets a monorepo keep dbt and Omni model YAML on one protected branch. It blocks a merge that would promote breaking Omni changes before the matching dbt deployment reaches the warehouse. It is disabled by default and never fires in repositories with no configured dbt paths.
+This optional pull-request policy lets a monorepo keep dbt and Omni model YAML on one protected branch. It blocks a merge that would promote breaking Omni changes before the matching dbt deployment reaches the warehouse. It is disabled by default; enable it only for repositories that deploy dbt. Once enabled, missing deployment evidence can trigger the hold even if the pull request changes no dbt files.
 
 ```yaml
 deployment:
@@ -151,12 +152,15 @@ deployment:
 | `dbt_paths` | `models`, `seeds`, `snapshots`, `macros` | Relative repository paths, maximum 50. Absolute and `..` paths are rejected. |
 | `pending_label` | `omniflow/awaiting-deploy` | One line, no commas, 50 characters or fewer. |
 
-The policy only evaluates changes the semantic diff marks `breaking`: deleted fields, renamed fields, field type changes, deleted relationships, and relationship cardinality changes. It fires in two situations:
+The policy only evaluates changes the semantic diff marks `breaking`: deleted fields, renamed fields, field type changes, deleted relationships, and relationship cardinality changes. It fires in three situations:
 
 - The pull request contains breaking Omni changes and also modifies a configured dbt path.
 - The pull request contains breaking Omni changes while dbt sources changed on the base branch after the commit recorded in `OMNIFLOW_LAST_SYNC_SHA`.
+- The pull request contains breaking Omni changes, has no same-pull-request dbt overlap, and deployment readiness cannot be established because the recorded sync state is missing, blank, unreachable, or not an ancestor of the trusted base.
 
-Pending detection requires both the recorded commit and a full-history checkout. When either is missing, OmniFlow prints a warning and evaluates same-pull-request detection only rather than blocking on incomplete evidence. Keep `dbt_paths` consistent with the `push.paths` filter on the deployment workflow. See [Breaking Change Hold](BREAKING_CHANGE_HOLD.md).
+Same-pull-request detection takes precedence. Otherwise, pending detection requires a verified successful sync commit and complete trusted-base history (`fetch-depth: 0`). Unavailable evidence produces `breaking_change_sync_state_unavailable`: an error that blocks validation under `action: fail`, or an advisory warning under `action: warn`. Warning mode does not establish deployment readiness, and other checks can still fail. A malformed SHA is rejected separately as a security-policy error.
+
+Before enabling the failing gate, complete a protected deployment and successful `omniflow dbt sync`, then record and verify that deployment's commit as `OMNIFLOW_LAST_SYNC_SHA`. Fetching history alone cannot replace missing or invalid deployment state. Keep `dbt_paths` consistent with the `push.paths` filter on the deployment workflow. See [Breaking Change Hold](BREAKING_CHANGE_HOLD.md) and [sync-state recovery](TROUBLESHOOTING.md#breaking_change_sync_state_unavailable).
 
 ## dbt Impact Analysis
 

@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from omniflow.cli import _pull_analysis_yaml, _run_context
+from omniflow.cli import _pull_analysis_yaml, _run_context, build_parser, cmd_run
 from omniflow.config import load_config
 from omniflow.diff.diff_engine import diff_graphs
 from omniflow.diff.semantic_graph import build_graph, load_yaml_graph
@@ -10,6 +10,36 @@ from omniflow.diff.yaml_loader import load_yaml_files
 from omniflow.discovery import ModelContext
 from omniflow.exceptions import ConfigError, OmniAPIError, SecurityPolicyError
 from omniflow.yaml_pull import pull_yaml
+
+
+@pytest.mark.parametrize("content", [None, 7, {}, {"content": []}, {"contents": None}])
+def test_malformed_api_file_entries_cannot_disappear_from_identity_coverage(tmp_path, content):
+    class Client:
+        def get_model_yaml(self, *args, **kwargs):
+            return {
+                "files": {"orders.view": "dimensions: {}\n", "missing.view": content},
+                "viewNames": {"orders.view": "orders"},
+            }
+
+    with pytest.raises(OmniAPIError, match="file inventory"):
+        pull_yaml(client=Client(), model_id="model", branch_id=None, output_dir=tmp_path / "snapshot")
+    assert not (tmp_path / "snapshot").exists()
+
+
+@pytest.mark.parametrize("wrapper", ["raw", "content", "contents"])
+def test_supported_api_file_content_forms_still_normalize(tmp_path, wrapper):
+    text = "dimensions: {}\n"
+
+    class Client:
+        def get_model_yaml(self, *args, **kwargs):
+            return {
+                "files": {"orders.view": text if wrapper == "raw" else {wrapper: text}},
+                "viewNames": {"orders.view": "orders"},
+            }
+
+    manifest = pull_yaml(client=Client(), model_id="model", branch_id=None, output_dir=tmp_path / "snapshot")
+    assert manifest["view_names"] == {"orders": "orders.view"}
+    assert set(load_yaml_graph(tmp_path / "snapshot", require_view_names=True).views) == {"orders"}
 
 
 @pytest.mark.parametrize("operation", ["delete", "modified", "missing", "unsafe", "symlink"])
@@ -63,8 +93,9 @@ def test_explicit_view_types_override_reserved_basenames(filename):
 
 @pytest.mark.parametrize("referenced,reuse_base,resolve_error", [(True, False, False), (False, False, False),
                                                                (True, True, False), (True, False, True)])
+@pytest.mark.parametrize("orientation", ["name_to_path", "path_to_name"])
 def test_inheritance_uses_resolved_api_evidence_without_losing_authored_snapshot(
-    tmp_path, monkeypatch, referenced, reuse_base, resolve_error,
+    tmp_path, monkeypatch, referenced, reuse_base, resolve_error, orientation,
 ):
     class Client:
         def __init__(self):
@@ -76,13 +107,16 @@ def test_inheritance_uses_resolved_api_evidence_without_losing_authored_snapshot
             if resolve_error and fully_resolved:
                 raise OmniAPIError("Synthetic resolved snapshot unavailable")
             definition = "filters:\n  window:\n    type: " + ("number" if branch_id else "string") + "\n"
-            return {
+            payload = {
                 "files": {"template.view": "template: true\n" + definition,
                           "orders.view": "extends: [template]\n" + (definition if fully_resolved else ""),
                           "resolved/orders.view": "dimensions: {marker: {type: string}}\n"},
                 "viewNames": {"template": "template.view", "orders": "orders.view",
                               "archived_orders": "resolved/orders.view"},
             }
+            if orientation == "path_to_name":
+                payload["viewNames"] = {path: name for name, path in payload["viewNames"].items()}
+            return payload
 
         def search_content_references(self, model_id, *, find, **kwargs):
             self.searches.append(find)
@@ -112,3 +146,57 @@ def test_inheritance_uses_resolved_api_evidence_without_losing_authored_snapshot
         load_yaml_graph(authored)
     assert "orders.window" in load_yaml_graph(authored.with_name("yaml-head-resolved")).fields
     assert json.loads((authored / "manifest.json").read_text())["fully_resolved"] is False
+
+
+@pytest.mark.parametrize("redaction_level", ["standard", "strict"])
+def test_metadata_failure_reports_safe_reason_and_incomplete_dependent_checks(tmp_path, monkeypatch, redaction_level):
+    class Client:
+        def __init__(self):
+            self.searches = []
+
+        def get_model_yaml(self, *args, **kwargs):
+            return {
+                "files": {"orders.view": "dimensions: {PRIVATE-YAML-SENTINEL: {type: string}}\n"},
+                "viewNames": {"orders.view": "PRIVATE-METADATA-SENTINEL\n"},
+            }
+
+        def search_content_references(self, *args, **kwargs):
+            self.searches.append(kwargs)
+            raise AssertionError("Invalid metadata must prevent downstream searches")
+
+    monkeypatch.chdir(tmp_path)
+    client = Client()
+    config = load_config(None)
+    config.content_validation.enabled = config.model_validation.enabled = config.ai_eval.enabled = False
+    config.semantic_lint.enabled = config.contracts.enabled = config.breaking_change_hold.enabled = True
+    config.reporting.formats = ["json", "markdown", "sarif", "junit"]
+    config.security.redaction_level = redaction_level
+    context = ModelContext(base_url="https://omni.example", model_id="model", model_path="omni/model", branch_id="branch")
+    monkeypatch.setattr("omniflow.cli.load_config", lambda _: config)
+    monkeypatch.setattr("omniflow.cli.discover_contexts", lambda **_: [context])
+    monkeypatch.setattr("omniflow.cli._client_and_branch_for_context", lambda *a, **k: (client, "branch"))
+    assert cmd_run(build_parser().parse_args(["run", "--auto"]), changed_files=[]) == 2
+
+    public = tmp_path / ".omniflow/public"
+    report = json.loads((public / "report.json").read_text())
+    assert report["validation_complete"] is False
+    assert report["policy_decision"] == "fail"
+    model = report["model_reports"][0]
+    assert model["validation_complete"] is False
+    states = {entry["validator"]: entry["status"] for entry in model["check_states"]}
+    assert states["context"] == "completed"
+    assert states["semantic_diff"] == "failed"
+    assert all(states[name] == "not_run" for name in ("semantic_lint", "downstream", "contracts", "breaking_change_hold"))
+    issue = report["issues"][0]
+    assert issue["validator"] == "semantic_diff"
+    assert issue["type"] == "validation_execution_failed"
+    assert issue["metadata_stage"] == "view_names"
+    assert issue["metadata_reason"] == "invalid_identity"
+    assert model["check_reports"][0]["coverage_complete"] is False
+    assert model["check_reports"][0]["issues"][0]["metadata_reason"] == "invalid_identity"
+    assert json.loads((public / "evidence.json").read_text())["validation_complete"] is False
+    assert "YAML metadata / View identity unavailable" in (public / "report.md").read_text()
+    assert client.searches == []
+    assert not (tmp_path / ".omniflow/restricted").exists()
+    for path in public.iterdir():
+        assert "PRIVATE-" not in path.read_text()
