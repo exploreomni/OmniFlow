@@ -1,5 +1,19 @@
 # OmniFlow Troubleshooting
 
+## Leader/follower release PR targets a different base branch
+
+Version 1 registers one base branch per model. Do not retarget a legitimate release
+promotion PR into development just to pass that check. Use the reviewed
+[version 2 environment registry](ENVIRONMENT_TARGETS.md) and its environment-bound
+validation workflow. Model IDs, hosts and Git settings must identify the real targets.
+
+For version 2, an unverified candidate means validation coverage is incomplete, not
+that there are no breaking changes. Confirm the environment credential, follower
+**Always create branches** setting and release branch synchronization. Exact authored
+YAML must match the immutable PR head before and after checks. Missing branches never
+fall back to production's base model. Check synchronization before a bounded rerun;
+do not bypass the check or reuse development's deployment-state variable.
+
 Start with the exact exit code and the redacted public report. Do not paste an API key, raw Omni payload, private model YAML, customer URLs, or restricted artifacts into an issue.
 
 For the 0.4.0 relationship-coverage defect, unreadable dashboard-filter errors, and the revised report, see [Validation Diagnostics and Upgrading](VALIDATION_DIAGNOSTICS.md).
@@ -70,6 +84,26 @@ Use the least privilege needed for enabled checks. The optional dbt exposures en
 OmniFlow fails closed by default when it cannot complete a downstream reference search for a breaking semantic element. This prevents an API or permission failure from being reported as "nothing depends on this field."
 
 Investigate the associated Omni API status, model access, and element identifier. Change `contracts.fail_on.coverage_gaps` only after the governance owner accepts the reduced assurance.
+
+### YAML `viewNames` Metadata Processing Failed
+
+The message begins `Omni YAML metadata processing failed (viewNames: ...)`. The report identifies the stage as `metadata_stage: view_names` and includes a bounded `metadata_reason`. This is an input-processing failure, not proof of a semantic model defect. The run exits with a configuration error (`2`); completed findings are retained, `validation_complete` is false, and dependent checks marked `not_run` have not passed.
+
+OmniFlow accepts both file-path → canonical-name API maps and canonical-name → file-path maps. It normalizes them to name → path in the snapshot. Empty names are allowed only for recognized non-view files; view identities must be complete, unique, and case-sensitive. Mixed or ambiguous orientations are rejected instead of guessed.
+
+An earlier `Omni YAML file inventory` error means a file entry itself has a non-string path or unsupported content type. That is an API error (`4`), not this metadata configuration error. Malformed entries are never dropped to make identity coverage appear complete.
+
+| Reason category | What to investigate |
+| --- | --- |
+| `invalid_mapping` | The map's value types or entry count do not match the file inventory. |
+| `invalid_path`, `unsupported_orientation` | Unsafe, unknown, or case-mismatched paths, or a mixture of mapping orientations. |
+| `ambiguous_orientation` | Both keys and values match inventory paths, so the intended identity cannot be chosen safely. |
+| `duplicate_name`, `duplicate_path` | More than one view file claims the same name, or multiple names point to one file. |
+| `invalid_identity`, `non_view_identity`, `incomplete_identity` | Invalid/empty view names, names attached to non-views, missing view entries, or unusable view definitions. |
+
+For issue [#24](https://github.com/exploreomni/OmniFlow/issues/24), an older build rejected reported path → name responses with `Invalid or ambiguous Omni viewNames metadata; refresh the YAML snapshot`. Use a reviewed, published revision containing the compatibility fix when available; merging a change here does not update a consumer's pinned Action. See [release notes](RELEASE_NOTES.md).
+
+If a current build still rejects the payload, capture the exact Action revision, base/branch scope, YAML mode, and redacted public report. Share only a sanitized example of the map and matching file inventory through an approved support channel, retaining keys and value types while replacing sensitive names. Do not post raw YAML, credentials, or restricted snapshots. Confirm the response contract before changing it; do not invent view names, invert mixed entries individually, disable identity checks, or assume repeated refreshes repair an unsupported format. After correction, run fresh validation against the intended candidate branch and review any remaining findings separately.
 
 ### No Pull-Request Comment
 
@@ -166,23 +200,35 @@ Stop merge and deployment activity. A concurrent edit or API failure prevented e
 
 ### The hold blocked a pull request that is actually safe
 
-Detection is path-based. A pull request that touches a configured `dbt_paths` entry while making breaking Omni changes is held even when the two are unrelated. Narrow `deployment.breaking_change_hold.dbt_paths` to the directories that really carry warehouse schema, or split the unrelated change into its own pull request. Use `action: warn` while tuning the paths.
+Detection is path-based. A pull request that touches a configured `dbt_paths` entry while making breaking Omni changes is held even when the two are unrelated. Narrow `deployment.breaking_change_hold.dbt_paths` to the directories that really carry warehouse schema, or split the unrelated change into its own pull request. `action: warn` is an explicitly advisory policy choice while tuning paths, not proof that a deployment is ready. Do not use it to bypass missing sync evidence.
 
 ### The hold never fires even though the policy is enabled
 
 Check, in order:
 
-1. The semantic diff has a `breaking` change. Additive changes never trigger the hold.
-2. A changed file actually matches a `dbt_paths` entry. Matching requires a directory boundary, so `models` does not match `models_archive`.
-3. For pending-deployment detection, `OMNIFLOW_LAST_SYNC_SHA` is set and the checkout uses `fetch-depth: 0`. OmniFlow prints a warning when the recorded commit is unreachable and evaluates same-pull-request detection only.
+1. The trusted base-branch policy has `deployment.breaking_change_hold.enabled: true`. If you expect a blocking finding, use `action: fail`; `action: warn` reports findings without failing validation for this hold.
+2. The semantic diff has a `breaking` change. Additive changes never trigger the hold. A failed semantic diff is incomplete validation, not evidence that a change is safe.
+3. For same-pull-request detection, a changed file matches a `dbt_paths` entry. Matching requires a directory boundary, so `models` does not match `models_archive`.
+4. Without same-pull-request overlap, OmniFlow checks for dbt changes since `OMNIFLOW_LAST_SYNC_SHA`. A verified sync with no later dbt changes produces no hold. Missing, blank, unreachable, or non-ancestor state instead produces `breaking_change_sync_state_unavailable` and blocks a breaking change under `action: fail`.
 
-### `breaking-change hold could not reach the recorded sync commit`
+### `breaking_change_sync_state_unavailable`
 
-The runner has a shallow checkout, so pending-deployment detection was skipped. Set `fetch-depth: 0` on the `actions/checkout` step in the validation workflow. Same-pull-request detection still ran.
+The report says: "Cannot establish deployment readiness: sync state is missing, unreachable, or not an ancestor of the trusted base. Record a verified successful sync and fetch complete base history."
+
+This finding means an enabled hold found a breaking Omni change without same-pull-request dbt overlap, but could not establish deployment readiness. It is an error under `action: fail` and an advisory warning only under `action: warn`; pending detection has not safely passed.
+
+To recover:
+
+1. Fetch complete history for the trusted base checkout using `fetch-depth: 0`. This fixes missing history, not a missing deployment record or a commit from the wrong history.
+2. Verify that `OMNIFLOW_LAST_SYNC_SHA` identifies an actual successful protected deployment followed by successful `omniflow dbt sync`, and that the commit is an ancestor of the trusted base. Confirm the validation action receives that recorded value through `last-sync-sha`.
+3. If no verified sync exists yet, bootstrap it through the protected deployment/sync workflow before adopting the required readiness gate. Preserve existing warehouse references during the deployment; do not deploy a destructive rename first. Record the successfully synchronized commit with `OMNIFLOW_SYNC_STATE_TOKEN` and verify the durable value was written. Do not substitute the current HEAD or another arbitrary SHA merely to clear the hold.
+4. After correcting history or state, dispatch [fresh current-head revalidation](BREAKING_CHANGE_HOLD.md#3-current-head-readiness-workflow) on the current protected base for the open PR. Rerunning an old `pull_request_target` job retains its old event and is not fresh readiness evidence.
+
+A non-hexadecimal or otherwise malformed SHA produces a separate security-policy error, not this hold finding. Correct it from verified deployment evidence; more Git history will not repair an invalid value.
 
 ### A held pull request was never released
 
-The release step runs only after `omniflow dbt sync` succeeds. Confirm the deployment job completed, that `OMNIFLOW_SYNC_STATE_TOKEN` is configured so the synchronized commit was recorded, and that the label on the pull request matches `deployment.breaking_change_hold.pending_label`. Auto-merge also waits for required checks and reviews, so a released pull request can still be pending on branch protection.
+Successful `omniflow dbt sync` and a recorded commit do not automatically release or merge a pull request. Confirm the deployment job recorded and reread `OMNIFLOW_LAST_SYNC_SHA`, then dispatch the current-head readiness workflow on the current protected base with the open PR number. It reruns validation and clears the configured `deployment.breaking_change_hold.pending_label` only after readiness succeeds. The PR must still satisfy required checks, up-to-date branch protection, and reviews before a human merges it. See [Breaking Change Hold](BREAKING_CHANGE_HOLD.md#3-current-head-readiness-workflow).
 
 ## dbt Impact Analysis
 

@@ -65,6 +65,7 @@ def render_markdown_report(report: dict[str, Any]) -> str:
         "## Check Execution",
         "",
         *_execution_lines(report),
+        *(_candidate_lines(report)),
         "",
         "## dbt Synchronization",
         "",
@@ -181,6 +182,11 @@ def _model_lines(report: dict[str, Any]) -> list[str]:
                 f"- `{_safe_code(model.get('model_id', ''))}` path "
                 f"`{_safe_code(model.get('model_path', ''))}` branch `{_safe_code(branch)}`"
             )
+            if model.get("environment"):
+                lines.append(
+                    f"  - Environment: `{_safe_code(model['environment'])}`; PR target: "
+                    f"`{_safe_code(model.get('target_branch', ''))}`; candidate: `{_safe_code(branch)}`"
+                )
         return lines or ["- Model context unavailable."]
     if any(report.get(key) for key in ("model_id", "model_path", "branch_name", "branch_id")):
         return [
@@ -189,6 +195,35 @@ def _model_lines(report: dict[str, Any]) -> list[str]:
             f"- Branch: `{_safe_code(report.get('branch_name') or report.get('branch_id') or '')}`",
         ]
     return ["_Model context unavailable._"]
+
+
+def _candidate_lines(report: dict[str, Any]) -> list[str]:
+    contexts = report.get("model_reports") or [report]
+    scoped = [context for context in contexts if isinstance(context, dict) and context.get("environment")]
+    if not scoped:
+        return []
+    lines = ["", "## Environment Candidate Coverage", ""]
+    for context in scoped:
+        proof = context.get("candidate_verification") or {}
+        status = proof.get("status", "unverified")
+        lines.append(
+            f"- `{_safe_code(context.get('environment'))}` / `{_safe_code(context.get('model_id'))}` "
+            f"target `{_safe_code(context.get('target_branch'))}` candidate "
+            f"`{_safe_code(context.get('branch_name'))}`: **{_safe_code(status)}**."
+        )
+        if status == "verified":
+            lines.append(
+                f"  - Authored YAML matched PR head `{_safe_code(proof.get('head_sha'))}` "
+                f"before and after checks ({_safe_code(proof.get('file_count'))} files)."
+            )
+        else:
+            lines.append(
+                "  - Candidate coverage is incomplete. Confirm target settings, credential scope, and "
+                "the follower candidate's Git synchronization, then rerun the current PR. "
+                "This is not a clean bill of health for production."
+            )
+    lines.append("_Validation-only evidence; this does not authorize deployment or release a deployment hold._")
+    return lines
 
 
 def _execution_contexts(report: dict[str, Any]) -> list[dict[str, Any]]:
@@ -567,7 +602,15 @@ def _reviewer_actions(
     if decision == "skipped":
         return ["- No reviewer action needed for OmniFlow unless this PR was expected to contain Omni changes."]
     actions = []
-    if any(issue.get("type") != "content_evidence_unavailable" for issue in blocking):
+    if any(issue.get("metadata_stage") == "view_names" for issue in blocking):
+        actions.append(
+            "- Resolve the YAML viewNames response-contract error using sanitized evidence, then run fresh validation. "
+            "Do not treat unfinished semantic or dependency checks as successful."
+        )
+    if any(
+        issue.get("type") != "content_evidence_unavailable" and issue.get("metadata_stage") != "view_names"
+        for issue in blocking
+    ):
         actions.append("- Resolve blocking validation, lint, or contract issues before merge.")
     if impacts:
         actions.append("- Review referenced dashboards, reports, and queries before approving semantic changes.")
@@ -600,6 +643,13 @@ def _is_coverage_gap(issue: dict[str, Any]) -> bool:
 
 
 def _issue_guidance(issue: dict[str, Any]) -> tuple[str, str]:
+    if issue.get("metadata_stage") == "view_names":
+        return (
+            "YAML metadata / View identity unavailable",
+            "Check the supported viewNames response format and canonical identity coverage using a sanitized sample. "
+            "This is an input-processing failure, not a semantic defect; dependent checks are incomplete. "
+            "Do not guess view names or disable the gate.",
+        )
     if issue.get("validator") == "content" or issue.get("type") in {
         "content_validation_issue", "content_evidence_unavailable",
     }:

@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from ..exceptions import ConfigError
+from ..semantic_files import infer_file_kind as _infer_kind
 from ..view_identity import validate_view_names
 from .yaml_loader import load_yaml_snapshot
 
@@ -86,40 +87,6 @@ def build_graph(
             _add_fields(graph, file_path, name, payload)
             _add_relationships(graph, file_path, payload, scope=f"view:{name}")
     return graph
-
-
-def _infer_kind(file_path: str, payload: Any) -> str:
-    lower = file_path.lower()
-    basename = lower.rsplit("/", 1)[-1]
-    typed_name = basename
-    for suffix in (".yaml", ".yml"):
-        if typed_name.endswith(suffix):
-            typed_name = typed_name[:-len(suffix)]
-            break
-    # Explicit Omni file types outrank reserved basenames and payload hints.
-    if typed_name.endswith(".view"):
-        return "view"
-    if typed_name.endswith((".topic", ".composite_topic")):
-        return "topic"
-    if typed_name.endswith(".relationships"):
-        return "relationship"
-    stem = basename.rsplit(".", 1)[0]
-    if stem == "model" or (isinstance(payload, dict) and payload.get("type") == "model"):
-        return "model"
-    if lower.endswith(".topic") or ".topic." in lower:
-        return "topic"
-    if lower.endswith(".composite_topic") or ".composite_topic." in lower:
-        return "topic"
-    if (
-        stem == "relationships"
-        or stem.endswith(".relationships")
-        or lower.endswith(".relationships")
-        or isinstance(payload, list)
-    ):
-        return "relationship"
-    if isinstance(payload, dict) and (payload.get("type") == "topic" or "base_view" in payload):
-        return "topic"
-    return "view"
 
 
 def _name(file_path: str, payload: dict[str, Any]) -> str:

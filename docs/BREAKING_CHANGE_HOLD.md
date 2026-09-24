@@ -1,6 +1,6 @@
 # Breaking Change Hold
 
-OmniFlow's breaking change hold lets a monorepo keep dbt, Omni, and other tooling on a single protected branch without exposing production content to a schema gap. It is optional, disabled by default, and does nothing in repositories that do not deploy dbt.
+OmniFlow's breaking change hold lets a monorepo keep dbt, Omni, and other tooling on a single protected branch without exposing production content to a schema gap. It is optional and disabled by default. Leave it disabled for repositories that do not deploy dbt; once enabled, missing sync evidence can block breaking changes even when no dbt files changed.
 
 ## The Problem It Solves
 
@@ -64,7 +64,7 @@ deployment:
 | `enabled` | `false` | Turns the policy on. Nothing is evaluated while this is false. |
 | `action` | `fail` | `fail` blocks the merge through the required check. `warn` reports without changing the exit code. |
 | `dbt_paths` | `models`, `seeds`, `snapshots`, `macros` | Relative repository paths that indicate a dbt schema change. Must match the `push.paths` filter on the deployment workflow. Maximum 50 entries. |
-| `pending_label` | `omniflow/awaiting-deploy` | Label the workflow applies while a pull request is held, and the label the deployment job releases. |
+| `pending_label` | `omniflow/awaiting-deploy` | Label the validation workflow applies while a pull request is held. Cleared only after successful fresh current-head readiness validation, not by the deployment job. |
 
 Paths must be relative and inside the repository. Absolute paths, `..` traversal, and control characters are rejected at config load.
 

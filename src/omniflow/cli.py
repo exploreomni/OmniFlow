@@ -46,7 +46,7 @@ from .downstream import generate_downstream_dependencies
 from .exceptions import ConfigError, ExitCodes, OmniAuthError, OmniFlowError, SecurityPolicyError
 from .execution import ValidationProgress, scope_findings
 from .exposures import run_dbt_exposure_enrichment
-from .git import current_branch, current_sha, event_name, git_executable, git_value, pr_number
+from .git import current_branch, current_sha, event_name, git_executable, git_value, is_pull_request_event, pr_number
 from .github.annotations import annotation_lines
 from .github.repair_attempt import GitHubRepairAttemptGuard, load_repair_event
 from .logging import configure_logging
@@ -56,12 +56,13 @@ from .repair.reporting import write_repair_artifacts
 from .reporting.json_report import write_json_report
 from .reporting.writer import write_reports
 from .revision_data import pull_request_changed_files, pull_request_revision
-from .security import redact, validate_repo_output_path
+from .security import redact, validate_path_segment, validate_repo_output_path
 from .timestamps import utc_now_iso
 from .validators.ai_eval import run_ai_eval_validation
 from .validators.content import ContentEvidenceError, run_content_validation
 from .validators.model import run_model_validation
 from .validators.yaml_lint import has_error, lint_graph
+from .view_identity import ViewNamesMetadataError
 from .yaml_pull import pull_yaml
 
 
@@ -367,11 +368,17 @@ def cmd_route(args: argparse.Namespace) -> int:
         "reason": reason,
         "model_count": len(contexts),
     }
+    environment = contexts[0].environment if contexts else None
+    if environment:
+        payload.update(environment=environment, target_branch=contexts[0].base_branch)
     if args.format == "github":
         print(f"should_run={'true' if should_run else 'false'}")
         print(f"requires_omni={'true' if requires_omni else 'false'}")
         print(f"reason={reason}")
         print(f"model_count={len(contexts)}")
+        if environment:
+            print(f"environment={environment}")
+            print(f"target_branch={contexts[0].base_branch}")
     elif args.format == "json":
         print(json.dumps(payload, sort_keys=True))
     else:
@@ -682,6 +689,8 @@ def _run_context(
     enforce_breaking_hold: bool = False,
 ) -> tuple[dict[str, Any], int]:
     progress = ValidationProgress(config, branch_id=context.branch_id, enforce_breaking_hold=enforce_breaking_hold)
+    if context.environment:
+        progress.states["candidate"] = {"validator": "candidate", "status": "not_run"}
     try:
         return _run_context_steps(
             config=config, context=context, output_dir=output_dir, api_key=api_key,
@@ -699,12 +708,26 @@ def _run_context_steps(
     comparison_base_yaml_dir: Path | None, changed_files: list[str] | None,
     enforce_breaking_hold: bool, progress: ValidationProgress,
 ) -> tuple[dict[str, Any], int]:
+    if context.environment and (config.breaking_change_hold.enabled or config.dbt_sync.enabled):
+        raise SecurityPolicyError(
+            "Version 2 environment targets are validation-only. Disable deployment synchronization and "
+            "breaking-change hold/readiness in this validation policy; repository-wide sync state is not "
+            "evidence for the selected environment. Keep separate governed deployment gates."
+        )
     client, branch_id = _client_and_branch_for_context(context, config.omni.timeout, api_key=api_key)
     progress.branch_id = branch_id
     progress.complete("context")
     all_issues = progress.issues
     reports = progress.reports
     exit_code = 0
+    if context.environment:
+        from .candidate import verify_candidate
+
+        progress.begin("candidate")
+        context.candidate_verification = {"status": "unverified"}
+        context.candidate_verification = verify_candidate(client, context)
+        # Completion requires the second sample after every enabled check.
+        context.candidate_verification["status"] = "pending_recheck"
 
     if config.content_validation.enabled:
         progress.begin("content")
@@ -888,6 +911,15 @@ def _run_context_steps(
                 exit_code = max(exit_code, ExitCodes.VALIDATION_FAILED)
         progress.complete("breaking_change_hold", 1 if any(issue.get("severity") == "error" for issue in hold_issues) else 0)
 
+    if context.environment:
+        progress.begin("candidate")
+        before = dict(context.candidate_verification, status="verified")
+        after = verify_candidate(client, context)
+        if before != after:
+            context.candidate_verification = {"status": "unverified", "reason": "changed_during_validation"}
+            raise ConfigError("Candidate evidence changed during validation; rerun the current PR")
+        context.candidate_verification = after
+        progress.complete("candidate")
     progress.begin("reporting")
     progress.complete("reporting")
     scope_findings(all_issues, model_id=context.model_id, branch_id=branch_id, branch_name=context.branch_name)
@@ -934,6 +966,12 @@ def _write_context_failure_artifacts(
     }
     if isinstance(exc, ContentEvidenceError):
         issue = exc.report_issue(redact_document_names=config.security.redact_document_names)
+    if isinstance(exc, ViewNamesMetadataError):
+        issue.update(metadata_stage=exc.metadata_stage, metadata_reason=exc.metadata_reason)
+    if context.environment and progress.current == "candidate":
+        reason = getattr(exc, "candidate_reason", "verification_unavailable")
+        issue.update(type="candidate_verification_failed", candidate_reason=reason, coverage_complete=False)
+        context.candidate_verification = {"status": "unverified", "reason": reason}
     issues = [*progress.issues, issue]
     scope_findings(issues, model_id=context.model_id, branch_id=progress.branch_id, branch_name=context.branch_name)
     summary = _summarize(issues)
@@ -1325,7 +1363,6 @@ def cmd_report(args: argparse.Namespace) -> int:
 
 def cmd_doctor(args: argparse.Namespace) -> int:
     config = _override_config(load_config(args.config), args)
-    api_key = require_api_key()
     if args.auto:
         contexts = discover_contexts(
             auto=True,
@@ -1350,7 +1387,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     issues = []
     warnings = []
     for context in contexts:
-        client, branch_id = _client_and_branch_for_context(context, config.omni.timeout, api_key=api_key)
+        client, branch_id = _client_and_branch_for_context(context, config.omni.timeout)
         client.get_model_yaml(
             context.model_id,
             branch_id=branch_id,
@@ -1370,6 +1407,8 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     for warning in warnings:
         print(f"omniflow doctor warning: {warning}", file=sys.stderr)
     print(f"omniflow doctor passed: {len(contexts)} model context(s) ready")
+    if any(context.environment for context in contexts):
+        print("Target access/settings verified only; run PR validation to establish candidate coverage.")
     return 0
 
 
@@ -1401,6 +1440,8 @@ def cmd_repair_ai(args: argparse.Namespace) -> int:
         if len(contexts) != 1:
             raise ConfigError("AI repair requires exactly one unambiguous Omni model context")
         context = contexts[0]
+        if context.environment:
+            raise SecurityPolicyError("Version 2 environment targets are validation-only; AI repair is not supported")
         repair_key = require_repair_api_key()
         client, branch_id = _client_and_branch_for_context(context, config.omni.timeout, api_key=repair_key)
         if not branch_id:
@@ -1469,12 +1510,35 @@ def _client_and_branch(config):
 
 
 def _client_and_branch_for_context(context: ModelContext, timeout: int, *, api_key: str | None = None):
+    if context.environment and os.getenv("OMNIFLOW_ENVIRONMENT") != context.environment:
+        raise SecurityPolicyError(
+            f"Selected target requires OMNIFLOW_ENVIRONMENT={context.environment}. "
+            "Supply only that environment's dedicated validation credential from the trusted workflow."
+        )
     client = OmniClient(
         base_url=context.base_url,
         api_key=api_key or require_api_key(),
         timeout=timeout,
     )
-    branch_id = context.branch_id or client.resolve_branch_id(context.model_id, context.branch_name)
+    if context.environment:
+        _verify_target_git_configuration(context, client.get_git_configuration(context.model_id))
+        matching = []
+        if context.branch_name:
+            matching = [record for record in client.list_models(
+                model_kind="BRANCH", base_model_id=context.model_id, name=context.branch_name,
+            ) if record.get("modelKind") == "BRANCH" and record.get("baseModelId") == context.model_id
+                and record.get("name") == context.branch_name]
+            if len(matching) != 1 or not isinstance(matching[0].get("id"), str):
+                raise ConfigError(
+                    "Selected target must have exactly one corresponding Omni candidate branch. "
+                    "Enable Always create branches on the follower and rerun after Git synchronization; "
+                    "OmniFlow will not fall back to the production base model."
+                )
+        branch_id = validate_path_segment(matching[0]["id"], name="branch_id") if matching else None
+        if context.branch_id and context.branch_id != branch_id:
+            raise SecurityPolicyError("Candidate branch ID no longer matches the selected target branch")
+    else:
+        branch_id = context.branch_id or client.resolve_branch_id(context.model_id, context.branch_name)
     if context.branch_name and not branch_id:
         raise ConfigError(
             f"Could not resolve Omni branch '{context.branch_name}' for model {context.model_id}. "
@@ -1527,6 +1591,9 @@ def _base_report(
         "model_path": context.model_path,
         "branch_id": branch_id,
         "branch_name": context.branch_name,
+        "environment": context.environment,
+        "target_branch": context.base_branch,
+        "candidate_verification": context.candidate_verification or {"status": "not_applicable" if not context.environment else "unverified"},
         "config_hash": config.hash,
         "summary": summary,
         "issues": issues,
@@ -1608,7 +1675,42 @@ def _context_dict(context: ModelContext) -> dict[str, Any]:
         "base_branch": context.base_branch,
         "git_provider": context.git_provider,
         "web_url": context.web_url,
+        "environment": context.environment,
+        "target_branch": context.base_branch,
+        "candidate_verification": context.candidate_verification or {"status": "not_applicable" if not context.environment else "unverified"},
     }
+
+
+def _verify_target_git_configuration(context: ModelContext, git_config: dict[str, Any]) -> None:
+    """Version 2 cannot silently skip missing or unauthorized identity evidence."""
+    expected = {
+        "baseBranch": context.base_branch, "modelPath": context.model_path,
+        "gitServiceProvider": "github", "gitFollower": context.git_follower,
+    }
+    for key, value in expected.items():
+        actual = git_config.get(key)
+        if key == "modelPath" and context.model_path == "." and actual in {None, ""}:
+            actual = "."
+        if actual != value or (key == "gitFollower" and type(actual) is not bool):
+            raise ConfigError(f"Selected environment's Omni Git configuration does not match trusted {key}")
+    if context.git_follower and git_config.get("branchPerPullRequest") is not True:
+        raise ConfigError("Follower validation requires Always create branches (branchPerPullRequest=true)")
+    expected_url = str(context.web_url).removesuffix(".git").rstrip("/")
+    actual_url = git_config.get("webUrl")
+    clone_url = git_config.get("cloneUrl")
+    urls = [value.removesuffix(".git").rstrip("/") for value in (actual_url, clone_url) if isinstance(value, str)]
+    # SSH clone URLs are documented; compare repository identity without executing them.
+    for value in (clone_url,):
+        if isinstance(value, str) and value.startswith("git@") and ":" in value:
+            host, path = value[4:].split(":", 1)
+            urls.append(f"https://{host}/{path}".removesuffix(".git").rstrip("/"))
+    if expected_url not in urls:
+        raise ConfigError("Selected environment's Omni Git repository does not match trusted web_url")
+    if is_pull_request_event():
+        repository = os.getenv("GITHUB_REPOSITORY")
+        server = os.getenv("GITHUB_SERVER_URL", "https://github.com").rstrip("/")
+        if not repository or expected_url != f"{server}/{repository}":
+            raise ConfigError("Trusted target repository does not match the GitHub PR repository")
 
 
 def _git_configuration_issues(context: ModelContext, git_config: dict[str, Any]) -> list[str]:

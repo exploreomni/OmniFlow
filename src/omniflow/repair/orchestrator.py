@@ -62,6 +62,11 @@ def run_ai_repair(
     monotonic: Callable[[], float] = time.monotonic,
     sleeper: Callable[[float], None] = time.sleep,
 ) -> RepairOutcome:
+    if getattr(context, "environment", None) is not None:
+        raise SecurityPolicyError(
+            "Version 2 environment-scoped targets are validation-only; AI repair is unsupported. "
+            "Make reviewed changes in the leader branch and validate the follower release candidate."
+        )
     validate_ai_repair_policy(config)
     branch_id = context.branch_id
     if not branch_id:

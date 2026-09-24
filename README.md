@@ -242,6 +242,12 @@ Commit `.omni/flow.json` to the protected base branch:
 
 This is non-secret bootstrap metadata, not per-PR configuration. Branch identity is discovered automatically. Omni's public documentation guarantees a branch-content link in an Omni-created PR description, but it does not currently document a stable machine-readable PR payload containing the Omni host and model ID. Until a live PR proves a safe contract, OmniFlow deliberately does not send a token to a host parsed from PR text.
 
+For leader/follower environments sharing a model folder across `develop` and `main`,
+use the opt-in [version 2 environment-target guide](docs/ENVIRONMENT_TARGETS.md).
+It selects the environment by the trusted PR base and verifies the actual candidate's
+authored YAML before and after checks. This enhancement is validation-only: deployment,
+repair and hold-release workflows remain outside its supported scope.
+
 ### 4. Add Optional Policy
 
 `.omniflow.yml` is optional. Defaults run model validation, content validation, semantic lint, semantic diff, and downstream contracts. Start with `.omniflow.example.yml` when customization is needed.
@@ -282,9 +288,9 @@ The command rejects pull-request events and non-base branches. Use a dedicated `
 
 Monorepos that keep dbt, Omni, and other tooling on one protected branch can enable a pull-request policy that blocks a merge which would promote breaking Omni model changes before the matching dbt deployment reaches the warehouse.
 
-Omni promotes model YAML on merge, so a combined column rename can break production content until dbt finishes deploying. The policy detects that case, and the case where an Omni-only pull request lands while a dbt deployment is still pending, then holds the pull request until the protected deployment records a successful `omniflow dbt sync`.
+Omni promotes model YAML on merge, so a combined column rename can break production content until dbt finishes deploying. The policy detects that case and requires an expand/contract sequence that preserves old warehouse references while consumers migrate. It also holds breaking Omni-only changes when dbt deployment is pending or sync evidence is unavailable. After a protected deployment and successful `omniflow dbt sync` are recorded, fresh current-head revalidation must pass before the hold label clears; merge remains manual and subject to required checks and reviews.
 
-It is disabled by default, never fires for additive changes, and does nothing in repositories with no configured dbt paths. It prevents the unsafe merge; it does not intercept Omni's webhook. See [Breaking Change Hold](docs/BREAKING_CHANGE_HOLD.md).
+It is disabled by default and never fires for additive changes. Leave it disabled for repositories that do not deploy dbt. When enabled with `action: fail`, missing, blank, unreachable, or non-ancestor sync state blocks breaking changes; `action: warn` is explicitly advisory. It prevents the unsafe merge; it does not intercept Omni's webhook. See [Breaking Change Hold](docs/BREAKING_CHANGE_HOLD.md).
 
 ### 9. Optional dbt Impact Analysis
 
@@ -357,14 +363,21 @@ omniflow exposures pull --base-url https://example.omniapp.co --model-id <id>
 omniflow diff --base path/to/base/yaml --head path/to/head/yaml
 ```
 
-YAML pull snapshots preserve Omni's `viewNames` map in their restricted `manifest.json`.
-Validation and snapshot diffs use this canonical-name → exact file-path mapping, including
-scoped names and query views; folder names are not used to invent schema prefixes.
+YAML pulls accept API `viewNames` metadata in either file-path → canonical-name or
+canonical-name → file-path form. They normalize the whole response into a canonical-name →
+exact file-path map in the restricted `manifest.json`; existing normalized snapshots keep
+the same format. Exact-empty entries are omitted only for verified non-view files.
+Validation and snapshot diffs use this normalized mapping, including scoped names and
+query views; folder names are not used to invent schema prefixes.
 Missing, incomplete, or ambiguous snapshot identity metadata fails closed. Re-pull older
 snapshots that lack this map. Standalone diffs of raw files still accept flat or already-qualified
 filenames, but unresolved nested view names require an API snapshot. Do not add a `name:`
 parameter to view YAML to work around identity errors. See Omni's
 [documented view-to-file resolution](https://docs.omni.co/guides/api/data-lineage-integration#resolve-topics-and-views-from-model-yaml).
+API metadata processing failures identify a safe reason category and leave dependent checks
+incomplete; repeatedly refreshing an unsupported response format is not a fix. See
+[metadata troubleshooting](docs/TROUBLESHOOTING.md#yaml-viewnames-metadata-processing-failed)
+and [unreleased compatibility notes](docs/RELEASE_NOTES.md).
 Top-level view `filters` are analyzed as filter-only fields; nested measure/topic filter
 expressions are not treated as separate field definitions.
 

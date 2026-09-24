@@ -12,6 +12,10 @@ inputs:
   omni-api-key:
     description: Dedicated least-privilege Omni personal access token. Exposed only to the validation step.
     required: false
+  validation-environment:
+    description: Version 2 target environment bound to the supplied environment-scoped validation credential.
+    required: false
+    default: ""
   repair-api-key:
     description: Separate write-capable Omni PAT. Exposed only to the opt-in repair step.
     required: false
@@ -25,15 +29,18 @@ inputs:
   last-sync-sha:
     description: >-
       Commit SHA recorded by the last successful dbt sync. The calling workflow
-      should pass vars.OMNIFLOW_LAST_SYNC_SHA to enable pending-deployment
-      detection in the breaking-change hold policy.
+      should pass vars.OMNIFLOW_LAST_SYNC_SHA as deployment evidence for the
+      breaking-change hold policy. When enabled with action: fail, the policy
+      blocks breaking changes if that evidence is missing, blank, unreachable,
+      or not an ancestor of the trusted base.
     required: false
     default: ""
 outputs:
   hold-triggered:
     description: >-
-      "true" when the breaking-change hold policy parked this pull request because a dbt
-      deployment must land first. Empty unless the policy is enabled in trusted policy config.
+      "true" when the breaking-change hold policy found same-PR dbt overlap,
+      pending dbt deployment, or unavailable sync evidence for a breaking change.
+      Empty unless the policy is enabled in trusted policy config.
     value: ${{ steps.validate.outputs.hold_triggered }}
   hold-pending-label:
     description: Label a protected workflow should apply while the pull request is held.
@@ -121,6 +128,7 @@ runs:
       env:
         OMNIFLOW_ACTION_REF: ${{ github.action_ref }}
         OMNI_API_KEY: ${{ inputs['omni-api-key'] }}
+        OMNIFLOW_ENVIRONMENT: ${{ inputs['validation-environment'] }}
         OMNIFLOW_INPUT_CONFIG: ${{ inputs.config }}
         OMNIFLOW_GITHUB_TOKEN: ${{ github.token }}
         OMNIFLOW_LAST_SYNC_SHA: ${{ inputs['last-sync-sha'] }}
