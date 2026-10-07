@@ -26,7 +26,7 @@ From a trusted local checkout, an administrator can make `OMNI_API_KEY` availabl
 omniflow doctor --auto
 ```
 
-Do not put the key in command history or a local file. Remove it from the process environment when finished. `doctor` validates model discovery, API access, branch resolution where applicable, and Omni Git configuration metadata when the token permits it.
+Do not put the key in command history or a local file. Remove it from the process environment when finished. `doctor` validates model discovery, API access, branch resolution where applicable, and Omni Git configuration metadata when the token permits it. It does not identify the credential type, test every enabled endpoint, or establish complete content coverage.
 
 ## Common Results
 
@@ -43,6 +43,7 @@ If the pull request contains Omni files, verify that `model_path` in `.omni/flow
 Confirm that:
 
 - The secret is named exactly `OMNI_API_KEY`.
+- Its value is the chosen Omni Organization API Key or Personal Access Token (PAT), not a GitHub token. See [credential choice](CONFIGURATION.md#credential-choice-and-user-scope).
 - The secret is available to the repository or selected environment.
 - The workflow passes the secret only through the action's `omni-api-key` input.
 - The pull request comes from a branch in the same repository.
@@ -65,7 +66,7 @@ Confirm that:
 
 - The pull request was created from the intended Omni model branch.
 - The GitHub head branch matches the Omni branch created through Git integration.
-- The API key's Omni user can list model branches.
+- The selected Omni credential can list the model's branches.
 - The `model_id` identifies the base model rather than an unrelated model or old branch.
 
 ### Omni Git Configuration Mismatch
@@ -75,9 +76,11 @@ Confirm that:
 ### HTTP 401 Or 403
 
 - `401` usually means the API key is missing, invalid, or no longer active.
-- `403` usually means the Omni user behind the key lacks access to the requested model or endpoint.
+- `403` can mean the credential lacks access to the requested model or endpoint. It can also mean a parameter is incompatible with that credential type: Content Validator rejects `userId` with a PAT, even when the user can access the model.
 
-Use the least privilege needed for enabled checks. The optional dbt exposures endpoint can require more permission than core validation.
+For a PAT, leave `omni.user_id`, `OMNI_USER_ID`, and `--user-id` unset. Do not switch to an admin credential merely to work around that parameter error. For an Organization API Key, confirm that any explicitly selected user and model belong to the intended tenant. See [user-scope limitations](CONFIGURATION.md#credential-choice-and-user-scope).
+
+Review the access needed for all enabled checks before changing permissions. PATs inherit their user's permissions; Organization API Keys carry Organization Admin privileges. The optional dbt exposures endpoint can require more permission than core validation. Neither credential type guarantees complete content coverage.
 
 ### Dependency Coverage Gap
 
@@ -141,7 +144,7 @@ Confirm that the workflow:
 
 ### Missing `OMNIFLOW_SYNC_API_KEY`
 
-Confirm the secret exists inside the protected `omniflow-production` GitHub environment and the action passes it through `sync-api-key`. Do not put it in `.omniflow.yml` or `.omni/flow.json`. Use a dedicated PAT rather than the validation or AI repair identity.
+Confirm the secret exists inside the protected `omniflow-production` GitHub environment and the action passes it through `sync-api-key`. Do not put it in `.omniflow.yml` or `.omni/flow.json`. Choose a separate deployment Organization API Key or service-user PAT rather than reusing the validation or AI repair credential. See [sync credential requirements](DBT_SYNC.md#add-the-protected-job).
 
 ### Sync Is Disabled
 
@@ -162,7 +165,7 @@ Omni's API rejects a branch ID when the setting is disabled and requires one whe
 
 ### Refresh Job Failed Or Timed Out
 
-Open the model or connection in Omni and inspect the schema refresh status. Confirm dbt finished successfully, the token has Modeler or Connection Admin permission required for that connection, and the configured timeout is sufficient for the model size. OmniFlow records only the job ID and normalized status; do not paste raw API responses into an issue.
+Open the model or connection in Omni and inspect the schema refresh status. Confirm dbt finished successfully, the PAT has the Modeler or Connection Admin permission required for that connection (or the selected Org key has Organization Admin access), and the configured timeout is sufficient for the model size. OmniFlow records only the job ID and normalized status; do not paste raw API responses into an issue.
 
 ### Refresh Triggered Another Deployment
 

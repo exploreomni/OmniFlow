@@ -49,11 +49,13 @@ Use [the dbt sync workflow example](../.github/workflow-examples/omniflow-dbt-sy
 Configure the job with:
 
 - A protected GitHub environment such as `omniflow-production`, with required reviewers where appropriate.
-- A dedicated `OMNIFLOW_SYNC_API_KEY` environment secret. A Modeler can refresh a connection with exactly one shared model; a Connection Admin is required for connections with multiple shared models. The deployment user also needs read access for every enabled post-sync validation check.
+- A separate `OMNIFLOW_SYNC_API_KEY` environment secret containing the operator's choice of Organization API Key or dedicated service-user Personal Access Token (PAT). For a PAT, a Modeler can refresh a connection with exactly one shared model; a Connection Admin is required for connections with multiple shared models. An Org key carries Organization Admin privileges. The selected credential also needs access for every enabled post-sync validation check. Do not reuse the validation or AI repair credential.
 - `contents: read` permissions only, unless the customer's dbt deployment needs additional permissions.
 - A `push` trigger restricted to the production base branch and dbt source paths, or `workflow_dispatch` for a reviewed manual deployment.
 
 Do not trigger this job for `pull_request` or `pull_request_target`. OmniFlow rejects those events with exit code `5`, even if a workflow is misconfigured.
+
+The client does not detect credential type or offer a credential-type policy setting. The same [user-scope limitations](CONFIGURATION.md#credential-choice-and-user-scope) apply to post-sync Content Validator checks: leave `omni.user_id`, `OMNI_USER_ID`, and `--user-id` unset with a PAT. Verify the chosen credential and expected content scope in the [live sync gate](TESTING.md#live-post-deployment-dbt-sync-gate).
 
 ## Branch-Based Schema Refresh
 

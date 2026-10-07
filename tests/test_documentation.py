@@ -62,12 +62,46 @@ class DocumentationTests(unittest.TestCase):
             "Team or Enterprise",
         ]:
             self.assertIn(required_text, text)
-        self.assertLess(text.index("Protect The Base Branch"), text.index("Create And Store A Dedicated Omni PAT"))
-        self.assertIn("Do not use an Organization API Key", text)
+        self.assertLess(text.index("Protect The Base Branch"), text.index("Choose And Store An Omni Credential"))
+        self.assertIn("Organization API Key or Personal Access Token (PAT)", text)
         self.assertIn("omni-api-key", text)
         self.assertNotIn("version input", text)
         self.assertIn("Step 10: Optionally Add Post-Deployment dbt Sync", text)
         self.assertIn("Step 11: Do Not Install AI Repair Yet", text)
+
+    def test_supported_credential_guides_present_both_choices(self):
+        for relative in (
+            "README.md",
+            "SECURITY.md",
+            "docs/INSTALLATION.md",
+            "docs/CONFIGURATION.md",
+            "docs/SECURITY_MODEL.md",
+            "docs/ENVIRONMENT_TARGETS.md",
+            "docs/DBT_SYNC.md",
+            "docs/TESTING.md",
+            "docs/TROUBLESHOOTING.md",
+        ):
+            with self.subTest(document=relative):
+                text = (ROOT / relative).read_text(encoding="utf-8")
+                self.assertIn("Organization API Key", text)
+                self.assertIn("PAT", text)
+                self.assertIn("Organization Admin", text)
+                self.assertNotIn("Create And Store A Dedicated Omni PAT", text)
+
+    def test_credential_guidance_preserves_current_scope_limits(self):
+        config = (ROOT / "docs/CONFIGURATION.md").read_text(encoding="utf-8")
+        for required_text in (
+            "no `authentication` or `credential_type` configuration",
+            "Leave them unset with a PAT",
+            "creatorId",
+            "force_full_validation",
+            "TESTING.md#credential-and-content-scope-acceptance",
+        ):
+            self.assertIn(required_text, config)
+        testing = (ROOT / "docs/TESTING.md").read_text(encoding="utf-8")
+        self.assertIn("## Credential And Content Scope Acceptance", testing)
+        repair = (ROOT / "docs/AI_REPAIR.md").read_text(encoding="utf-8")
+        self.assertIn("do not use an Organization API Key for this unreleased repair scaffold", repair)
 
     def test_ai_repair_guide_documents_every_required_safety_gate(self):
         text = (ROOT / "docs/AI_REPAIR.md").read_text(encoding="utf-8")

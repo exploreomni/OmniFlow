@@ -9,7 +9,7 @@ Confirm that you have:
 - An Omni model connected to the target GitHub repository through Omni Git integration.
 - Omni Branch Mode enabled for the model.
 - Permission to add repository files, GitHub Actions secrets, and branch protection rules.
-- A dedicated Omni service user that can read model branches and YAML, validate the model and content, and retrieve content metadata.
+- An Omni credential choice: an Organization API Key or a PAT from a dedicated service user. It must be able to read model branches and YAML, validate the model and content, and retrieve content metadata.
 - The repository's protected base branch name, usually `main`.
 
 The optional dbt exposures check requires the additional Omni permission documented by the [dbt exposures API](https://docs.omni.co/api/dbt/get-dbt-exposures). The optional post-deployment dbt sync is installed separately after ordinary pull-request validation is proven.
@@ -99,9 +99,14 @@ The trusted workflow and `.omni/flow.json` must already exist on the protected b
 
 The initial setup pull request may not run OmniFlow because the trusted workflow does not exist on the base branch yet. This is expected.
 
-## Step 6: Create And Store A Dedicated Omni PAT
+## Step 6: Choose And Store An Omni Credential
 
-Create a personal access token for the dedicated Omni service user. Do not use an Organization API Key: Omni documents that organization keys have Organization Admin permissions, while PATs inherit their user's permissions. Omni tokens do not expire automatically, so establish an explicit rotation schedule and revoke the token immediately after suspected exposure or maintainer access changes. See [Omni API authentication](https://docs.omni.co/api/authentication).
+Choose either an **Organization API Key or Personal Access Token (PAT)**. Neither credential type is selected by default; the operator chooses based on governance scope and accepted privileges. Both use the same `OMNI_API_KEY` secret and `omni-api-key` input.
+
+- **Organization API Key:** choose this for centrally managed governance when Organization Admin access is intentional. An Omni Organization Admin creates a dedicated integration key under **Settings > API access > Organization keys**. This key is not read-only, even though core validation uses read operations.
+- **PAT:** choose this when access should follow a dedicated Omni service user's assignments. An Organization Admin first enables personal tokens; the service user then generates its PAT under **Profile > Manage account > Generate token**. Grant access to the intended models and content. An admin user's PAT still inherits admin privileges.
+
+Omni's manually generated Org keys and PATs do not expire automatically. Establish rotation, revocation, and access-review procedures for either choice. See [Omni API authentication](https://docs.omni.co/api/authentication) and the [README comparison](../README.md#2-add-the-api-secret).
 
 In the customer repository:
 
@@ -109,11 +114,17 @@ In the customer repository:
 2. Open **Secrets and variables**, then **Actions**.
 3. Select **New repository secret**.
 4. Name the secret `OMNI_API_KEY`.
-5. Enter the dedicated least-privilege PAT and save it.
+5. Enter the chosen Omni Org key or PAT and save it.
 
 The workflow passes this secret through the action's `omni-api-key` input. The composite action exposes it only to the validation step, after hash-verified installation completes.
 
 Never put the token in `.omni/flow.json`, `.omniflow.yml`, a workflow file, a pull request, or an issue. Organization-level GitHub secrets also work when access is explicitly limited to the customer repository.
+
+For environment-scoped targets, use the selected [GitHub environment's secret](ENVIRONMENT_TARGETS.md#2-bind-credentials-to-the-selected-environment) instead of one repository-wide credential. A GitHub organization-level secret is a storage location, not an Omni credential type. The standard validation workflow obtains GitHub's own `GITHUB_TOKEN` automatically; do not put a GitHub token in `OMNI_API_KEY`.
+
+The current client does not verify credential type or accept an `authentication`/`credential_type` policy block. With a PAT, leave `OMNI_USER_ID`, `omni.user_id`, and `--user-id` unset; Omni's Content Validator only permits impersonation with an Org key. Review [user-scope limitations](CONFIGURATION.md#credential-choice-and-user-scope) before including personal folders.
+
+An Org key does not expand trusted model routing or prove whole-instance coverage. Review labels, personal-folder scope, and the content returned in the first run. Consider `security.redaction_level: strict` for broad credentials because standard public reports may include content names and error text visible to GitHub readers.
 
 ## Step 7: Run The First Omni Pull Request
 
@@ -154,10 +165,11 @@ The installation is ready for controlled alpha use when all of these are true:
 - [ ] Both action references use the same full OmniFlow commit SHA.
 - [ ] `OMNIFLOW_UPLOAD_SARIF=true` is set only when GitHub Code Security is enabled; otherwise SARIF remains artifact-only.
 - [ ] Workflow and trusted metadata CODEOWNERS were active before the credential was stored.
-- [ ] `OMNI_API_KEY` is a dedicated least-privilege PAT and exists only in GitHub Actions secrets.
+- [ ] `OMNI_API_KEY` contains the chosen dedicated Org key or service-user PAT and exists only in GitHub Actions secrets; its permissions and owner have been reviewed.
 - [ ] The action runs on Linux x86_64 with Python 3.11 and uses its checked-in hash lock unchanged.
 - [ ] A real Omni-created pull request selected the expected model and branch.
 - [ ] Model, content, lint, diff, and downstream checks completed.
+- [ ] The chosen credential's access and configured content scope were verified with known content; a passing run is not assumed to cover the entire instance.
 - [ ] Public reports contain no credentials or restricted values.
 - [ ] Restricted artifacts remain disabled unless an isolated ephemeral runner has an approved retention need.
 - [ ] The required status check and reviewer approvals are configured.
@@ -175,7 +187,7 @@ For a dbt repository:
 2. Confirm the repository has a reviewed production dbt deployment command. A local `dbt build` or CI parse is not a production deployment signal.
 3. Add the `deployment.dbt_sync` block from [`.omniflow.example.yml`](../.omniflow.example.yml) with `enabled: true`.
 4. Create a protected GitHub environment named `omniflow-production` and require deployment reviewers where appropriate.
-5. Create a dedicated Modeler or Connection Admin PAT and store it as the environment secret `OMNIFLOW_SYNC_API_KEY`.
+5. Choose a separate deployment Org key or service-user PAT and store it as the environment secret `OMNIFLOW_SYNC_API_KEY`. For a PAT, assign the Modeler or Connection Admin permissions required by the connection and the access needed for post-sync checks. An Org key carries Organization Admin privileges. See [sync credential requirements](DBT_SYNC.md#add-the-protected-job).
 6. Copy [the dbt sync workflow example](../.github/workflow-examples/omniflow-dbt-sync.yml), replace its dbt command, pin the OmniFlow commit, and tailor `push.paths` to the actual dbt project.
 7. Keep the OmniFlow step after the production dbt command so shell failure prevents synchronization.
 8. Run a controlled deployment and verify `dbt-sync.json`, post-sync validation, and the Omni model's refreshed metadata.

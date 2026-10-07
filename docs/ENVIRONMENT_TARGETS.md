@@ -72,10 +72,19 @@ validation policy. PR-head changes cannot alter the registry used for that run.
 
 ## 2. Bind credentials to the selected environment
 
-Create GitHub environments named `development` and `production`. Store a separate,
-least-privilege validation PAT as `OMNI_API_KEY` in each environment. Do not place one
-cross-organization credential in a repository-wide secret. Keep production approvals
-and branch protections enabled. These are human setup steps, not changes OmniFlow makes.
+Create GitHub environments named `development` and `production`. For each environment,
+choose an Omni Organization API Key or a dedicated service-user PAT and store a distinct
+validation credential as its `OMNI_API_KEY` environment secret. Organization keys have
+Organization Admin permissions; PATs inherit the service user's access, which may be
+narrow or broad. Choose based on the governance scope and accepted exposure risk; see
+[the security model](SECURITY_MODEL.md#credentials).
+
+Do not use one repository-wide credential across different Omni hosts or environment
+boundaries. Keep production approvals and branch protections enabled. These are human
+setup steps, not changes OmniFlow makes. Choosing an Organization API Key does not add
+models to the trusted registry, enable personal-folder coverage, or establish that the
+whole instance has been validated. Consider `security.redaction_level: strict` for broad
+credentials when repository readers should not see all accessible content metadata.
 
 Copy the [two-environment workflow example](../.github/workflow-examples/omniflow-environments.yml)
 and replace the action placeholder with the reviewed release's full commit SHA.
@@ -83,8 +92,11 @@ The trusted workflow selects the GitHub environment from the PR base branch and 
 `validation-environment` to the action. The credential-free routing step runs first.
 The validation process then requires `OMNIFLOW_ENVIRONMENT` to match the selected
 registry target **before constructing an Omni client**. This binding cannot determine
-a token's actual permissions; the target's API must authorize access, and credential
-scope must be verified during setup. A wrong or underprivileged credential fails closed.
+the credential's type or actual permissions; the target's API must authorize access,
+and credential scope must be verified during setup. An authorization failure on a required
+validation endpoint blocks the run; optional checks follow their configured failure policy
+and must report unavailable coverage. API success does not prove complete visibility of
+the target's content.
 
 For a local settings check, check out the appropriate trusted base branch and supply
 that environment's credential through your secret manager, then run:
@@ -97,7 +109,10 @@ Doctor needs read access to the selected model, branches and
 [Git configuration](https://docs.omni.co/api/model-git-configuration/get-git-configuration).
 Unlike version 1, version 2 cannot skip unavailable Git identity evidence. It compares
 the exact base branch, model path, follower setting, GitHub provider and repository;
-followers must have `branchPerPullRequest=true`. Doctor success is not PR validation.
+followers must have `branchPerPullRequest=true`. Doctor success is not PR validation:
+it does not identify Organization API Keys versus PATs, check all enabled-check
+permissions, or establish complete content coverage. Use the actual selected credential
+for the controlled PR live gate below.
 
 ## 3. Prove and validate the release candidate
 

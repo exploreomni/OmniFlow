@@ -10,7 +10,7 @@ inputs:
     required: false
     default: .omniflow.yml
   omni-api-key:
-    description: Dedicated least-privilege Omni personal access token. Exposed only to the validation step.
+    description: Operator-selected Omni Organization API Key or dedicated service-user PAT. Organization keys have admin scope. Exposed only to the validation step.
     required: false
   validation-environment:
     description: Version 2 target environment bound to the supplied environment-scoped validation credential.
@@ -20,7 +20,7 @@ inputs:
     description: Separate write-capable Omni PAT. Exposed only to the opt-in repair step.
     required: false
   sync-api-key:
-    description: Dedicated Modeler or Connection Admin PAT. Exposed only to the protected dbt sync step.
+    description: Separate Omni Organization API Key or service-user PAT with required Modeler or Connection Admin access. Organization keys have admin scope. Exposed only to the protected dbt sync step.
     required: false
   skip-reason:
     description: Record a successful skipped run without exposing the Omni API key.

@@ -47,13 +47,25 @@ twine check dist/*
 
 The simulator opens a temporary localhost port. Run it in an environment that permits loopback network access.
 
+## Credential And Content Scope Acceptance
+
+The current client accepts an Organization API Key or Personal Access Token (PAT) through the same Bearer-token path. Automated tests do not establish either credential's effective permissions or content coverage in a live tenant. Before adoption or a credential change:
+
+1. Use an explicitly approved non-production model and the credential type the operator has chosen. Record the type, target tenant/model/branch, enabled checks, labels, personal-folder setting, and expected content scope without recording the secret.
+2. With a PAT, leave `omni.user_id`, `OMNI_USER_ID`, and `--user-id` unset. With an Org key, verify any intended acting-user scope. Review the current personal-folder metadata and identifier limitations in [Configuration](CONFIGURATION.md#credential-choice-and-user-scope); do not assume broader privileges resolve them.
+3. Validate one known-good branch and one controlled invalid change affecting known content. Confirm the expected content is actually represented and the invalid change fails the gate. A successful `doctor` run alone is insufficient.
+4. Check a controlled permission failure on a required validation endpoint blocks the run, not an empty or clean report. Optional checks must make unavailable coverage visible and follow their configured failure policy; for example, dbt exposures warn on unavailability unless `checks.dbt_exposures.fail_on_unavailable` is enabled. Inspect the downloaded public reports for metadata the GitHub audience should not receive; use strict redaction where required.
+5. Record uncovered models/content and validation-depth limits. Org keys do not enable whole-instance discovery, personal folders remain excluded by default, and OmniFlow does not currently request the API's `force_full_validation` option.
+
+An adopter needs to validate its selected credential, not obtain both types merely to install OmniFlow. Maintainers should record separate controlled live evidence for each type before claiming tenant-tested support for both. Unexecuted checks remain coverage gaps; local tests and this checklist are not production acceptance.
+
 ## Live dbt Exposure Gate
 
 The [Omni dbt exposures API](https://docs.omni.co/api/dbt/get-dbt-exposures) requires Connection Admin permission and supports `branch_id`. Before enabling the check as a gate:
 
 1. Confirm the Omni connection has a formal dbt integration.
 2. Confirm at least one published shared dashboard references dbt models through Omni model references.
-3. Use a dedicated Personal Access Token with only the permissions needed for the enabled checks.
+3. Choose a dedicated Organization API Key or service-user PAT with access required by the endpoint and enabled checks. A PAT inherits its user's permissions; an Org key carries Organization Admin privileges. Review [credential tradeoffs](../README.md#2-add-the-api-secret).
 4. Temporarily set `checks.dbt_exposures.fail_on_unavailable: true` for the first controlled run.
 5. Run both the base model and an existing Omni branch.
 6. Verify `total_records`, `total_exposures`, `unmapped_dashboards`, dependency counts, and `coverage_status` in the JSON and Markdown reports.
@@ -69,7 +81,7 @@ Do not treat mocked refresh tests as proof that a customer connection will synch
 
 1. Use a non-production connection and model with the same dbt and Git settings as production.
 2. Confirm `base_branch` is present for every model in `.omni/flow.json`.
-3. Create the dedicated `OMNIFLOW_SYNC_API_KEY` protected-environment secret with the required Modeler or Connection Admin permission.
+3. Create the separate `OMNIFLOW_SYNC_API_KEY` protected-environment secret containing the chosen Organization API Key or service-user PAT. Confirm the PAT's required Modeler or Connection Admin permission, or the Org key's Organization Admin scope, plus access for enabled post-sync checks. See [sync credential requirements](DBT_SYNC.md#add-the-protected-job).
 4. Deploy a harmless dbt metadata change, such as a description, through the actual deployment command.
 5. Confirm a failed dbt command prevents the OmniFlow sync step from starting.
 6. Confirm the refresh returns a job ID, polling reaches `COMPLETED`, and post-sync validation passes.

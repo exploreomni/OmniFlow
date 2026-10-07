@@ -15,7 +15,7 @@ The complete walkthrough is in [Install OmniFlow In A GitHub Repository](docs/IN
 3. Copy [the workflow example](.github/workflow-examples/omniflow.yml) to `.github/workflows/omniflow.yml`, pin both action references to the same reviewed 40-character OmniFlow commit SHA, and add CODEOWNERS coverage.
 4. Protect the base branch before storing any Omni credential. Require pull requests, normal reviewer approval, and review from the owners of the workflow and trusted metadata.
 5. Optionally copy [`.omniflow.example.yml`](.omniflow.example.yml) to `.omniflow.yml`, then merge the setup files through the protected process.
-6. Create a dedicated least-privilege Omni personal access token and store it as the GitHub Actions secret `OMNI_API_KEY`. Do not use an Organization API Key.
+6. Choose an Omni **Organization API Key or Personal Access Token (PAT)** for your governance scope, then store it as the GitHub Actions secret `OMNI_API_KEY`. See [credential choice and permissions](#2-add-the-api-secret).
 7. Create a harmless model change in an Omni branch, select **Create pull request**, and confirm OmniFlow validates the resulting GitHub pull request.
 8. For repositories that deploy dbt, optionally add the protected [post-deployment dbt sync](docs/DBT_SYNC.md) after the production dbt command succeeds.
 9. For monorepos that keep dbt and Omni on one branch, optionally enable the [breaking change hold](docs/BREAKING_CHANGE_HOLD.md) so breaking model changes cannot merge ahead of their dbt deployment.
@@ -216,9 +216,22 @@ The command remains `omniflow`, while the future Python distribution name is `om
 
 ### 2. Add The API Secret
 
-Create a dedicated Omni service user with access only to the models and content being validated, then create a personal access token for that user and save it as the GitHub Actions secret `OMNI_API_KEY`. Do not use an Organization API Key: Omni documents that organization keys have Organization Admin permissions, while personal access tokens inherit their user's permissions. Tokens do not expire automatically, so define a rotation schedule and revoke them immediately after suspected exposure or maintainer access changes. See [Omni API authentication](https://docs.omni.co/api/authentication).
+Choose either an **Organization API Key or Personal Access Token (PAT)**. The operator decides which credential fits the intended governance scope; OmniFlow does not require or default to a PAT.
+
+| Credential | When to choose it | Permission tradeoff |
+| --- | --- | --- |
+| Organization API Key | Centrally managed governance across the registered models and content in an Omni instance. | Has Organization Admin permissions, including capabilities beyond validation. Protect it as an administrative credential. |
+| Personal Access Token (PAT) | Validation using a dedicated service user's assigned model and content access. | Inherits that user's permissions. A PAT from an admin user is also highly privileged. |
+
+Store the chosen credential in the GitHub Actions secret **`OMNI_API_KEY`** and pass it through the existing `omni-api-key` input. The secret name stays the same for both choices. OmniFlow sends the supplied credential as a bearer token; it does not currently detect its type, call `whoami`, or accept an `authentication`/`credential_type` configuration block. See [Omni API authentication](https://docs.omni.co/api/authentication) and [installation instructions for either choice](docs/INSTALLATION.md#step-6-choose-and-store-an-omni-credential).
+
+Define a rotation schedule and revoke credentials after suspected exposure or relevant access changes. Omni's manually generated Org keys and PATs do not expire automatically. Use a dedicated credential for this integration, keep deployment credentials separate, and consider `security.redaction_level: strict` when the credential can see content that GitHub readers should not see.
 
 The token must be able to list model branches, read model YAML, validate the model, run the Content Validator, and retrieve content labels. The optional dbt exposures endpoint requires Connection Admin permissions according to the [Omni API reference](https://docs.omni.co/api/dbt/get-dbt-exposures). Never place credentials in repository files.
+
+**Access is not coverage:** an Org key does not automatically scan the entire instance. OmniFlow validates the models selected by trusted routing; label filters, personal-folder settings, enabled checks, and API behavior still determine coverage. Personal folders remain excluded by default. With a PAT, leave `OMNI_USER_ID`, `omni.user_id`, and `--user-id` unset: the Content Validator's `userId` impersonation parameter is Org-key-only. See [current user-scope limitations](docs/CONFIGURATION.md#credential-choice-and-user-scope).
+
+**GitHub authentication is separate:** the standard validation workflow uses GitHub's automatically supplied `GITHUB_TOKEN`; you do not create a GitHub PAT for it. Keep the workflow's declared permissions. Omni's existing Git integration is a separate prerequisite; the optional [deployment-state workflow](docs/BREAKING_CHANGE_HOLD.md) has an additional GitHub credential requirement.
 
 ### 3. Commit Trusted Model Identity Once
 
@@ -324,7 +337,7 @@ Referenced deleted or renamed fields, referenced type changes, and referenced re
 
 Default semantic-lint findings are advisory. Teams can promote individual rules to `error` in `.omniflow.yml`; the built-in gate does not turn an unreferenced deletion into a failure by itself.
 
-The Content Validator still validates the model server-side. Label filtering is applied locally after content metadata lookup. See the [Content Validator API](https://docs.omni.co/api/content-validator/validate-content).
+The Content Validator validates content associated with the selected model server-side, and label filtering is applied locally after content metadata lookup. This is not proof of whole-instance or full-depth coverage: Omni documents surface checks for documents with many queries unless `force_full_validation` is requested, and OmniFlow does not currently expose that option. See the [Content Validator API](https://docs.omni.co/api/content-validator/validate-content).
 
 ## Evidence And Privacy
 

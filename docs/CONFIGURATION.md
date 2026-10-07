@@ -6,10 +6,22 @@ OmniFlow separates trusted model identity, optional policy, and secrets so each 
 | --- | --- | --- |
 | Model identity and routing | `.omni/flow.json` | Yes for `omniflow run --auto` |
 | Validation and reporting policy | `.omniflow.yml` | No |
-| Omni API key | `OMNI_API_KEY` environment variable or GitHub Actions secret | Yes for Omni validation |
+| Omni credential (Org key or PAT) | `OMNI_API_KEY` environment variable or GitHub Actions secret | Yes for Omni validation |
 | dbt sync API key | `OMNIFLOW_SYNC_API_KEY` protected GitHub environment secret | Only for optional post-deployment sync |
 | AI repair API key | `OMNIFLOW_REPAIR_API_KEY` protected GitHub environment secret | Only for optional AI Repair |
 | Pull-request branch | GitHub event context | Discovered automatically |
+
+## Credential Choice And User Scope
+
+Choose an **Organization API Key or Personal Access Token (PAT)** for validation, and independently choose the credential for optional dbt sync. Neither type is selected by default. Supply the chosen value through the existing secret/input; do not put it in policy. Org keys have Organization Admin permissions; PATs inherit their user's permissions, including admin privileges when applicable. See [credential tradeoffs](../README.md#2-add-the-api-secret).
+
+There is currently no `authentication` or `credential_type` configuration setting, automatic type detection, or `whoami` preflight. Unknown policy keys are rejected. `omniflow doctor` checks model access and Git settings, not credential type or comprehensive content coverage.
+
+- `omni.user_id`, `OMNI_USER_ID`, and `--user-id` set the Content Validator's `userId` impersonation parameter. **Leave them unset with a PAT**: Omni returns HTTP 403 when a user-scoped key supplies this parameter. An Org key may use it to act on behalf of an explicitly chosen user. See the [Content Validator contract](https://docs.omni.co/api/content-validator/validate-content).
+- `omni.include_personal_folders` / `OMNI_INCLUDE_PERSONAL_FOLDERS` defaults to `false`. Including personal folders does not enumerate all users' private content. The semantic-lint rule `forbid_personal_folder_validation_scope` also defaults to `error`; review that policy explicitly before opting in.
+- **Current limitation:** personal-folder metadata lookup reuses `omni.user_id` as the content catalog's `creatorId`, which expects an organization membership ID. These identifiers are not interchangeable by assumption. The current client does not resolve them separately. Verify the effective scope before relying on Org-key personal-folder label filtering; PAT validation with both personal folders and label filtering is not currently supported. See the [content catalog contract](https://docs.omni.co/api/content/retrieve-content).
+
+Credential breadth does not change the registered model list or enabled checks. Empty results and completed checks do not establish whole-instance coverage. Review the known-content acceptance checks in [Testing](TESTING.md#credential-and-content-scope-acceptance).
 
 ## Trusted Model Identity
 
@@ -88,7 +100,9 @@ An unreferenced breaking change remains visible as risk but does not fail the de
 
 - `enabled`: defaults to `true`.
 - `fail_on_new_only`: defaults to `false`; the checked-in example recommends `true` for gradual adoption.
-- `labels`: optional local filter applied after Omni validates the full model server-side.
+- `labels`: optional local filter applied after Omni validates content for the selected model server-side.
+
+Omni documents that large documents may receive surface checks unless `force_full_validation` is requested. OmniFlow does not currently expose that parameter; do not add it to policy or interpret a successful response as guaranteed full-depth validation. See the [Content Validator API](https://docs.omni.co/api/content-validator/validate-content).
 
 ### Model Validation
 
@@ -124,7 +138,7 @@ deployment:
 | `timeout_seconds` | `900` | `30` through `3600`. |
 | `post_sync_validation` | `true` | Reruns all enabled checks after refresh completes. |
 
-The sync token is read only from `OMNIFLOW_SYNC_API_KEY`. It must be a dedicated PAT with Modeler permission for a connection containing one shared model or Connection Admin permission for a connection containing multiple shared models. When `post_sync_validation` is enabled, that same dedicated deployment user also needs the read permissions required by the enabled checks. Pull-request validation and AI repair action modes never receive this token.
+The sync token is read only from `OMNIFLOW_SYNC_API_KEY`. Choose a separate deployment Organization API Key or PAT. For a PAT, use Modeler permission for a connection containing one shared model or Connection Admin permission for a connection containing multiple shared models. An Org key carries Organization Admin privileges. When `post_sync_validation` is enabled, the deployment credential also needs access required by those checks, and the same [user-scope limitations](#credential-choice-and-user-scope) apply. Pull-request validation and AI repair action modes never receive this token. See the [schema refresh permission contract](https://docs.omni.co/api/models/refresh-schema).
 
 `omniflow dbt sync --auto` selects all trusted model records whose `base_branch` exactly matches the current deployment branch. In GitHub Actions it accepts only `push` and `workflow_dispatch`, rejects tags and pull requests, and writes no raw response or query-result data. See [Post-Deployment dbt Synchronization](DBT_SYNC.md).
 
@@ -298,7 +312,7 @@ Explicit identity flags such as `--base-url`, `--model-id`, `--model-path`, `--b
 omniflow run --auto --config .omniflow.yml
 ```
 
-The API key is always read from `OMNI_API_KEY`. Never add it to either configuration file.
+The validation credential is read from `OMNI_API_KEY`; dbt sync uses `OMNIFLOW_SYNC_API_KEY`, and the unsupported repair scaffold uses `OMNIFLOW_REPAIR_API_KEY`. Never add credentials to either configuration file.
 
 For an explicit local dbt sync test, `--base-url`, `--model-id`, and `--base-branch` are all required. The supported protected workflow uses `omniflow dbt sync --auto` and trusted `.omni/flow.json` metadata.
 

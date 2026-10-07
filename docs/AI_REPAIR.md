@@ -32,7 +32,7 @@ Do not follow these steps in a customer repository. They are retained to documen
 - A same-repository Omni pull request. Fork pull requests are never eligible.
 - Omni Git integration and an existing Omni branch that matches the GitHub PR head branch.
 - A dedicated Omni user limited to the target model, with the minimum role that can use Omni AI, edit the development branch, and update its Git pull request. A Modeler-scoped user is the conservative development starting point; verify the exact custom-role permissions in a test tenant.
-- A separate PAT from that user. Do not reuse `OMNI_API_KEY` and do not use an Organization API Key.
+- A separate PAT from that user. Do not reuse `OMNI_API_KEY` and do not use an Organization API Key for this unreleased repair scaffold. This restriction does not apply to supported validation or dbt sync, where the [operator chooses either credential type](CONFIGURATION.md#credential-choice-and-user-scope).
 - Permission to create a GitHub environment, environment secret, label, workflow, and CODEOWNERS rules.
 
 ## Step 1: Create The Protected GitHub Environment
@@ -54,7 +54,7 @@ Inside the `omniflow-ai-repair` environment, create an environment secret named:
 OMNIFLOW_REPAIR_API_KEY
 ```
 
-This PAT is write-capable and must be managed separately from the read-oriented `OMNI_API_KEY` used by routine validation. Define rotation and revocation procedures, and audit access to the GitHub environment.
+This PAT is write-capable and must be managed separately from the `OMNI_API_KEY` credential used by routine validation. Read-oriented validation does not make its credential read-only; an Org key or admin PAT remains privileged. Define rotation and revocation procedures, and audit access to the GitHub environment.
 
 Never place either token in `.omniflow.yml`, `.omni/flow.json`, workflow source, a pull-request body, a comment, or a support bundle.
 
@@ -160,4 +160,4 @@ This test cannot authorize customer use while the required public Modeling Agent
 2. Set `repairs.ai.enabled: false` or remove the `repairs` section.
 3. Delete the `OMNIFLOW_REPAIR_API_KEY` environment secret and revoke the Omni PAT.
 4. Delete the `omniflow-ai-repair` label.
-5. Retain ordinary OmniFlow validation and its read-oriented `OMNI_API_KEY`.
+5. Retain ordinary OmniFlow validation and its separate `OMNI_API_KEY` credential.
