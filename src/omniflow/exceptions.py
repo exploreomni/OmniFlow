@@ -24,6 +24,22 @@ class ConfigError(OmniFlowError):
     exit_code = ExitCodes.CONFIGURATION_ERROR
 
 
+class MissingPolicyError(ConfigError):
+    """Fixed, public-safe guidance; never interpolate a customer-supplied path."""
+
+    reason_code = "missing_policy_config"
+    MESSAGE = (
+        "Required OmniFlow policy is missing from the trusted source. "
+        "Add .omniflow.yml at the repository root (or provide an existing --config file). "
+        "For pull requests, commit the policy to the target base branch first and fetch that branch; "
+        "a file added only on the PR branch is not trusted. "
+        "The GitHub Actions workflow is a separate file."
+    )
+
+    def __init__(self) -> None:
+        super().__init__(self.MESSAGE)
+
+
 class SecurityPolicyError(OmniFlowError):
     exit_code = ExitCodes.SECURITY_POLICY_VIOLATION
 
@@ -53,8 +69,9 @@ class OmniResponseError(OmniAPIError):
             "validator": validator, "type": "validation_execution_failed", "severity": "error",
             "reason_code": self.reason_code, "message": str(self), "coverage_complete": False,
         }
-        if validator == "content":
-            issue.update(comparison_status="unavailable", content_health="unknown", regression_status="unknown")
+        if validator in {"content", "model"}:
+            issue.update(comparison_status="unavailable", regression_status="unknown")
+            issue[f"{validator}_health"] = "unknown"
             if self.validation_scope in {"branch", "base"}:
                 issue["validation_scope"] = self.validation_scope
             if self.comparison_mode in {"new_only", "all_issues"}:

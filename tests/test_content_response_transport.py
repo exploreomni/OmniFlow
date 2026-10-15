@@ -6,7 +6,7 @@ import pytest
 import requests
 
 from omniflow import cli
-from omniflow.config import load_config
+from omniflow.config import _to_config
 from omniflow.diagnostics import public_diagnostic, safe_exception_message
 from omniflow.exceptions import OmniResponseError
 from omniflow.omni_client import OmniClient
@@ -38,7 +38,8 @@ def test_real_client_distinguishes_empty_body_from_unparseable_json(body, reason
 @pytest.mark.parametrize("reason", ["empty_api_response", "invalid_json_response"])
 def test_cli_reports_transport_failure_without_claiming_content_defect(tmp_path, monkeypatch, capsys, scope, reason):
     monkeypatch.chdir(tmp_path)
-    config = load_config(None)
+    monkeypatch.delenv("GITHUB_EVENT_NAME", raising=False)
+    config = _to_config({}, None)
     config.content_validation.fail_on_new_only = True
     config.reporting.formats = ["json", "markdown", "sarif", "junit"]
     context = cli.ModelContext(base_url="https://synthetic.example", model_id="model", branch_id="branch",

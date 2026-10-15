@@ -64,10 +64,21 @@ def test_ambiguous_identity_never_suppresses_current_defects(tmp_path, ambiguity
         for key in ("document_id", "identifier"):
             current["content"][0].pop(key)
     report, code = validate(tmp_path, current, copy.deepcopy(current))
-    assert code == 1
+    assert code == 4
     assert report["existing_issues"] == report["resolved_issues"] == 0
     assert report["new_issues"] == len(current["content"][0]["queries_and_issues"])
     assert report["comparison_ambiguous_issues"] > 0
+
+
+@pytest.mark.parametrize("missing_baseline", [False, True])
+def test_empty_current_cannot_hide_incomplete_comparison(tmp_path, missing_baseline):
+    ambiguous_base = payload({"issues": ["Missing query identity"]})
+    report, code = validate(tmp_path, {"content": []}, None if missing_baseline else ambiguous_base,
+                            branch_id=None if missing_baseline else "branch")
+    assert code == 4
+    assert report["current_issues"] == 0
+    assert report["validation_complete"] is False
+    assert report["regression_status"] == "unknown"
 
 
 def test_query_identity_is_document_scoped_and_auxiliary_metadata_is_not_identity(tmp_path):
@@ -118,7 +129,7 @@ def test_history_must_match_version_and_full_context(tmp_path, change, status):
     (tmp_path / "history.json").write_text(json.dumps(previous))
     report, code = validate(tmp_path, current, branch_id=None, user_id="user-1")
     accepted = status == "accepted"
-    assert code == int(not accepted)
+    assert code == (0 if accepted else 4)
     assert report["history_status"] == status
     assert report["new_issues"] == int(not accepted)
     assert report["existing_issues"] == int(accepted)
@@ -128,7 +139,7 @@ def test_history_must_match_version_and_full_context(tmp_path, change, status):
 
 
 @pytest.mark.parametrize("branch_id,status,code", [
-    (None, "invalidated_unscoped_user", 1),
+    (None, "invalidated_unscoped_user", 4),
     ("branch", "not_used_live_base", 0),
 ])
 def test_default_user_history_cannot_suppress_findings_but_live_base_still_can(tmp_path, branch_id, status, code):
@@ -139,8 +150,8 @@ def test_default_user_history_cannot_suppress_findings_but_live_base_still_can(t
     report, actual_code = validate(tmp_path, current, copy.deepcopy(current), branch_id=branch_id)
     assert actual_code == code
     assert report["history_status"] == status
-    assert report["new_issues"] == code
-    assert report["existing_issues"] == 1 - code
+    assert report["new_issues"] == int(code != 0)
+    assert report["existing_issues"] == int(code == 0)
 
 
 @pytest.mark.parametrize("invalid", ["{private malformed", "null", "[]", "42", "invalid_context", "invalid_issue"])

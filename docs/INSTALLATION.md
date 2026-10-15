@@ -52,13 +52,13 @@ For multiple models, add one object per model. Every `model_id` and `model_path`
 
 This file contains routing metadata, not credentials. Commit it to the protected base branch before testing an Omni-created pull request. OmniFlow deliberately reads this file from the trusted base branch so a pull request cannot redirect the API key to another host.
 
-## Step 3: Add The GitHub Workflow And Optional Policy
+## Step 3: Add The GitHub Workflow And Required Policy
 
 1. Create `.github/workflows/omniflow.yml` in the customer repository.
 2. Copy the complete [workflow example](../.github/workflow-examples/omniflow.yml) into that file.
 3. Replace both occurrences of `<pinned-commit-sha>` with the same reviewed, full 40-character OmniFlow commit SHA.
 4. If the protected branch is not `main`, update `branches: [main]` in the workflow.
-5. Optionally copy [`.omniflow.example.yml`](../.omniflow.example.yml) to `.omniflow.yml` and review every changed gate with the model owners.
+5. Copy the canonical [`.omniflow.yml`](../.omniflow.yml) into the **customer repository root**. This required policy is separate from the workflow at `.github/workflows/omniflow.yml`. Review every changed gate with the model owners; optional integrations and label filters remain commented unless deliberately enabled.
 6. If GitHub Code Security is enabled for the repository, add a repository Actions variable named `OMNIFLOW_UPLOAD_SARIF` with the value `true`. Leave it unset otherwise; `report.sarif` is still included in the public evidence artifact.
 
 The action reference should look like this:
@@ -68,6 +68,10 @@ uses: exploreomni/OmniFlow@0123456789abcdef0123456789abcdef01234567
 ```
 
 Do not use `@main`, a floating tag, or an unpinned GitHub branch. OmniFlow does not currently publish an official PyPI package. The supported action installs from the pinned checkout with a hash-locked Python 3.11 Linux dependency set.
+
+The canonical policy keeps the main safety checks enabled and explicitly sets `fail_on_new_only: true` for both `checks.content_validation` and `checks.model_validation`. Unchanged, identity-matched baseline findings do not block that PR validator; new model errors and new content findings do, and model warnings follow `fail_on_warnings` (default `false`). Incomplete or ambiguous evidence cannot establish a passing comparison. This does not disable validation or certify the model/content as healthy. See [Configuration](CONFIGURATION.md) for deliberate policy overrides and strict no-branch/post-sync/repair behavior.
+
+Regression-gated PR runs must verify live authored YAML against both immutable Git revisions before and after checks: the candidate against the PR head and the live base against the trusted Git base. Ensure Omni's branch and base are synchronized; unavailable or out-of-sync evidence blocks, including when the issue response is empty. This is sampled verification, not an atomic lock on live content or drafts.
 
 The example workflow uses `pull_request_target` so it can read policy from the trusted base branch. It never checks out or executes proposed pull-request code. A credential-free preflight selects the Omni model context before the action exposes `OMNI_API_KEY` to the validation process, so non-Omni pull requests skip without injecting the token. Do not add a pull-request-head checkout or execute scripts from the proposed branch in this privileged workflow.
 
@@ -95,9 +99,13 @@ GitHub may require a Team or Enterprise organization plan to enforce rulesets or
 
 ## Step 5: Merge The Setup Into The Base Branch
 
-The trusted workflow and `.omni/flow.json` must already exist on the protected base branch before they can validate an Omni-created pull request. Merge the setup through the repository's ordinary review process.
+The trusted workflow, `.omni/flow.json`, and required root `.omniflow.yml` must already exist on the protected base branch before they can validate an Omni-created pull request. Merge the setup through the repository's ordinary review process. Adding the policy only to the PR head is insufficient: the privileged workflow does not trust proposed policy changes.
 
 The initial setup pull request may not run OmniFlow because the trusted workflow does not exist on the base branch yet. This is expected.
+
+When upgrading an existing installation that had no policy, first bootstrap `.omniflow.yml` on the trusted base through the approved repository process, then update the pinned Action. A missing selected policy now exits with configuration error `2` and safe setup guidance instead of silently using defaults. Environment variables and identity flags cannot replace it. If using the Action's `config` input or CLI `--config` with a custom path, that selected file is still required on the trusted base; the default customer layout remains root `.omniflow.yml`.
+
+The new `checks.model_validation.fail_on_new_only` key is not supported by older pinned versions. For an existing installation, bootstrap the required file using only keys accepted by its current pin, then coordinate the supporting Action pin and new model setting in a reviewed upgrade. Do not merge an unsupported key while leaving an incompatible Action active. The PR run uses the policy already on its trusted base; newly merged policy requires a fresh run. New installations can bootstrap the compatible workflow, metadata, and complete policy together before their first validation. No release version or customer acceptance is implied by these local development changes.
 
 ## Step 6: Create And Store A Dedicated Omni PAT
 
@@ -151,9 +159,10 @@ The installation is ready for controlled alpha use when all of these are true:
 
 - [ ] `.omni/flow.json` is on the protected base branch.
 - [ ] `.github/workflows/omniflow.yml` is on the protected base branch.
+- [ ] Required `.omniflow.yml` is at the customer repository root on the protected base branch, distinct from the workflow file.
 - [ ] Both action references use the same full OmniFlow commit SHA.
 - [ ] `OMNIFLOW_UPLOAD_SARIF=true` is set only when GitHub Code Security is enabled; otherwise SARIF remains artifact-only.
-- [ ] Workflow and trusted metadata CODEOWNERS were active before the credential was stored.
+- [ ] Workflow, policy, and trusted metadata CODEOWNERS were active before the credential was stored.
 - [ ] `OMNI_API_KEY` is a dedicated least-privilege PAT and exists only in GitHub Actions secrets.
 - [ ] The action runs on Linux x86_64 with Python 3.11 and uses its checked-in hash lock unchanged.
 - [ ] A real Omni-created pull request selected the expected model and branch.
@@ -173,7 +182,7 @@ For a dbt repository:
 
 1. Prove the ordinary Omni pull-request workflow first.
 2. Confirm the repository has a reviewed production dbt deployment command. A local `dbt build` or CI parse is not a production deployment signal.
-3. Add the `deployment.dbt_sync` block from [`.omniflow.example.yml`](../.omniflow.example.yml) with `enabled: true`.
+3. Uncomment and review the `deployment.dbt_sync` block in the canonical [`.omniflow.yml`](../.omniflow.yml), setting `enabled: true` in the customer's trusted policy.
 4. Create a protected GitHub environment named `omniflow-production` and require deployment reviewers where appropriate.
 5. Create a dedicated Modeler or Connection Admin PAT and store it as the environment secret `OMNIFLOW_SYNC_API_KEY`.
 6. Copy [the dbt sync workflow example](../.github/workflow-examples/omniflow-dbt-sync.yml), replace its dbt command, pin the OmniFlow commit, and tailor `push.paths` to the actual dbt project.

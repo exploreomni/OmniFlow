@@ -3,7 +3,7 @@ import json
 import pytest
 
 from omniflow.cli import _pull_analysis_yaml, _run_context, build_parser, cmd_run
-from omniflow.config import load_config
+from omniflow.config import _to_config
 from omniflow.diagnostics import capture_private_reports
 from omniflow.diff.diff_engine import diff_graphs
 from omniflow.diff.semantic_graph import build_graph, load_yaml_graph
@@ -125,7 +125,7 @@ def test_inheritance_uses_resolved_api_evidence_without_losing_authored_snapshot
             return {"content": [{"document_id": "dashboard"}] if referenced and find == "orders.window" else []}
 
     client = Client()
-    config = load_config(None)
+    config = _to_config({}, None)
     config.content_validation.enabled = config.model_validation.enabled = config.semantic_lint.enabled = False
     monkeypatch.setattr("omniflow.cli._client_and_branch_for_context", lambda *a, **k: (client, "branch"))
     saved = _pull_analysis_yaml(client=client, model_id="model", branch_id=None, output_dir=tmp_path / "saved") if reuse_base else None
@@ -168,7 +168,7 @@ def test_metadata_failure_reports_safe_reason_and_incomplete_dependent_checks(tm
 
     monkeypatch.chdir(tmp_path)
     client = Client()
-    config = load_config(None)
+    config = _to_config({}, None)
     config.content_validation.enabled = config.model_validation.enabled = config.ai_eval.enabled = False
     config.semantic_lint.enabled = config.contracts.enabled = config.breaking_change_hold.enabled = True
     config.reporting.formats = ["json", "markdown", "sarif", "junit"]

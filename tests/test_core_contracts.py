@@ -115,6 +115,9 @@ def test_malformed_targeted_response_becomes_a_failing_coverage_gap():
 
 def test_malformed_content_fails_cli_and_cleans_restricted_artifacts(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("GITHUB_EVENT_NAME", raising=False)
+    monkeypatch.delenv("GITHUB_BASE_REF", raising=False)
+    (tmp_path / ".omniflow.yml").write_text("checks: {}\n", encoding="utf-8")
     context = ModelContext(base_url="https://omni.example", model_id="model", model_path="omni/model")
     args = SimpleNamespace(
         config=None,

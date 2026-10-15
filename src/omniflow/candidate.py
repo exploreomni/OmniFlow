@@ -26,8 +26,8 @@ class CandidateVerificationError(ConfigError):
         self.candidate_reason = reason
         super().__init__(
             f"Candidate provenance verification failed ({reason}). "
-            "The selected Omni branch must exactly match the immutable pull request's authored YAML. "
-            "Check branch synchronization and sanitized snapshot evidence; do not bypass candidate verification."
+            "The selected Omni candidate or base must exactly match the corresponding immutable PR authored YAML. "
+            "Check candidate/base synchronization and sanitized snapshot evidence; do not bypass verification."
         )
 
 
@@ -35,19 +35,29 @@ class _GitUnavailable(Exception):
     pass
 
 
-def verify_candidate(client: Any, context: Any) -> dict[str, Any]:
+def verify_candidate(client: Any, context: Any, *, revision_side: str = "head") -> dict[str, Any]:
     """Compare complete authored semantic snapshots without checking out PR code.
 
     Call before and after validation and compare the complete returned proofs.
     This is sampled content equality, not an atomic validation/revision lock.
     """
-    branch_id = getattr(context, "branch_id", None)
-    if not isinstance(branch_id, str) or not branch_id.strip():
+    try:
+        return _verify_snapshot(client, context, revision_side=revision_side)
+    except CandidateVerificationError as exc:
+        exc.validation_scope = "base" if revision_side == "base" else "branch"
+        raise
+
+
+def _verify_snapshot(client: Any, context: Any, *, revision_side: str) -> dict[str, Any]:
+    if revision_side not in {"head", "base"}:
+        raise CandidateVerificationError("invalid_pr_revision")
+    branch_id = getattr(context, "branch_id", None) if revision_side == "head" else None
+    if revision_side == "head" and (not isinstance(branch_id, str) or not branch_id.strip()):
         raise CandidateVerificationError("missing_candidate_branch")
     scope = getattr(context, "model_path", None)
     model_path = "." if scope == "." else _safe_path(scope)
     try:
-        revision = pull_request_revision("head")
+        revision = pull_request_revision(revision_side)
     except (OmniFlowError, AttributeError, TypeError, ValueError):
         raise CandidateVerificationError("invalid_pr_revision") from None
     if revision is None:
@@ -98,7 +108,7 @@ def verify_candidate(client: Any, context: Any) -> dict[str, Any]:
         name = path.encode("utf-8")
         digest.update(len(name).to_bytes(8, "big") + name + len(raw).to_bytes(8, "big") + raw)
     return {
-        "status": "verified", "method": "authored_yaml_snapshot", "head_sha": sha,
+        "status": "verified", "method": "authored_yaml_snapshot", f"{revision_side}_sha": sha,
         "file_count": len(expected), "snapshot_digest": digest.hexdigest(),
     }
 
@@ -169,6 +179,10 @@ def _semantic_inventory(entries: list[dict], model_path: str) -> dict[str, dict]
         if path in seen:
             raise CandidateVerificationError("duplicate_git_path")
         seen.add(path)
+        # These repository-control files are not Omni authored model files,
+        # including when the registered model lives at the repository root.
+        if path in {".omniflow.yml", ".omniflow.example.yml"} or path.startswith((".omni/", ".github/", ".omniflow/")):
+            continue
         if path == model_path or path in ancestors:
             if entry.get("type") != "tree" or entry.get("mode") != "040000":
                 raise CandidateVerificationError("unsafe_git_entry")

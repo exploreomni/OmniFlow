@@ -5,7 +5,7 @@ from unittest.mock import patch
 import pytest
 
 from omniflow.cli import _run_context, cmd_diff
-from omniflow.config import load_config
+from omniflow.config import _to_config
 from omniflow.diff.diff_engine import diff_graphs
 from omniflow.diff.semantic_graph import build_graph, load_yaml_graph
 from omniflow.discovery import ModelContext
@@ -54,7 +54,7 @@ def test_api_snapshots_preserve_canonical_names_through_the_context_gate(
     tmp_path, monkeypatch, referenced, reuse_base, orientation,
 ):
     client = SnapshotClient(referenced, orientation)
-    config = load_config(None)
+    config = _to_config({}, None)
     config.content_validation.enabled = config.model_validation.enabled = config.semantic_lint.enabled = False
     monkeypatch.setattr("omniflow.cli._client_and_branch_for_context", lambda *a, **k: (client, "branch"))
     base_dir = tmp_path / "previous-base" if reuse_base else None

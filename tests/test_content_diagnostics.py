@@ -8,7 +8,7 @@ import pytest
 import yaml
 
 from omniflow.cli import build_parser, cmd_run
-from omniflow.config import load_config
+from omniflow.config import _to_config
 from omniflow.discovery import ModelContext
 from omniflow.git import tool_revision
 from omniflow.reporting.junit_report import to_junit
@@ -66,7 +66,8 @@ def test_valid_filter_issues_keep_identity_and_new_only_policy(tmp_path, issue):
     assert code == 1
     assert (report["new_issues"], report["existing_issues"], report["resolved_issues"]) == (1, 1, 0)
     existing = next(item for item in report["issues"] if item["state"] == "existing")
-    assert existing["severity"] == "info"
+    assert existing["severity"] == "error"
+    assert existing["blocking"] is False
     assert existing["issue_type"] == "dashboard_filter"
     assert existing["document_name"] == "Private dashboard"
     assert "Filter references an unknown field" in existing["message"]
@@ -109,6 +110,9 @@ def test_evidence_context_redacts_before_truncating_long_values(monkeypatch):
 @pytest.mark.parametrize("privacy", ["standard", "names", "strict"])
 def test_api_to_cli_reports_incomplete_evidence_and_preserves_privacy(tmp_path, monkeypatch, scope, privacy):
     monkeypatch.chdir(tmp_path)
+    # This test isolates API/report behavior; immutable PR snapshots are covered
+    # by the real-Git regression integration tests.
+    monkeypatch.delenv("GITHUB_EVENT_NAME", raising=False)
     action_sha, input_sha = "a" * 40, "b" * 40
     monkeypatch.setenv("OMNIFLOW_ACTION_REF", action_sha)
     # Model the PR head separately from the merge ref, without inheriting the
@@ -117,7 +121,7 @@ def test_api_to_cli_reports_incomplete_evidence_and_preserves_privacy(tmp_path, 
     event_path = tmp_path / "event.json"
     event_path.write_text(json.dumps({"pull_request": {"head": {"sha": input_sha}}}), encoding="utf-8")
     monkeypatch.setenv("GITHUB_EVENT_PATH", str(event_path))
-    config = load_config(None)
+    config = _to_config({}, None)
     config.content_validation.fail_on_new_only = True
     config.security.redaction_level = "strict" if privacy == "strict" else "standard"
     config.security.redact_document_names = privacy == "names"

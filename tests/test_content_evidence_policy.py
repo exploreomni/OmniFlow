@@ -110,7 +110,7 @@ def test_ambiguous_identity_is_blocking_and_never_claims_verified_regression(tmp
     current["content"][0].pop("document_id")
     current["content"][0].pop("identifier")
     report, code, _ = validate(tmp_path, current, copy.deepcopy(current))
-    assert code == 1
+    assert code == 4
     assert report["comparison_status"] == "ambiguous"
     assert report["regression_status"] == "unknown"
     assert report["existing_issues"] == 0
@@ -190,7 +190,7 @@ def test_grouped_filter_identity_and_occurrences_cannot_mask_new_defects(tmp_pat
 def test_duplicate_filter_group_names_are_ambiguous_but_leaf_order_is_not(tmp_path):
     ambiguous = payload(group("Filter A", "Broken field"), group("Filter A", "Other field"))
     report, code, _ = validate(tmp_path, ambiguous, copy.deepcopy(ambiguous))
-    assert code == 1 and report["comparison_status"] == "ambiguous"
+    assert code == 4 and report["comparison_status"] == "ambiguous"
     assert report["new_issues"] == 2 and report["existing_issues"] == 0
     before = payload(group("Filter A", "First field", "Second field"))
     after = payload(group("Filter A", "Second field", "First field"))

@@ -8,7 +8,7 @@ import pytest
 
 from omniflow import cli
 from omniflow.artifacts import write_artifact_manifest, write_public_json, write_public_reports
-from omniflow.config import load_config
+from omniflow.config import _to_config, load_config
 from omniflow.diagnostics import capture_private_reports, diagnostic_session, public_diagnostic
 from omniflow.exceptions import ConfigError, OmniFlowError, OmniResponseError, SecurityPolicyError
 from omniflow.github.annotations import annotation_lines
@@ -141,7 +141,7 @@ def test_artifact_manifest_does_not_list_customer_named_public_files(tmp_path):
 
 def test_classification_is_opt_in_and_never_skips_content(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    config = load_config(None)
+    config = _to_config({}, None)
     assert config.content_validation.classify_comment_only is False
     config.content_validation.classify_comment_only = True
     context = cli.ModelContext(base_url="https://synthetic.example", model_id="model", model_path="model")
@@ -165,7 +165,7 @@ def test_classification_config_rejects_non_boolean_and_default_preserves_policy(
     path.write_text("checks:\n  content_validation:\n    classify_comment_only: true\n    fail_on_new_only: true\n")
     config = load_config(str(path))
     assert config.content_validation.classify_comment_only and config.content_validation.fail_on_new_only
-    assert load_config(None).content_validation.fail_on_new_only is False
+    assert _to_config({}, None).content_validation.fail_on_new_only is False
     path.write_text("checks:\n  content_validation:\n    classify_comment_only: maybe\n")
     with pytest.raises(ConfigError):
         load_config(str(path))
@@ -185,7 +185,7 @@ def test_stale_report_formats_are_replaced_when_format_preference_changes(tmp_pa
 
 def test_standalone_content_diagnostics_are_minimal_and_private_scratch_is_purged(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    config = load_config(None)
+    config = _to_config({}, None)
     config.omni.model_id = SENSITIVE
     args = cli.build_parser().parse_args(["content", "validate"])
     for directory in (Path(".omniflow"), Path(".omniflow/public")):
@@ -219,7 +219,7 @@ def test_standalone_content_diagnostics_are_minimal_and_private_scratch_is_purge
 def test_standalone_raw_debug_requires_local_explicit_retention(tmp_path, monkeypatch, ci, retention):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("GITHUB_ACTIONS", ci)
-    config = load_config(None)
+    config = _to_config({}, None)
     config.security.retain_restricted_artifacts = retention
     args = cli.build_parser().parse_args(["content", "validate", "--unsafe-raw-output"])
     with patch("omniflow.cli.load_config", return_value=config), \
@@ -247,7 +247,7 @@ def test_grouped_filter_api_to_cli_keeps_all_shareable_outputs_minimal(
 ):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("GITHUB_ACTIONS", "true")
-    config = load_config(None)
+    config = _to_config({}, None)
     config.content_validation.fail_on_new_only = True
     config.security.redaction_level = level
     config.model_validation.enabled = config.semantic_lint.enabled = config.contracts.enabled = False
@@ -337,7 +337,10 @@ def test_public_report_is_never_trusted_as_content_history(tmp_path, schema2):
         history_in=history_in, history_out=tmp_path / "restricted/history.json",
         report_out=tmp_path / "restricted/report.json",
     )
-    assert code == 1
+    assert code == 4
+    assert report["validation_complete"] is False
+    assert any(issue.get("reason_code") == "content_comparison_unavailable" and issue["blocking"]
+               for issue in report["issues"])
     assert report["history_status"] == ("invalidated_public_diagnostic" if schema2 else "invalidated_legacy")
     assert report["comparison_status"] == "baseline_unavailable"
     assert report["baseline_issues"] is None
@@ -350,7 +353,7 @@ def test_standalone_model_replaces_stale_outputs_on_success_and_transport_failur
     tmp_path, monkeypatch, capsys, transport_failure,
 ):
     monkeypatch.chdir(tmp_path)
-    config = load_config(None)
+    config = _to_config({}, None)
     config.omni.model_id = SENSITIVE
     args = cli.build_parser().parse_args(["model", "validate"])
     root = Path(".omniflow")

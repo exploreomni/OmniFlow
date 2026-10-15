@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .exceptions import ConfigError, SecurityPolicyError
+from .exceptions import ConfigError, MissingPolicyError, SecurityPolicyError
 from .security import contains_secret_key, reject_secret_keys, validate_repo_output_path
 from .trust import read_trusted_repo_text
 from .yaml_security import parse_secure_yaml
@@ -42,7 +42,7 @@ OMNI_KEYS = {
 }
 CHECK_KEYS = {"content_validation", "model_validation", "semantic_lint", "dbt_exposures", "dbt_impact", "ai_eval"}
 CONTENT_KEYS = {"enabled", "fail_on_new_only", "labels", "classify_comment_only"}
-MODEL_KEYS = {"enabled", "fail_on_warnings"}
+MODEL_KEYS = {"enabled", "fail_on_warnings", "fail_on_new_only"}
 LINT_KEYS = {"enabled", "rules"}
 EXPOSURE_KEYS = {"enabled", "fail_on_unavailable"}
 DBT_IMPACT_KEYS = {
@@ -170,19 +170,17 @@ def config_hash(payload: dict[str, Any]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
-def load_raw_config(path: str | Path | None = None) -> tuple[dict[str, Any], Path | None]:
-    candidates = [Path(path)] if path else [Path(DEFAULT_CONFIG_PATH)]
-    for candidate in candidates:
-        text = read_trusted_repo_text(candidate)
-        if text is None:
-            continue
-        payload = parse_secure_yaml(text, source=str(candidate))
-        if not isinstance(payload, dict):
-            raise ConfigError(f"Config file '{candidate}' must contain a top-level mapping")
-        reject_secret_keys(payload, source=str(candidate))
-        _validate_config_schema(payload)
-        return expand_env_vars(payload), candidate
-    return {}, None
+def load_raw_config(path: str | Path | None = None) -> tuple[dict[str, Any], Path]:
+    candidate = Path(path) if path else Path(DEFAULT_CONFIG_PATH)
+    text = read_trusted_repo_text(candidate)
+    if text is None:
+        raise MissingPolicyError()
+    payload = parse_secure_yaml(text, source=str(candidate))
+    if not isinstance(payload, dict) or not payload:
+        raise ConfigError(f"Config file '{candidate}' must contain a non-empty top-level mapping")
+    reject_secret_keys(payload, source=str(candidate))
+    _validate_config_schema(payload)
+    return expand_env_vars(payload), candidate
 
 
 @dataclass
@@ -208,6 +206,7 @@ class ContentValidationSettings:
 class ModelValidationSettings:
     enabled: bool = True
     fail_on_warnings: bool = False
+    fail_on_new_only: bool = False
 
 
 @dataclass
@@ -386,6 +385,7 @@ def _to_config(raw: dict[str, Any], source: Path | None) -> OmniFlowConfig:
     model = ModelValidationSettings(
         enabled=parse_bool("model_validation.enabled", model_raw.get("enabled"), True),
         fail_on_warnings=parse_bool("model_validation.fail_on_warnings", model_raw.get("fail_on_warnings"), False),
+        fail_on_new_only=parse_bool("model_validation.fail_on_new_only", model_raw.get("fail_on_new_only"), False),
     )
     lint = SemanticLintSettings(
         enabled=parse_bool("semantic_lint.enabled", lint_raw.get("enabled"), True),

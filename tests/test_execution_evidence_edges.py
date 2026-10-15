@@ -8,7 +8,7 @@ import pytest
 
 from omniflow.artifacts import write_public_reports
 from omniflow.cli import build_parser, cmd_run
-from omniflow.config import load_config
+from omniflow.config import _to_config
 from omniflow.diagnostics import capture_private_reports
 from omniflow.discovery import ModelContext
 from omniflow.exceptions import OmniAPIError, OmniFlowError
@@ -17,7 +17,7 @@ from omniflow.security import secure_write_text
 
 def configured_run(monkeypatch, tmp_path, client, *, two_models=False):
     monkeypatch.chdir(tmp_path)
-    config = load_config(None)
+    config = _to_config({}, None)
     config.reporting.formats = ["json", "markdown", "sarif", "junit"]
     config.content_validation.fail_on_new_only = False
     config.semantic_lint.enabled = True

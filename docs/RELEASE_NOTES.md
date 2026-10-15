@@ -1,5 +1,25 @@
 # Release notes
 
+## Unreleased — independent model and content regression gates
+
+- Added `checks.model_validation.fail_on_new_only`, independent from content policy and defaulting to `false` when omitted. The canonical required `.omniflow.yml` explicitly enables both new-only switches; model `fail_on_warnings` remains `false` by default. `OMNI_FAIL_ON_NEW_ONLY` continues to affect content only.
+- PR branch comparisons use fresh live-base evidence for the same model and credential scope. Model findings retain identity, severity, and occurrence counts; existing findings remain visible, additional occurrences and severity changes are new, and warning blocking follows policy. Missing or ambiguous evidence cannot establish a passing comparison.
+- Before and after regression-gated PR checks, live authored candidate/base YAML must match immutable Git head/base revisions. Missing or out-of-sync snapshots block even when current findings are empty. These are sampled checks, not an atomic content/draft lock; unchanged default API validation depth does not guarantee exhaustive coverage.
+- Orchestrated no-branch runs, post-sync validation, and repair verification enforce strict health rather than self-comparison or historical suppression. Standalone content's explicitly selected, scoped history behavior remains separate.
+- Standalone no-branch content validation defaults to strict health; explicit `--history-in` or `--fail-on-new-only` requests comparison and missing usable history exits `4`. Standalone content/model new-only validation inside GitHub PRs is rejected in favor of `omniflow run --auto` and its trusted Git verification. Existing content findings preserve error severity with nonblocking policy state.
+- Older Action revisions reject the new model key. Bootstrap a compatible required file on the trusted base, then coordinate the supporting pin and new setting through review. A pass means no new blocking findings in the compared scope, not clean model/content health or proof of causality.
+
+This is local development work, not a published release or customer acceptance. A reviewed compatible revision and fresh consumer validation are still required.
+
+## Unreleased — required trusted policy
+
+- **Breaking setup requirement:** the selected policy file must exist. Copy the canonical root [`.omniflow.yml`](../.omniflow.yml) into the customer repository root; it replaces the former `.omniflow.example.yml` template name and is distinct from `.github/workflows/omniflow.yml`.
+- Bootstrap policy on the protected base through the approved setup process before upgrading the Action pin or validating Omni PRs. A PR-head-only file is not trusted. Missing policy exits with configuration code `2` and safe setup guidance, not silent defaults. Environment variables and identity flags cannot replace a file; explicit custom `--config` paths remain supported and required.
+- Blank, comment-only, and empty top-level policies are rejected; start with the active settings in the canonical file.
+- The shipped policy keeps the main safety checks enabled and explicitly sets both model and content `fail_on_new_only: true`. Label filters and optional integrations stay commented. Omitted settings in a custom policy keep their existing defaults; explicit all-issues policies are not weakened, and unreadable comparison evidence remains blocking.
+
+This is a development candidate. Existing consumers must review the policy and updated Action pin; a source change does not update their installation automatically.
+
 ## Unreleased — minimal diagnostics and explicit content-regression evidence
 
 This is a development candidate, not a published release or confirmation of customer acceptance.
@@ -8,7 +28,7 @@ This is a development candidate, not a published release or confirmation of cust
 - Supported workflow uploads use explicit diagnostic filenames, not broad output-directory uploads. Existing artifacts and logs are not retroactively sanitized. This is data minimization, not a PII/PHI/PCI detection or compliance guarantee.
 - Dashboard-filter validation supports the grouped `filter_name` / `issues` response reproduced in isolated live testing, while retaining legacy string/message-object compatibility. Exact filter identity and occurrence counts prevent different or increased failures from being hidden as existing issues. Duplicate group names remain ambiguous; unknown nesting and `null` are not treated as healthy evidence.
 - Unreadable content issues retain blocking behavior and include fixed structural reason codes and branch/base scope, without copying unsupported values. Empty API bodies and invalid JSON have separate safe reason codes; neither is presented as a confirmed content defect.
-- Content reports distinguish current versus baseline counts, comparison completeness, all-issues versus new-only policy, and content issue presence versus regression status. The global all-issues default is unchanged; new-only gating requires an explicit trusted-policy choice.
+- Content reports distinguish current versus baseline counts, comparison completeness, all-issues versus new-only policy, and content issue presence versus regression status. The underlying all-issues default for an omitted setting is unchanged; the canonical required policy now explicitly selects new-only gating as described above.
 - Optional comment-only classification is conservative and explanatory only. It never skips content validation because Git snapshots do not prove live content/draft provenance.
 
 The old parser failed with exit `4` on the live grouped response. The intended fixed outcomes are exit `1` for a new readable defect, exit `0` for an unchanged matched baseline issue under new-only policy, and exit `4` for incomplete evidence. Historical string/message fingerprints remain compatible; public reports cannot be reused as trusted history. Standalone content runs refresh standard outputs so stale reports/evidence are not uploaded as current results.

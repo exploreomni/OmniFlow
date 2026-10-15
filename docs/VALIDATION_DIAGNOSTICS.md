@@ -49,7 +49,7 @@ The [published Content Validator API](https://docs.omni.co/api/content-validator
 
 The adapter explicitly supports this grouped shape: a nonempty string `filter_name` and a list of nonempty string messages. A valid empty nested list contains no issues. It does not recursively search unknown objects for error text. The healthy fixture passed; a deliberately missing filter field returned this group and reproduced the old exit-4 failure; restoring the field passed again. That is evidence for this compatibility fix, not confirmation of the customer's exact defect or its age.
 
-A comment-only PR can trigger validation of existing dashboard content. The old parser rejected the grouped response before baseline comparison. With the adapter, the same issue can be compared normally: new findings block, while unchanged identity-matched findings are informational only under explicitly configured new-only policy.
+A comment-only PR can trigger validation of existing dashboard content. The old parser rejected the grouped response before baseline comparison. With the adapter, the same issue can be compared normally: new findings block, while unchanged identity-matched findings are reported as existing and nonblocking under explicitly configured new-only policy. Their original error severity is preserved; `blocking: false` does not mean the issue is fixed or merely informational.
 
 Null, blank, non-string or unsupported message shapes produce `content_evidence_unavailable`, with a fixed issue category, structural reason code, and branch/base scope. The shareable schema does not expose document/query identities or names; authorized investigators must obtain those separately. The run remains failed with exit `4` (Omni API error). This differs from a readable validation defect, which follows the existing exit `1`/new-only policy. Validation stops for that model context, so later checks may not have run. Neither case authorizes ignoring the gate.
 
@@ -82,9 +82,27 @@ The grouped adapter is based on observed live behavior, not a claim that every p
 
 These checks intentionally expose previously hidden upstream response problems. Do not weaken the gate or convert malformed evidence to an empty list to obtain a pass.
 
+## Model and content regression gates versus health
+
+The canonical required policy explicitly sets `fail_on_new_only: true` independently under `checks.model_validation` and `checks.content_validation`. For PR branch runs, each validator compares its current findings with a fresh response for the same model's live base, using the same credential and applicable visibility scope. Neither switch changes the other; omitted custom settings remain `false`, and `OMNI_FAIL_ON_NEW_ONLY` affects content only.
+
+The orchestrator first requires immutable PR base/head Git revisions and verifies authored live YAML against each: candidate versus head, live base versus trusted base. It repeats the checks after validation. Missing, unverifiable, or out-of-sync snapshots cannot authorize regression gating, even if the current issue list is empty. Resolve synchronization before rerunning. Before/after matches are sampled consistency evidence, not an atomic live-content or draft lock; no missing-repository or identity override replaces them.
+
+Model comparisons match private issue identity, severity, and occurrence counts. If one matching error becomes two, the additional occurrence is new; a warning that becomes an error cannot be hidden as an existing warning. Existing matched model findings stay visible but nonblocking in new-only mode. New model errors block, while new warnings block only when `fail_on_warnings: true` (default `false`). Missing or ambiguous identity and malformed/unavailable responses cannot establish a clean comparison.
+
+For both validators, a pass means **no new blocking findings were detected in the compared scope**. It does not certify a healthy model/content estate, prove full instance coverage, or establish that the PR caused every finding. The baseline is a fresh live observation, not an immutable historic snapshot of every model and draft. Other enabled checks can still block independently.
+
+Content requests retain the API's default validation depth on both sides. The same request scope does not guarantee exhaustive API content coverage, particularly for large or changing inventories. Do not present a passing comparison as proof that every dashboard, query, or draft was validated.
+
+Orchestrated validation without a branch, post-sync validation, and repair verification use strict health enforcement for both validators even if their new-only switches are enabled. They never pass by comparing the base to itself or by suppressing current findings with historical output. Standalone `content validate` retains its explicit scoped history mode as described below; it is not the PR or post-sync baseline mechanism.
+
+Inside a GitHub PR, standalone content/model commands cannot perform new-only validation: they return configuration exit `2` and require `omniflow run --auto` for trusted Git head/base verification. They do not silently fall back to an unverified regression gate.
+
+The new model switch requires a reviewed supporting Action revision. Older versions reject the unknown key; follow the [compatible trusted-base upgrade sequence](INSTALLATION.md#step-5-merge-the-setup-into-the-base-branch). These changes remain local development work until reviewed publication and a fresh consumer run establish adoption.
+
 ## How content comparisons stay in scope
 
-The global default remains `checks.content_validation.fail_on_new_only: false`: every current readable issue blocks. A reviewed PR-validation policy may explicitly opt into regression gating in its trusted configuration:
+The required canonical [`.omniflow.yml`](../.omniflow.yml) explicitly selects `checks.content_validation.fail_on_new_only: true` for PR regression gating. Copy it into the customer repository root and bootstrap it on the trusted base; the workflow file alone is insufficient. Missing policy is configuration exit `2`. A custom policy that omits this setting retains the underlying `false` default (every current readable issue blocks), and explicit all-issues policies remain supported. The canonical setting is:
 
 ```yaml
 checks:
@@ -95,7 +113,7 @@ checks:
 
 This is a policy decision, not a parser fix. The workflow must resolve the intended Omni branch and trusted model context. For a branch run, new-only compares current branch findings against a fresh base-model result using the same client, user scope, labels, and personal-folder setting. No branch or an unverified/mismatched candidate is not proof of a valid PR regression baseline. Do not change credentials or user IDs merely to hide findings.
 
-Readable, identity-matched issues already present on the baseline can remain nonblocking under this policy; genuinely new issues and additional occurrences block. A passing regression gate therefore means **no new issues were detected in the compared scope**, not that existing content is healthy. Scheduled or whole-environment health checks can retain all-issues enforcement.
+Readable, identity-matched issues already present on the baseline can remain nonblocking under this policy; genuinely new issues and additional occurrences block. A passing content regression gate therefore means **no new issues were detected in the compared scope**, not that existing content is healthy. Orchestrated no-branch health checks and post-sync/repair verification enforce all-issues policy rather than comparing the base to itself.
 
 Unreadable evidence from either side remains exit `4`. If branch evidence cannot be parsed, processing stops before collecting the base response; the report must not infer that the failure is inherited. Identical unreadable error messages on both sides are not an acceptable baseline match.
 
@@ -103,9 +121,11 @@ Content issues are matched by occurrence, not just by membership in a set. If on
 
 Grouped dashboard-filter findings retain the exact filter name as private, document-scoped comparison identity; names and message text never enter the public schema. Identical messages on different filters remain different findings. Duplicate group names are ambiguous and cannot suppress current findings as preexisting. Filter renames conservatively count as new/resolved because this response provides no durable filter ID. Reordering groups or messages does not create a regression; additional occurrences do.
 
-Persisted history now has a versioned schema and must match the current model, branch, explicit user ID, personal-folder setting, and labels. Label ordering does not matter. Legacy history or a different version/context is invalidated, not reused to suppress findings. Corrupt history fails with exit `4`. History reuse also requires an explicit `omni.user_id` (or `OMNI_USER_ID`): when it is absent, OmniFlow cannot prove that a later run uses the same authenticated principal and invalidates the baseline. It does not persist credentials or infer user identity from them.
+Without a branch, standalone `content validate` defaults to strict health even when the canonical policy sets new-only. Explicit `--history-in` or `--fail-on-new-only` requests history comparison. A missing usable baseline fails with exit `4`, even if the current issue list is empty.
 
-This can cause a one-time increase in findings after an upgrade, or repeated new findings when historical comparison lacks an explicit user scope. Review the findings and confirm the intended validation user; do not substitute an arbitrary user ID merely to restore an old comparison. Branch validation with `fail_on_new_only` still compares against a freshly retrieved base-model result using the same client and does not depend on persisted history.
+For this explicitly selected history mode, persisted history has a versioned schema and must match the current model, branch, explicit user ID, personal-folder setting, and labels. Label ordering does not matter. Legacy history or a different version/context is invalidated, not reused to suppress findings. Corrupt history fails with exit `4`. History reuse also requires an explicit `omni.user_id` (or `OMNI_USER_ID`): when it is absent, OmniFlow cannot prove that a later run uses the same authenticated principal and invalidates the baseline. It does not persist credentials or infer user identity from them.
+
+An upgrade or missing user scope can therefore invalidate a history comparison and leave it blocked until a usable baseline is established. Review the findings and confirm the intended validation user; do not substitute an arbitrary user ID merely to restore an old comparison. Branch validation with `fail_on_new_only` still compares against a freshly retrieved base-model result using the same client and does not depend on persisted history.
 
 Legacy string/message-object fingerprints remain unchanged. Schema-2 public diagnostics are not trusted history (`invalidated_public_diagnostic`); copying a shareable report into the history input cannot establish a clean or matching baseline.
 

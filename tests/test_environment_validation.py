@@ -8,7 +8,7 @@ from unittest import mock
 import pytest
 
 from omniflow.cli import _client_and_branch_for_context, _run_context, cmd_run
-from omniflow.config import load_config
+from omniflow.config import _to_config
 from omniflow.diagnostics import capture_private_reports
 from omniflow.discovery import ModelContext
 from omniflow.exceptions import ConfigError, OmniAuthError, SecurityPolicyError
@@ -39,6 +39,7 @@ def promotion(tmp_path, monkeypatch):
                for environment, base, model, follower in (
                    ("development", "develop", "dev-model", False), ("production", "main", "prod-model", True))]
     (tmp_path / ".omni/flow.json").write_text(json.dumps({"version": 2, "models": targets}))
+    (tmp_path / ".omniflow.yml").write_text("checks: {}\n", encoding="utf-8")
     git("add", ".")
     git("commit", "-m", "trusted base")
     base_sha = git("rev-parse", "HEAD")
@@ -113,6 +114,68 @@ def run_args():
     return SimpleNamespace(config=None, auto=True, skip_reason=None)
 
 
+@pytest.mark.parametrize("scenario", ["existing", "comment_only", "new_model", "new_content", "stale_head", "stale_base", "base_drift"])
+def test_regression_pr_verifies_both_git_snapshots_even_without_environment(promotion, monkeypatch, scenario):
+    root, _, event, head_text, event_path = promotion
+    if scenario == "comment_only":
+        head_text = MODEL_TEXT + "# Comment-only proposed change\n"
+        subprocess.run(["git", "checkout", "release/test"], check=True, capture_output=True)
+        (root / "omni/shared/orders.view").write_text(head_text)
+        subprocess.run(["git", "commit", "-am", "Comment-only fixture"], check=True, capture_output=True)
+        event["pull_request"]["head"]["sha"] = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+        event_path.write_text(json.dumps(event))
+        subprocess.run(["git", "checkout", "main"], check=True, capture_output=True)
+    client = TargetClient("prod-model", "main", True, head_text)
+    context = ModelContext(base_url="https://omni.example", model_id="prod-model", model_path="omni/shared",
+                           branch_id="candidate-id", branch_name="release/test")
+    config = _to_config({"contracts": {"enabled": False}, "checks": {
+        "semantic_lint": {"enabled": False}, "content_validation": {"fail_on_new_only": True},
+        "model_validation": {"fail_on_new_only": True},
+    }}, None)
+    original_yaml = client.get_model_yaml
+    base_reads = []
+
+    def yaml_snapshot(model_id, branch_id=None, **kwargs):
+        result = original_yaml(model_id, branch_id, **kwargs)
+        if branch_id is None:
+            base_reads.append(True)
+        if ((scenario == "stale_head" and branch_id) or (scenario == "stale_base" and not branch_id)
+                or (scenario == "base_drift" and not branch_id and len(base_reads) > 1)):
+            result["files"]["orders.view"] += "# unsynchronized change\n"
+        return result
+
+    def model(model_id, branch_id=None):
+        rows = [{"message": "Existing model error", "yaml_path": "orders.view", "is_warning": False}]
+        if scenario == "new_model" and branch_id:
+            rows.append({"message": "New model error", "yaml_path": "orders.view", "is_warning": False})
+        return rows
+
+    def content(model_id, branch_id=None, **kwargs):
+        errors = ["Existing filter error"]
+        if scenario == "new_content" and branch_id:
+            errors.append("New filter error")
+        return {"content": [{"document_id": "doc", "identifier": "doc",
+                             "dashboard_filter_issues": [{"filter_name": "filter", "issues": errors}]}]}
+
+    client.get_model_yaml = yaml_snapshot
+    client.validate_model = model
+    client.validate_content = content
+    monkeypatch.setattr("omniflow.cli._client_and_branch_for_context", lambda *a, **kw: (client, "candidate-id"))
+    if scenario.startswith("stale") or scenario == "base_drift":
+        with pytest.raises(ConfigError) as caught:
+            _run_context(config=config, context=context, output_dir=root / ".omniflow")
+        assert caught.value.omniflow_progress.current == "candidate"
+        assert caught.value.omniflow_progress.evidence()["validation_complete"] is False
+    else:
+        report, code = _run_context(config=config, context=context, output_dir=root / ".omniflow")
+        assert code == int(scenario in {"new_model", "new_content"})
+        assert report["validation_complete"] is True
+        assert report["candidate_verification"]["status"] == "verified"
+        assert len(base_reads) == 2
+        assert report["summary"]["existing_issues"] == 2
+        assert report["summary"]["blocking_issues"] == int(scenario in {"new_model", "new_content"})
+
+
 @pytest.mark.parametrize("target", ["development", "production"])
 @pytest.mark.parametrize("orientation", ["name_to_path", "path_to_name"])
 def test_two_environment_run_validates_only_selected_candidate(promotion, monkeypatch, target, orientation):
@@ -159,7 +222,7 @@ def test_metadata_failure_keeps_environment_and_incomplete_candidate_evidence(pr
     root, _, _, head_text, _ = promotion
     client = TargetClient("prod-model", "main", True, head_text)
     client.view_names = {"PRIVATE-METADATA": "missing.view"}
-    config = load_config(None)
+    config = _to_config({}, None)
     config.security.redaction_level = redaction
     with capture_private_reports() as receipts, \
          mock.patch("omniflow.cli.OmniClient", return_value=client), \
@@ -236,7 +299,7 @@ def test_wrong_target_credential_never_falls_back_to_another_environment(promoti
 
 @pytest.mark.parametrize("setting", ["breaking_change_hold", "dbt_sync"])
 def test_repository_wide_sync_policy_rejected_before_api_use(setting, tmp_path):
-    config = load_config(None)
+    config = _to_config({}, None)
     getattr(config, setting).enabled = True
     context = ModelContext("https://prod.example", "model", "omni/shared", environment="production")
     with mock.patch("omniflow.cli.OmniClient") as client, pytest.raises(SecurityPolicyError):

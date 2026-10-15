@@ -6,7 +6,7 @@ inputs:
     required: false
     default: validate
   config:
-    description: Path to .omniflow.yml
+    description: Required policy file path (default repository-root .omniflow.yml, separate from the GitHub workflow). Must exist on the trusted base for PR validation.
     required: false
     default: .omniflow.yml
   omni-api-key:

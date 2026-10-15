@@ -12,6 +12,8 @@ from copy import deepcopy
 from typing import Any
 from uuid import uuid4
 
+from .exceptions import MissingPolicyError
+
 _receipt: ContextVar[list | None] = ContextVar("omniflow_private_receipt", default=None)
 _run_reference: ContextVar[str | None] = ContextVar("omniflow_run_reference", default=None)
 
@@ -50,6 +52,7 @@ VALIDATORS = frozenset({
 })
 TYPES = frozenset({
     "content_evidence_unavailable", "content_validation_issue", "validation_execution_failed",
+    "model_evidence_unavailable",
     "internal_execution_failure", "dependency_coverage_gap", "candidate_verification_failed",
     "breaking_change_sync_state_unavailable", "breaking_change_dbt_overlap",
     "breaking_change_pending_deployment", "dbt_exposures", "model_validation_issue",
@@ -69,7 +72,15 @@ REASONS = frozenset({
     "empty_model_inventory", "unsupported_changed_path", "authored_content_changed", "invalid_git_inventory",
     "unsupported_git_entry", "incomplete_git_snapshot", "ambiguous_yaml_key", "duplicate_yaml_key",
     "empty_yaml_document", "external_dependency_unverified", "invalid_or_unsupported_yaml",
-    "unsupported_yaml_construct",
+    "unsupported_yaml_construct", "missing_policy_config",
+    "model_comparison_unavailable", "ambiguous_model_identity", "content_comparison_unavailable",
+})
+CANDIDATE_REASONS = frozenset({
+    "api_snapshot_unavailable", "content_mismatch", "duplicate_git_path", "empty_git_snapshot",
+    "file_inventory_mismatch", "git_snapshot_unavailable", "incomplete_git_snapshot", "invalid_api_snapshot",
+    "invalid_git_inventory", "invalid_pr_revision", "invalid_snapshot_encoding", "missing_candidate_branch",
+    "missing_pr_revision", "snapshot_limit_exceeded", "unsafe_git_entry", "unsafe_snapshot_path",
+    "changed_during_validation", "verification_unavailable",
 })
 ENUMS = {
     "validator": VALIDATORS, "type": TYPES, "issue_type": {"content", "dashboard_filter", "query"},
@@ -78,7 +89,7 @@ ENUMS = {
     "risk_level": {"info", "warning", "governance_sensitive", "security_sensitive", "breaking"},
     "policy_decision": {"pass", "fail", "skipped"},
     "operation": {"validation", "dbt_impact", "dbt_sync", "ai_repair", "ai_repair_beta"},
-    "validation_scope": {"branch", "base"}, "state": {"new", "existing", "resolved"},
+    "validation_scope": {"branch", "base"}, "state": {"new", "existing", "resolved", "improved"},
     "status": {"completed", "failed", "not_run", "disabled", "skipped", "passed", "unknown",
                "verified", "unverified", "pending_recheck", "not_applicable", "success", "refused",
                "proposed", "rolled_back", "manual_review_required", "available", "unavailable", "committed",
@@ -87,12 +98,14 @@ ENUMS = {
     "post_sync_validation_status": {"not_run", "failed", "passed"},
     "coverage_status": {"available", "partial", "unavailable", "unknown"},
     "comparison_mode": {"all_issues", "new_only", "unknown"},
-    "comparison_status": {"complete", "ambiguous", "baseline_unavailable", "unavailable"},
-    "comparison_source": {"base_model", "history"},
+    "comparison_status": {"complete", "ambiguous", "baseline_unavailable", "unavailable", "not_applicable"},
+    "comparison_source": {"base_model", "history", "none"},
     "content_health": {"no_issues_in_scope", "issues_in_scope", "unknown"},
+    "model_health": {"no_issues_in_scope", "issues_in_scope", "unknown"},
     "regression_status": {"new_issues_detected", "no_new_issues_detected", "unknown"},
     "classification": {"comment_only", "meaningful", "unverified", "disabled"},
     "reason_code": REASONS,
+    "candidate_reason": CANDIDATE_REASONS,
     "metadata_stage": {"view_names"},
     "metadata_reason": {"unsupported_orientation", "duplicate_name", "duplicate_path", "invalid_identity",
                         "non_view_identity", "incomplete_identity"},
@@ -102,6 +115,7 @@ ENUMS = {
 }
 COUNTS = frozenset({
     "exit_code", "total_issues", "errors", "warnings", "new_issues", "existing_issues", "resolved_issues",
+    "blocking_issues", "improved_issues",
     "baseline_issues", "current_issues", "comparison_ambiguous_issues", "model_count", "dbt_file_count",
     "total_records", "total_exposures", "unmapped_dashboards", "coverage_gaps", "checks_completed",
     "checks_failed", "checks_not_run", "checks_disabled", "file_count", "changed_lines",
@@ -119,7 +133,7 @@ OBJECTS = frozenset({
 })
 LISTS = frozenset({
     "issues", "models", "model_reports", "check_reports", "check_states",
-    "new_issue_samples", "existing_issue_samples", "resolved_issue_samples",
+    "new_issue_samples", "existing_issue_samples", "resolved_issue_samples", "improved_issue_samples",
 })
 EXIT_REASONS = {
     0: "success", 1: "validation failed", 2: "configuration error", 3: "authorization error",
@@ -166,17 +180,33 @@ def public_diagnostic(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _finding_message(issue: dict[str, Any]) -> str:
+    noun = "model" if issue.get("validator") == "model" else "content"
+    if issue.get("reason_code") == "missing_policy_config":
+        return MissingPolicyError.MESSAGE
     if issue.get("reason_code") == "empty_api_response":
-        return "Omni API returned an empty response; validation could not complete. This is not a content finding."
+        return f"Omni API returned an empty response; validation could not complete. This is not a {noun} finding."
     if issue.get("reason_code") == "invalid_json_response":
-        return "Omni API returned invalid JSON; validation could not complete. This is not a content finding."
+        return f"Omni API returned invalid JSON; validation could not complete. This is not a {noun} finding."
+    if issue.get("type") == "candidate_verification_failed":
+        return ("The selected Omni scope could not be verified against the corresponding pull-request Git revision. "
+                "Check branch/base synchronization and the reason category, then rerun. Do not bypass this check.")
+    if issue.get("reason_code") == "content_comparison_unavailable":
+        return ("Content validation comparison could not be established; this does not prove a new content defect. "
+                "Restore complete, unambiguous baseline and branch evidence before rerunning.")
     if issue.get("type") == "content_evidence_unavailable":
         return ("Content Validator returned an unsupported issue structure; comparison is unavailable. "
                 "This does not establish a new content defect. Review the reason code and the same scope in Omni.")
+    if issue.get("reason_code") in {"model_comparison_unavailable", "ambiguous_model_identity"}:
+        return ("Model validation comparison could not be established; this does not prove a new model defect. "
+                "Restore complete, unambiguous baseline and branch evidence before rerunning.")
     if issue.get("state") == "existing":
-        return "Existing content issue; blocking status follows the configured comparison policy."
+        return f"Existing {noun} issue; blocking status follows the configured comparison policy."
     if issue.get("state") == "resolved":
-        return "Previously reported content issue is resolved."
+        return f"Previously reported {noun} issue is resolved."
+    if issue.get("state") == "improved":
+        return f"Previously reported {noun} issue has improved; current severity remains visible."
+    if issue.get("type") == "model_validation_issue":
+        return "Model validation finding; review new-versus-existing counts and validate the same model branch in Omni."
     if issue.get("type") == "content_validation_issue":
         if issue.get("issue_type") == "dashboard_filter":
             return "Dashboard-filter validation finding; inspect Content Validator in Omni for the same model and branch."
@@ -189,6 +219,6 @@ def safe_exception_message(exc: Exception) -> str:
     category = EXIT_REASONS.get(code, "internal tool error") if type(code) is int else "internal tool error"
     reason = getattr(exc, "reason_code", None)
     suffix = f" ({reason})" if isinstance(reason, str) and reason in REASONS else ""
-    if isinstance(reason, str) and reason in {"empty_api_response", "invalid_json_response"}:
+    if isinstance(reason, str) and reason in {"empty_api_response", "invalid_json_response", "missing_policy_config"}:
         return f"{_finding_message({'reason_code': reason})} Reason: {reason}."
     return f"OmniFlow {category}{suffix}. Review the sanitized report and trusted configuration; details withheld."

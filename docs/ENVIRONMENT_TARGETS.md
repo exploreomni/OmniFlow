@@ -17,6 +17,11 @@ OmniFlow does not configure these settings or refresh follower schemas for you.
 
 ## 1. Register the actual targets
 
+First copy the canonical [`.omniflow.yml`](../.omniflow.yml) into the customer
+repository root on **both protected base branches** through the reviewed bootstrap
+process. This required policy is separate from the GitHub workflow. A missing policy
+or one present only on the PR head cannot validate that PR; missing policy exits `2`.
+
 Review the real model IDs, hostnames, repository URL, base branches and model path
 with the model owner. Do not assume the same model ID represents both environments.
 Commit this complete non-secret registry to **both protected base branches** through
@@ -63,7 +68,7 @@ reviewed bootstrap PRs before enabling version 2 validation:
   environment or omit other affected models.
 - Version 2 requires `--auto`. Remove legacy explicit host, model, path or branch
   overrides from policy, environment variables and CLI arguments.
-- There is no initialization command: bootstrap is a reviewed registry/workflow edit.
+- There is no initialization command: bootstrap is a reviewed registry/policy/workflow edit.
   `doctor --auto` checks access and settings; it does not create registrations.
 
 Keep the complete registry synchronized across the protected branches. A release

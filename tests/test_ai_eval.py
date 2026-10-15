@@ -8,7 +8,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 from omniflow.cli import cmd_run
-from omniflow.config import load_config
+from omniflow.config import _to_config
 from omniflow.diagnostics import capture_private_reports
 from omniflow.discovery import ModelContext
 from omniflow.exceptions import ConfigError, OmniAPIError, SecurityPolicyError
@@ -233,7 +233,7 @@ class AiEvalCliTests(unittest.TestCase):
     """Exercise the actual model orchestration and every final public artifact."""
 
     def run_cli(self, client, *, max_samples=20, fail_on_regression=True, contexts=None, prompt_sets=None, retain=True):
-        config = load_config(None)
+        config = _to_config({}, None)
         for check in (config.content_validation, config.model_validation, config.semantic_lint, config.contracts):
             check.enabled = False
         config.ai_eval.enabled = True
@@ -450,7 +450,7 @@ class AiEvalCliTests(unittest.TestCase):
 
 class AiEvalConfigTests(unittest.TestCase):
     def test_disabled_by_default(self, tmp_path=None):
-        config = load_config(None)
+        config = _to_config({}, None)
         self.assertFalse(config.ai_eval.enabled)
         self.assertEqual(config.ai_eval.prompt_sets, [])
         self.assertTrue(config.ai_eval.fail_on_regression)

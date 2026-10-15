@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from ..security import secure_write_text
+from .issue_policy import is_blocking
 
 
 def to_sarif(report: dict[str, Any]) -> dict[str, Any]:
@@ -20,9 +21,9 @@ def to_sarif(report: dict[str, Any]) -> dict[str, Any]:
             {
                 "ruleId": rule_id,
                 "level": level,
+                "kind": "fail" if is_blocking(issue) else "informational",
                 "properties": {
-                    "policy_blocking": bool(issue.get("active", True))
-                    and (issue.get("severity") == "error" or issue.get("blocking") is True),
+                    "policy_blocking": is_blocking(issue),
                 },
                 "message": {"text": issue.get("message") or issue.get("summary") or "OmniFlow issue"},
                 "locations": [

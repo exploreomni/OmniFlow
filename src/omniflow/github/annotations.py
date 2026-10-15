@@ -2,18 +2,24 @@ from __future__ import annotations
 
 from typing import Any
 
+from ..reporting.issue_policy import is_blocking
+
 
 def annotation_lines(issues: list[dict[str, Any]]) -> list[str]:
     lines = []
     for issue in issues:
-        if not issue.get("active", True):
+        if issue.get("active") is False:
             continue
         severity = issue.get("severity")
         level = "error" if severity == "error" else ("warning" if severity in {"warning", "warn"} else "notice")
+        if severity == "error" and not is_blocking(issue):
+            level = "notice"
         file_path = _escape_property(issue.get("file") or "omniflow")
         message = _escape_data(issue.get("message") or issue.get("summary") or "OmniFlow issue")
-        if issue.get("blocking") is True:
+        if is_blocking(issue):
             message = f"Blocks under configured policy: {message}"
+        elif issue.get("blocking") is False:
+            message = f"Does not block under configured policy: {message}"
         lines.append(f"::{level} file={file_path},line=1::{message}")
     return lines
 

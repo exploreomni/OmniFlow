@@ -116,6 +116,10 @@ jobs:
           python-version: "3.11"
       - name: Exercise automatic non-Omni routing without a secret
         uses: ./
+        with:
+          # Tool-only, secret-free fixture: the bootstrap PR's base may not yet
+          # contain policy. Consumer workflows retain trusted-base relative paths.
+          config: ${{ github.workspace }}/.omniflow.yml
       - name: Verify public-only skip artifacts
         run: |
           test -f .omniflow/public/report.json

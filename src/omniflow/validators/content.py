@@ -605,9 +605,23 @@ def run_content_validation(
         "baseline_unavailable" if not baseline_available else "ambiguous" if ambiguous_issues else "complete"
     )
     report_new = [_report_issue(item, state="new", severity="error") for item in new_items]
-    existing_severity = "info" if fail_on_new_only else "error"
-    report_existing = [_report_issue(item, state="existing", severity=existing_severity) for item in existing_items]
+    report_existing = [_report_issue(item, state="existing", severity="error") for item in existing_items]
     report_resolved = [_report_issue(item, state="resolved", severity="info", active=False) for item in resolved_items]
+    for issue in report_new:
+        issue["blocking"] = True
+    for issue in report_existing:
+        issue["blocking"] = not fail_on_new_only
+    for issue in report_resolved:
+        issue["blocking"] = False
+    evidence = []
+    if fail_on_new_only and comparison_status != "complete":
+        evidence.append({
+            "validator": "content", "type": "content_evidence_unavailable",
+            "reason_code": "content_comparison_unavailable", "comparison_status": comparison_status,
+            "comparison_mode": comparison_mode, "regression_status": "unknown",
+            "severity": "error", "blocking": True, "active": True, "coverage_complete": False,
+            "message": "Content comparison evidence is unavailable or ambiguous; no regression conclusion can be made.",
+        })
     for issue in [*report_new, *report_existing]:
         issue["validation_scope"] = "branch" if branch_id else "base"
     if comparison_source == "base_model":
@@ -638,7 +652,9 @@ def run_content_validation(
         ),
         "history_status": history_status,
         "comparison_ambiguous_issues": ambiguous_issues,
-        "issues": [*report_new, *report_existing, *report_resolved],
+        "blocking_issues": len(report_new) + (0 if fail_on_new_only else len(report_existing)) + len(evidence),
+        "validation_complete": not evidence,
+        "issues": [*report_new, *report_existing, *report_resolved, *evidence],
         "new_issue_samples": report_new[:max_samples],
         "existing_issue_samples": report_existing[:max_samples],
         "resolved_issue_samples": report_resolved[:max_samples],
@@ -657,7 +673,7 @@ def run_content_validation(
             "issues": normalized,
         },
     )
-    exit_code = 1 if (len(new_items) if fail_on_new_only else len(normalized)) > 0 else 0
+    exit_code = 4 if evidence else 1 if (len(new_items) if fail_on_new_only else len(normalized)) > 0 else 0
     return report, exit_code
 
 

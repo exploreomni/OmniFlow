@@ -5,19 +5,24 @@ from pathlib import Path
 from typing import Any
 
 from ..security import redact, secure_write_text
+from .issue_policy import is_blocking
 
 
 def _render_minimal_diagnostic(report: dict[str, Any]) -> str:
     summary = report.get("summary", {})
+    findings = report.get("issues", [])
+    blocking_count = sum(is_blocking(finding) for finding in findings)
     lines = [
         "# OmniFlow", "", "## Decision", "",
         f"**{_decision_label(report.get('policy_decision', 'unknown'), operation=report.get('operation', 'validation'))}**",
         "", f"- Exit reason: `{_safe_code(report.get('exit_code_reason', 'unknown'))}`",
         f"- Run reference: `{_safe_code(report.get('run_reference', 'unavailable'))}`",
         f"- Validation complete: `{str(report.get('validation_complete', False)).lower()}`",
+        f"- Blocking issues (all checks): `{blocking_count}`",
         f"- Recorded errors: `{summary.get('errors', 0)}`; warnings: `{summary.get('warnings', 0)}`",
         "", "This is a minimal diagnostic report. Customer text and resource identities are omitted.",
-        "A passing regression check does not establish that all content is healthy.",
+        "Health counts and policy blockers are different. A passing regression check does not establish "
+        "that all model or content issues are resolved.",
     ]
     classification = report.get("change_classification")
     if isinstance(classification, dict):
@@ -39,52 +44,86 @@ def _render_minimal_diagnostic(report: dict[str, Any]) -> str:
             lines.append(f"- `{reference}`: execution evidence unavailable.")
         checks = context.get("check_reports") or [context]
         for check in checks:
-            if check.get("validator") != "content":
+            validator = check.get("validator")
+            if validator not in {"content", "model"}:
                 continue
-            lines.extend(["", f"### Content Comparison — {reference}", ""])
-            lines.extend([_content_outcome(check), ""])
-            for key in ("comparison_mode", "comparison_status", "content_health", "regression_status",
-                        "baseline_issues", "current_issues", "new_issues", "existing_issues", "resolved_issues"):
+            title = "Content" if validator == "content" else "Model"
+            lines.extend(["", f"### {title} Comparison — {reference}", ""])
+            lines.extend([_comparison_outcome(check, validator), ""])
+            health_summary = check.get("summary")
+            if isinstance(health_summary, dict):
+                lines.append(f"- Current health errors: `{health_summary.get('errors', 0)}`; "
+                             f"warnings: `{health_summary.get('warnings', 0)}`")
+            for key in ("comparison_mode", "comparison_status", "comparison_source", f"{validator}_health",
+                        "regression_status", "blocking_issues", "baseline_issues", "current_issues",
+                        "new_issues", "existing_issues", "resolved_issues", "improved_issues"):
                 if key in check:
                     value = "unknown" if check[key] is None else str(check[key])
                     lines.append(f"- {key.replace('_', ' ')}: `{_safe_code(value)}`")
     lines.extend(["", "## Findings", ""])
-    findings = report.get("issues", [])
     if not findings:
         lines.append("No findings recorded. Check execution completeness before interpreting this as a pass.")
-    for index, finding in enumerate(findings[:20], 1):
+    # Sample only after prioritizing blockers; a large unchanged baseline must
+    # never hide the new issue or evidence failure that actually blocks the PR.
+    ordered_findings = sorted(findings, key=lambda issue: (not is_blocking(issue), issue.get("active") is False))
+    for index, finding in enumerate(ordered_findings[:20], 1):
         lines.append(f"{index}. `{_safe_code(finding.get('validator', 'execution'))}` / "
                      f"`{_safe_code(finding.get('type', 'omniflow_finding'))}` "
                      f"({ _safe_code(finding.get('severity', 'unknown')) }): "
                      f"{_safe_text(finding.get('message', 'Details withheld.'))}")
-        for key in ("context_reference", "validation_scope", "state", "reason_code", "comparison_mode",
-                    "comparison_status", "content_health", "regression_status"):
+        for key in ("context_reference", "validation_scope", "state", "reason_code", "candidate_reason", "comparison_mode",
+                    "comparison_status", "content_health", "model_health", "regression_status", "blocking", "active"):
             if key in finding:
-                lines.append(f"   - {key.replace('_', ' ')}: `{_safe_code(finding[key])}`")
+                value = str(finding[key]).lower() if type(finding[key]) is bool else finding[key]
+                lines.append(f"   - {key.replace('_', ' ')}: `{_safe_code(value)}`")
     if len(findings) > 20:
         lines.append("Additional safe findings are available in the JSON report.")
     lines.extend([
         "", "## Next Steps", "",
         "- For readable content findings, inspect Content Validator in Omni for the same model, branch, "
         "and visibility scope. Sensitive object details are intentionally omitted here.",
-        "- Under new-only policy, unchanged matched baseline issues are informational; new or increased "
-        "issues block. Under all-issues policy, current issues block even if they already existed.",
+        "- For model findings, validate the same model branch in Omni. Current errors remain health findings "
+        "even when matched baseline issues do not block the PR.",
+        "- Under new-only policy, unchanged matched baseline issues are nonblocking; new, increased, or worsened "
+        "issues follow severity policy. Under all-issues policy, current issues follow severity policy even "
+        "if they already existed. Model warnings block only when warning gating is enabled.",
         "- For unavailable evidence, resolve the response or access problem and rerun. Do not treat "
         "missing evidence as a clean baseline or disable validation to obtain a pass.",
     ])
     return "\n".join(lines) + "\n"
 
 
-def _content_outcome(check: dict[str, Any]) -> str:
-    if check.get("comparison_mode") == "all_issues" and check.get("current_issues", 0) > 0:
-        return "Content issues were found. The configured all-issues policy blocks current issues, including existing ones."
+def _comparison_outcome(check: dict[str, Any], validator: str) -> str:
+    title = "Content" if validator == "content" else "Model"
+    noun = title.lower()
+    mode = check.get("comparison_mode")
+    blocking = check.get("blocking_issues")
+    if type(blocking) is not int:
+        if "issues" in check:
+            blocking = sum(is_blocking(issue) for issue in check["issues"])
+        elif validator == "content":
+            # Compatibility for earlier content-only reports without explicit
+            # blocking counts. Model warning policy cannot be inferred this way.
+            blocking = check.get("new_issues" if mode == "new_only" else "current_issues", 0)
+    if mode == "all_issues" and check.get("current_issues", 0) > 0:
+        if blocking:
+            return (f"{title} issues were found. The configured all-issues policy blocks current issues, "
+                    "including existing ones.")
+        return f"Current {noun} issues remain; none are recorded as blocking under the configured severity policy."
+    if (mode == "all_issues" and check.get("validation_complete") is True
+            and check.get("current_issues") == 0 and blocking == 0
+            and check.get(f"{validator}_health") == "no_issues_in_scope"):
+        return (f"Current {noun} health check found no current issues. "
+                "This all-issues policy does not require a regression comparison.")
     if check.get("comparison_status") == "complete":
         if check.get("new_issues", 0) > 0:
-            return "New content issues were detected relative to the baseline; this check blocks the PR."
-        if check.get("existing_issues", 0) > 0:
+            if blocking:
+                return f"New {noun} issues were detected relative to the baseline; this check blocks the PR."
+            return f"New {noun} issues were detected, but they do not block under the configured severity policy."
+        if check.get("current_issues", 0) > 0:
             return "No new issues were detected. Existing issues remain; the new-only regression check passes."
-        return "No current content issues were found in the evaluated scope."
-    return "A complete baseline comparison is unavailable. Do not infer that the PR introduced a content defect."
+        return f"No current {noun} issues were found in the evaluated scope."
+    return f"A complete baseline comparison is unavailable. Do not infer that the PR introduced a {noun} defect."
 
 
 def render_markdown_report(report: dict[str, Any]) -> str:
@@ -701,7 +740,7 @@ def _reviewer_actions(
 
 
 def _is_blocking(issue: dict[str, Any]) -> bool:
-    return issue.get("active", True) and (issue.get("severity") == "error" or issue.get("blocking") is True)
+    return is_blocking(issue)
 
 
 def _uncertain_warning_lines(issues: list[dict[str, Any]]) -> list[str]:

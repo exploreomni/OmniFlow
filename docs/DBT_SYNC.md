@@ -15,6 +15,8 @@ OmniFlow can refresh Omni after a production dbt deployment so new dbt metadata 
 9. After a successful refresh, OmniFlow reruns model validation, Content Validator, semantic lint, contract impact, and any enabled dbt exposure checks for every affected configured model.
 10. GitHub uploads redacted reports and evidence even when refresh or validation fails.
 
+Post-sync model and content validation enforce strict health, even when PR policy has either `fail_on_new_only` switch enabled. Existing failures cannot be suppressed by comparing the refreshed base with itself or by reusing history. Model warnings still follow `fail_on_warnings`.
+
 OmniFlow does not run dbt itself. The customer's reviewed production dbt command remains the source of truth for whether warehouse deployment succeeded.
 
 ## Enable The Policy

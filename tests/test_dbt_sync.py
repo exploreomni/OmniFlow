@@ -373,11 +373,13 @@ class DbtSyncTests(unittest.TestCase):
                     finally:
                         os.chdir(original)
 
+    @mock.patch.dict(os.environ, {"GITHUB_EVENT_NAME": "", "GITHUB_BASE_REF": ""})
     def test_dbt_sync_defaults_off_and_mixed_connection_branches_fail_before_refresh(self):
         original = os.getcwd()
         with tempfile.TemporaryDirectory() as tmp:
             os.chdir(tmp)
             try:
+                Path(".omniflow.yml").write_text("checks: {}\n", encoding="utf-8")
                 self.assertEqual(main(["dbt", "sync", "--auto"]), 2)
                 report = json.loads(Path(".omniflow/public/report.json").read_text(encoding="utf-8"))
                 self.assertEqual(report["exit_code"], 2)

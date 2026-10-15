@@ -22,9 +22,13 @@ The AI Repair development scaffold is outside the supported customer security bo
 
 The privileged `pull_request_target` workflow checks out the trusted base revision. OmniFlow reads `.omni/flow.json` and `.omniflow.yml` from that base revision and obtains changed filenames through GitHub's API. It does not check out or execute the proposed pull-request revision.
 
+The root `.omniflow.yml` policy is required and is distinct from `.github/workflows/omniflow.yml`. Bootstrap it on the protected base before PR validation. Missing policy fails with configuration exit code `2`; neither PR-head-only policy nor environment/identity overrides can substitute for it. Customer PR workflows must use repository-relative custom configuration paths to retain the trusted-base lookup. Absolute paths read a local file directly and are reserved for explicitly trusted local use, not proposed PR policy.
+
 The pull-request description is untrusted. An optional marker may select a model, path, and branch only when each value agrees with trusted metadata and GitHub event context. It cannot supply an Omni host.
 
-Non-Omni pull requests return a successful `skipped` decision. Fork pull requests do not receive the Omni PAT. Fork changes to Omni files fail closed and require a maintainer-controlled same-repository branch for full validation.
+New-only PR model/content validation requires immutable Git base/head evidence and verifies authored live base/candidate YAML against the corresponding revisions before and after checks. Missing or mismatched snapshots block rather than selecting another baseline. This is sampled consistency verification, not an atomic lock over live content/drafts or a guarantee of exhaustive API validation depth. Orchestrated no-branch, post-sync, and repair verification remain strict-health checks, not self-comparisons.
+
+With valid trusted policy, non-Omni pull requests return a successful `skipped` decision unless an enabled optional check applies. Fork pull requests do not receive the Omni PAT. Fork changes to Omni files fail closed and require a maintainer-controlled same-repository branch for full validation.
 
 ## Credentials
 

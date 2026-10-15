@@ -131,7 +131,7 @@ Public repair output follows [Diagnostic Privacy](DIAGNOSTIC_PRIVACY.md): fixed 
 7. It submits one bounded metadata-only prompt to the Omni AI job API.
 8. It polls only job state. On timeout, it requests cancellation before any rollback.
 9. It fetches authored YAML again and rejects additions, deletions, unrelated files, oversized changes, secrets, SQL, data-source, access, visibility, ownership, and governance changes.
-10. It forces model validation, then reruns configured content validation, semantic lint, semantic diff, downstream contracts, and optional dbt exposures.
+10. It forces model validation, then reruns configured content validation, semantic lint, semantic diff, downstream contracts, and optional dbt exposures. Model/content verification uses strict health, not the PR new-only switches or historical suppression; existing model errors cannot be accepted as a successful repair. Model warnings follow `fail_on_warnings`.
 11. It rechecks that the branch did not change during validation.
 12. It updates the Git-connected branch using `require_branch_exists: true` only after all gates pass.
 13. GitHub shows the resulting commit for human review. Ordinary required checks and approvals still govern merge.
