@@ -247,6 +247,10 @@ def test_grouped_filter_api_to_cli_keeps_all_shareable_outputs_minimal(
 ):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    # This fixture covers API-to-report privacy, not PR Git provenance. Keep
+    # annotation output enabled without inheriting the hosting CI pull request.
+    # Real Git snapshot verification is covered in test_environment_validation.
+    monkeypatch.delenv("GITHUB_EVENT_NAME", raising=False)
     config = _to_config({}, None)
     config.content_validation.fail_on_new_only = True
     config.security.redaction_level = level
