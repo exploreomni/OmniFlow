@@ -16,7 +16,8 @@ Maintainers will review complete reports on a best-effort basis. No service-leve
 - Optional dbt synchronization uses a separate `OMNIFLOW_SYNC_API_KEY`, rejects pull requests and non-base branches, and never exposes that token to pull-request validation or AI repair modes. The protected sync process uses it for the refresh and enabled post-sync read checks.
 - Pull-request policy and model host metadata are read from the trusted base branch.
 - The example privileged workflow does not check out or execute pull-request code; changed filenames are read through GitHub's API.
-- Public artifacts are redacted; detailed model and dependency artifacts are deleted by default and remain local when retention is explicitly enabled.
+- Standard reports use diagnostic schema 2: fixed categories/statuses, bounded counts, boolean flags, and generated anonymous references. Both standard and strict settings exclude customer text, direct resource IDs/paths, and Git/Action references; neither setting is a comprehensive PII/PHI/PCI detector or compliance guarantee.
+- Detailed model and dependency artifacts are deleted by default and remain restricted when retention is explicitly enabled. Upload only the explicitly listed supported diagnostic files, never a whole output directory or arbitrary stale files. Verify model/branch/job/commit identity through trusted workflow and authorized private evidence, not the shareable report.
 - Core validation does not request warehouse query execution and must not persist raw query results. Optional AI eval has a separate execution contract and must not inherit a no-query/no-cost guarantee from core validation.
 
-See the README for the current live-testing limitations and least-privilege guidance.
+See [Diagnostic Privacy](docs/DIAGNOSTIC_PRIVACY.md) for the schema boundary, private support handoff, and historical-artifact limitations, and the README for live-testing and least-privilege guidance.

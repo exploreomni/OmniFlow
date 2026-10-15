@@ -277,7 +277,8 @@ class CliOrchestrationTests(unittest.TestCase):
             )
             report = (Path(tmp) / "public/report.json").read_text(encoding="utf-8")
         self.assertIn("security policy violation", report)
-        self.assertIn("unsafe marker", report)
+        self.assertNotIn("unsafe marker", report)
+        self.assertIn("diagnostic_schema_version", report)
 
 
 if __name__ == "__main__":

@@ -56,9 +56,8 @@ def render_repair_markdown(report: dict[str, Any]) -> str:
         "",
         f"**Status:** `{status}`",
         f"**Policy decision:** `{_safe_text(report.get('policy_decision') or 'fail')}`",
-        f"**Model:** `{_safe_text(report.get('model_id') or 'unknown')}`",
-        f"**Branch:** `{_safe_text(report.get('branch_name') or 'unknown')}`",
-        f"**Head SHA:** `{_safe_text(report.get('head_sha') or 'unknown')}`",
+        "Resource identities and authored text are omitted from shareable diagnostics.",
+        f"**Run reference:** `{_safe_text(report.get('run_reference') or 'unavailable')}`",
         "",
         message,
         "",
@@ -66,7 +65,10 @@ def render_repair_markdown(report: dict[str, Any]) -> str:
     change = report.get("change_summary") if isinstance(report.get("change_summary"), dict) else {}
     modified = change.get("modified_files") if isinstance(change.get("modified_files"), list) else []
     lines.extend(["## Reviewed Changes", ""])
-    if modified:
+    if change.get("modified_file_count"):
+        lines.append(f"- Modified file count: `{change['modified_file_count']}`")
+        lines.append(f"- Changed lines: `{int(change.get('changed_lines') or 0)}`")
+    elif modified:
         lines.extend(f"- `{_safe_text(file_name)}`" for file_name in modified)
         lines.append(f"- Changed lines: `{int(change.get('changed_lines') or 0)}`")
     else:

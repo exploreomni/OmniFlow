@@ -16,6 +16,7 @@ PROMPT = "CONFIDENTIAL-SYNTHETIC-EVAL-PROMPT"
 
 class Handler(BaseHTTPRequestHandler):
     runs: dict[str, dict] = {}
+    requests: list[dict] = []
 
     def log_message(self, *args):
         pass
@@ -31,6 +32,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/health":
             self.reply({"ready": True})
+        elif self.path == "/fixture-evidence":
+            self.reply({"requests": self.requests, "runs": self.runs})
         elif self.path == "/api/v1/ai/eval/prompt-sets/eval-smoke-set":
             self.reply(
                 {
@@ -52,6 +55,7 @@ class Handler(BaseHTTPRequestHandler):
             self.reply({"error": "fixture route not found"}, 404)
             return
         payload = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        self.requests.append(payload)
         branch_id = payload.get("run_config", {}).get("branch_id")
         run_id = "eval-smoke-branch-run" if branch_id else "eval-smoke-main-run"
         self.runs[run_id] = {
@@ -89,13 +93,31 @@ def main() -> None:
         root = Path(".omniflow")
         report = json.loads((root / "public/report.json").read_text())
         check = report["model_reports"][0]["check_reports"][0]
-        if report["policy_decision"] != "fail" or check["regressed_count"] != 1:
+        if report.get("diagnostic_schema_version") != 2:
+            raise SystemExit("Action did not emit minimal diagnostic schema 2")
+        if report["policy_decision"] != "fail" or check["regressed_count"] != 1 or report["exit_code"] != 1:
             raise SystemExit("Enabled Action did not gate on the complete regression count")
-        if check["issues"][0]["prompt_ids"] != []:
-            raise SystemExit("Zero sampling was not respected")
+        if check.get("validator") != "ai_eval" or not check.get("issues"):
+            raise SystemExit("Enabled Action omitted the AI eval finding")
+        # Exact model/prompt-set/branch provenance is checked against actual
+        # synthetic API requests, never reconstructed from public diagnostics.
+        with urlopen(f"http://{HOST}:{PORT}/fixture-evidence", timeout=2) as response:  # nosec B310
+            evidence = json.load(response)
+        requests = evidence["requests"]
+        if len(requests) != 2 or any(item.get("prompt_set_id") != "eval-smoke-set" for item in requests):
+            raise SystemExit("Action did not request exactly the configured baseline/branch prompt set")
+        if [item.get("run_config", {}).get("branch_id") for item in requests] != [None, "eval-smoke-branch"]:
+            raise SystemExit("Action did not compare the expected main and branch scopes")
+        if any(run.get("model_id") != "eval-smoke-model" for run in evidence["runs"].values()):
+            raise SystemExit("Fixture returned unexpected model evidence")
+        private_markers = (
+            "CONFIDENTIAL", "private-id", "eval-smoke-model", "eval-smoke-branch",
+            "eval-smoke-set", "synthetic-prompt-id", '"prompt_ids"', '"prompt_set_id"',
+            '"model_id"', '"branch_id"', '"conversation_id"',
+        )
         for name in ("report.json", "report.md", "report.sarif", "junit.xml"):
             for path in (root / name, root / "public" / name):
-                if "CONFIDENTIAL" in path.read_text() or "private-id" in path.read_text():
+                if any(marker in path.read_text() for marker in private_markers):
                     raise SystemExit("Private eval content escaped to public output")
         if (root / "restricted").exists():
             raise SystemExit("Restricted eval detail was not cleaned")

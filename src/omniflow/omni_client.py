@@ -9,7 +9,7 @@ from typing import Any
 import requests
 
 from . import __version__
-from .exceptions import ConfigError, OmniAPIError, OmniAuthError
+from .exceptions import ConfigError, OmniAPIError, OmniAuthError, OmniResponseError
 from .model_response import normalize_model_response
 from .model_yaml import validate_editable_yaml_file_name
 from .security import redact, validate_base_url, validate_path_segment
@@ -688,15 +688,17 @@ def _bounded_response_json(response: Any) -> Any:
                     raise OmniAPIError("Omni API response exceeded the 64 MiB safety limit")
         except requests.RequestException as exc:
             raise OmniAPIError("Omni API response could not be read safely") from exc
+        if not body:
+            raise OmniResponseError("empty_api_response")
         try:
             return json.loads(body)
         except (UnicodeDecodeError, ValueError) as exc:
-            raise OmniAPIError("Omni API did not return valid JSON") from exc
+            raise OmniResponseError("invalid_json_response") from exc
 
     try:
         payload = response.json()
     except ValueError as exc:
-        raise OmniAPIError("Omni API did not return valid JSON") from exc
+        raise OmniResponseError("invalid_json_response") from exc
     try:
         encoded_size = len(json.dumps(payload, separators=(",", ":")).encode("utf-8"))
     except (TypeError, ValueError) as exc:

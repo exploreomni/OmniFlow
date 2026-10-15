@@ -237,6 +237,11 @@ def _redact_match(match: re.Match[str]) -> str:
 
 class RedactingFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
-        record.msg = redact(record.getMessage())
+        # HTTP libraries and exception tracebacks can carry business values or
+        # credentials in arbitrary formats. Public logs are not a DLP sink.
+        record.msg = "OmniFlow diagnostic event; detailed text withheld from public logs."
         record.args = ()
+        record.exc_info = None
+        record.exc_text = None
+        record.stack_info = None
         return True

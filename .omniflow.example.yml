@@ -11,6 +11,8 @@ checks:
   content_validation:
     enabled: true
     fail_on_new_only: true
+    # Optional explanatory classification only; never skips live validation.
+    # classify_comment_only: true
     labels:
       - Verified
       - Executive
@@ -75,6 +77,8 @@ reporting:
   output_dir: .omniflow
 
 security:
+  # Public diagnostics always use the minimal v2 allowlist. These legacy
+  # redaction options do not re-enable customer text in public output.
   redact_logs: true
   allow_raw_response_output: false
   max_report_samples: 20

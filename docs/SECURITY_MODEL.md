@@ -36,7 +36,7 @@ Post-deployment dbt sync uses `OMNIFLOW_SYNC_API_KEY`, exposed only to the `dbt-
 
 Omni documents that Organization API Keys have Organization Admin permissions. Use a PAT from a dedicated user whose access is limited to the models and content being validated. Omni tokens do not expire automatically, so maintainers must define rotation, revocation, and access-review procedures.
 
-OmniFlow rejects secret-like configuration keys and environment expansion of secret-like names. Logs, errors, public reports, Markdown, annotations, and support guidance redact credentials and common sensitive metadata.
+OmniFlow rejects secret-like configuration keys and environment expansion of secret-like names. The standard report path constructs a minimal allowlisted schema, and public failure messages/annotations use fixed vocabulary instead of customer-authored diagnostics. Legacy redaction helpers are not comprehensive PII, PHI, PCI, or credential detection. Separate approved handling is required for local/restricted evidence and any other workflow output.
 
 ## Network And Data Handling
 
@@ -44,11 +44,11 @@ OmniFlow sends authenticated requests only to the HTTPS origin in trusted metada
 
 The normal orchestrated validation client uses read-only GET operations. It does not query a warehouse, capture query results, merge pull requests, or write model YAML to Omni.
 
-The opt-in dbt sync client sends one non-idempotent POST to start a schema refresh and bounded GET requests to poll its job. The POST is never retried because a lost response could otherwise create duplicate jobs. The command rejects pull-request events, tags, unsupported GitHub events, and deployment branches that differ from trusted `base_branch`. It persists only normalized job metadata and never stores raw responses or warehouse results.
+The opt-in dbt sync client sends one non-idempotent POST to start a schema refresh and bounded GET requests to poll its job. The POST is never retried because a lost response could otherwise create duplicate jobs. The command rejects pull-request events, tags, unsupported GitHub events, and deployment branches that differ from trusted `base_branch`. Its normalized internal evidence includes the job identity; shareable reports expose only permitted status/count information, not job/model/branch identifiers. Raw responses and warehouse results are not stored by this client.
 
 Omni Git integration may commit system-generated refresh changes or require a separate pull request, depending on the connection's branch-based refresh and Git system-sync settings. Workflow path filters must include dbt sources and exclude generated Omni model paths to prevent refresh loops. OmniFlow does not approve or merge a system-sync pull request.
 
-The optional, disabled-by-default AI eval check preflights prompt-set/model ownership, starts a baseline/branch pair, and validates run identity while polling documented `/v1/ai/eval/runs` operations. Creation and cancellation POSTs are not retried. Known unfinished runs are reconciled and cancelled on handled failures; unresolved or ambiguous creation requires review. Immediate run journals and allowed per-prompt fields stay restricted. Public formats contain aggregates, fixed reason codes, and sampled opaque prompt IDs; prompt text, configured labels, judge errors, and conversation details never reach public output. See [AI Eval](AI_EVAL.md) for scoring, permissions, retention, and live-acceptance limits.
+The optional, disabled-by-default AI eval check preflights prompt-set/model ownership, starts a baseline/branch pair, and validates run identity while polling documented `/v1/ai/eval/runs` operations. Creation and cancellation POSTs are not retried. Known unfinished runs are reconciled and cancelled on handled failures; unresolved or ambiguous creation requires review. Immediate run journals and allowed per-prompt fields stay restricted. Public formats contain permitted counts, check/finding categories, and operational/cleanup flags; they exclude even opaque prompt IDs, as well as prompt text, configured labels, judge errors, and conversation details. See [AI Eval](AI_EVAL.md) for scoring, permissions, retention, and live-acceptance limits.
 
 The optional AI Repair path uses documented AI-job, YAML-write/delete, and Git-commit endpoints against an existing development branch. Omni documents that AI jobs may execute queries and does not expose a no-query switch on that endpoint. OmniFlow never calls the AI result stream, stores no result summary or raw query data, cancels a non-terminal job before rollback, rejects sensitive or out-of-scope YAML changes, reruns every configured gate, and never approves, merges, or deploys.
 
@@ -58,11 +58,13 @@ API responses, pagination, trusted files, YAML files, YAML totals, nesting, alia
 
 ## Artifacts
 
-Public reports remove credentials, raw payloads, emails, document URLs, and folder paths. Strict redaction additionally removes names, owners, labels, and free-text messages.
+Public report schema 2 permits only fixed categories/statuses/reason codes, bounded counts, boolean flags, and generated run/context references. It excludes customer text, direct resource IDs, authored paths, tenant URLs, and Git/Action references. Standard and strict settings use the same minimal public boundary; strict is not a separate route to safe disclosure. Unknown fields and values are omitted rather than serialized. This is data minimization, not a guarantee of legal compliance or a PII/PHI/PCI detection service. See [Diagnostic Privacy](DIAGNOSTIC_PRIVACY.md).
 
-Restricted YAML, dependency, semantic-diff, content, and contract files are deleted by default. When a local operator explicitly enables retention, OmniFlow creates owner-only directories and files. The official workflow uploads only the public directory and artifact manifest.
+Restricted YAML, dependency, semantic-diff, content, and contract files are deleted by default. When a local operator explicitly enables retention, OmniFlow creates owner-only directories and files. Reviewed workflows explicitly list supported public report filenames and the minimal artifact manifest; they must not upload an entire public/output directory or glob unknown stale files. Filesystem permissions do not protect an archive after it is uploaded to a broader audience.
 
-AI Repair keeps pre- and post-change YAML snapshots in process memory. Public repair evidence contains metadata and counts only. The AI prompt, authored YAML, AI result summary, chat URL, progress, error body, and query data are not persisted by OmniFlow.
+AI Repair keeps pre- and post-change YAML snapshots in process memory. Public repair evidence uses the same minimal schema; model/branch/job/commit identity must be verified from authorized private evidence and the actual Omni/Git state. The AI prompt, authored YAML, AI result summary, chat URL, progress, error body, and query data are not persisted by this repair path.
+
+Readiness and synchronization decisions use trusted, detailed internal evidence rather than public JSON. Generated context references are not credentials or attestations. Historical reports, logs, and artifacts created before schema 2 are not retroactively sanitized and require their own retention/access review.
 
 Do not retain restricted artifacts on a persistent or shared self-hosted runner. A self-hosted runner is outside the recommended alpha path unless it is isolated, ephemeral, access-controlled, and cleaned after every job.
 

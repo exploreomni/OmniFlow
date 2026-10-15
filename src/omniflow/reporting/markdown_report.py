@@ -7,7 +7,89 @@ from typing import Any
 from ..security import redact, secure_write_text
 
 
+def _render_minimal_diagnostic(report: dict[str, Any]) -> str:
+    summary = report.get("summary", {})
+    lines = [
+        "# OmniFlow", "", "## Decision", "",
+        f"**{_decision_label(report.get('policy_decision', 'unknown'), operation=report.get('operation', 'validation'))}**",
+        "", f"- Exit reason: `{_safe_code(report.get('exit_code_reason', 'unknown'))}`",
+        f"- Run reference: `{_safe_code(report.get('run_reference', 'unavailable'))}`",
+        f"- Validation complete: `{str(report.get('validation_complete', False)).lower()}`",
+        f"- Recorded errors: `{summary.get('errors', 0)}`; warnings: `{summary.get('warnings', 0)}`",
+        "", "This is a minimal diagnostic report. Customer text and resource identities are omitted.",
+        "A passing regression check does not establish that all content is healthy.",
+    ]
+    classification = report.get("change_classification")
+    if isinstance(classification, dict):
+        lines.extend([
+            "", "## PR Change Classification", "",
+            f"- Classification: `{_safe_code(classification.get('classification', 'unverified'))}`",
+            f"- Reason: `{_safe_code(classification.get('reason_code', 'unknown'))}`",
+            "- Content validation remains required: Git-only classification cannot verify live content or drafts.",
+        ])
+    contexts = report.get("model_reports") or [report]
+    lines.extend(["", "## Check Execution", ""])
+    for context in contexts:
+        reference = _safe_code(context.get("context_reference", "context"))
+        states = context.get("check_states", [])
+        for state in states:
+            lines.append(f"- `{reference}` / `{_safe_code(state.get('validator', 'unknown'))}`: "
+                         f"`{_safe_code(state.get('status', 'unknown'))}`")
+        if not states:
+            lines.append(f"- `{reference}`: execution evidence unavailable.")
+        checks = context.get("check_reports") or [context]
+        for check in checks:
+            if check.get("validator") != "content":
+                continue
+            lines.extend(["", f"### Content Comparison — {reference}", ""])
+            lines.extend([_content_outcome(check), ""])
+            for key in ("comparison_mode", "comparison_status", "content_health", "regression_status",
+                        "baseline_issues", "current_issues", "new_issues", "existing_issues", "resolved_issues"):
+                if key in check:
+                    value = "unknown" if check[key] is None else str(check[key])
+                    lines.append(f"- {key.replace('_', ' ')}: `{_safe_code(value)}`")
+    lines.extend(["", "## Findings", ""])
+    findings = report.get("issues", [])
+    if not findings:
+        lines.append("No findings recorded. Check execution completeness before interpreting this as a pass.")
+    for index, finding in enumerate(findings[:20], 1):
+        lines.append(f"{index}. `{_safe_code(finding.get('validator', 'execution'))}` / "
+                     f"`{_safe_code(finding.get('type', 'omniflow_finding'))}` "
+                     f"({ _safe_code(finding.get('severity', 'unknown')) }): "
+                     f"{_safe_text(finding.get('message', 'Details withheld.'))}")
+        for key in ("context_reference", "validation_scope", "state", "reason_code", "comparison_mode",
+                    "comparison_status", "content_health", "regression_status"):
+            if key in finding:
+                lines.append(f"   - {key.replace('_', ' ')}: `{_safe_code(finding[key])}`")
+    if len(findings) > 20:
+        lines.append("Additional safe findings are available in the JSON report.")
+    lines.extend([
+        "", "## Next Steps", "",
+        "- For readable content findings, inspect Content Validator in Omni for the same model, branch, "
+        "and visibility scope. Sensitive object details are intentionally omitted here.",
+        "- Under new-only policy, unchanged matched baseline issues are informational; new or increased "
+        "issues block. Under all-issues policy, current issues block even if they already existed.",
+        "- For unavailable evidence, resolve the response or access problem and rerun. Do not treat "
+        "missing evidence as a clean baseline or disable validation to obtain a pass.",
+    ])
+    return "\n".join(lines) + "\n"
+
+
+def _content_outcome(check: dict[str, Any]) -> str:
+    if check.get("comparison_mode") == "all_issues" and check.get("current_issues", 0) > 0:
+        return "Content issues were found. The configured all-issues policy blocks current issues, including existing ones."
+    if check.get("comparison_status") == "complete":
+        if check.get("new_issues", 0) > 0:
+            return "New content issues were detected relative to the baseline; this check blocks the PR."
+        if check.get("existing_issues", 0) > 0:
+            return "No new issues were detected. Existing issues remain; the new-only regression check passes."
+        return "No current content issues were found in the evaluated scope."
+    return "A complete baseline comparison is unavailable. Do not infer that the PR introduced a content defect."
+
+
 def render_markdown_report(report: dict[str, Any]) -> str:
+    if report.get("diagnostic_schema_version") == 2:
+        return _render_minimal_diagnostic(report)
     summary = report.get("summary", {})
     decision = str(report.get("policy_decision") or "unknown")
     exit_reason = str(report.get("exit_code_reason") or "")

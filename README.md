@@ -328,7 +328,7 @@ The Content Validator still validates the model server-side. Label filtering is 
 
 ## Evidence And Privacy
 
-Each run writes root and redacted public summaries:
+Each run writes root and minimal public summaries (diagnostic schema version 2):
 
 ```text
 .omniflow/
@@ -343,11 +343,21 @@ Each run writes root and redacted public summaries:
   restricted/<model_id>/
 ```
 
-Public reports exclude API keys, raw payloads, email addresses, document URLs, and folder paths. `security.redaction_level: strict` also removes content names, query names, owners, labels, and free-text messages. Restricted artifacts are deleted by default and are never uploaded by the example workflow. Opt-in retention is intended only for an isolated, ephemeral runner and writes files with owner-only permissions.
+Public outputs are constructed from fixed diagnostic codes, statuses, bounded counts, booleans, anonymous context references and a random run reference. They do not copy customer messages, names, resource IDs, paths, URLs, Git identities, raw responses or runner details. Both legacy `standard` and `strict` settings use this minimal public schema; neither re-enables detailed public output. Automation consuming the old identity-rich schema must migrate. Deployment readiness uses private, in-memory evidence instead of public artifacts. See [Diagnostic Privacy](docs/DIAGNOSTIC_PRIVACY.md).
 
-Raw response output cannot be enabled in CI policy. The explicit `--unsafe-raw-output` option exists only on the local `content validate` debugging command.
+Restricted artifacts are deleted by default and are never uploaded by the example workflows. Explicit retention is only for an approved private support investigation on an isolated, ephemeral runner, with owner-only files. It is not a PII/PHI/payment-data sanitizer or a compliance certification. Previously generated artifacts and copied comments are not retroactively sanitized. Upload only the explicitly listed output files, never the entire `.omniflow` or `public` directory.
 
-The unreleased AI Repair scaffold emits `repair.json` and `repair.md` during maintainer testing. These contain status, IDs, file names, counts, validation summaries, rollback status, and commit metadata only. Authored YAML, prompts, AI result summaries, chat URLs, and query results are not persisted by OmniFlow.
+Raw response output cannot be enabled in CI policy. The local `content validate --unsafe-raw-output` debugging option additionally requires explicit restricted retention, is rejected in GitHub Actions, and never places raw data in its shareable report. Standalone validation history is restricted and deleted unless retention is enabled; explicit history output must stay inside the restricted directory.
+
+The unreleased AI Repair scaffold emits minimal `repair.json` and `repair.md` during maintainer testing: status, counts and safety outcomes, without resource IDs, filenames or commit metadata. Sensitive support evidence must not be attached to public issues or copied into PR comments.
+
+### Existing issues versus PR regressions
+
+Set `checks.content_validation.fail_on_new_only: true` explicitly in trusted policy when the PR gate should block new issues rather than unchanged baseline problems. Omission retains the historical `false` default; existing explicit strict policies are not weakened. Branch runs compare against the live base using the same credential and visibility scope. Reports distinguish content health from regression status, and unreadable responses remain unavailable evidence rather than being treated as pre-existing issues.
+
+Dashboard-filter errors support both legacy messages and the grouped `filter_name` / `issues` response observed in live testing. Filter identity is retained privately so different filters and additional occurrences cannot be hidden as existing issues. Empty/non-JSON API responses remain distinct incomplete-evidence failures. Updating OmniFlow does not update a consumer's pinned Action automatically: review and update its full commit SHA, then rerun the original PR.
+
+Optional `checks.content_validation.classify_comment_only: true` classifies narrow, verified comment/format-only Git changes without executing PR code. It is explanatory only: extra live branch edits and attached drafts cannot yet be excluded reliably, so content validation still runs. See [Validation Diagnostics](docs/VALIDATION_DIAGNOSTICS.md).
 
 ## CLI
 

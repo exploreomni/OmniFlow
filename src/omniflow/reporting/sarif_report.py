@@ -35,14 +35,15 @@ def to_sarif(report: dict[str, Any]) -> dict[str, Any]:
                 ],
             }
         )
+    driver = {"name": "omniflow", "rules": list(rules.values())}
+    if isinstance(report.get("tool_version"), str):
+        driver["version"] = report["tool_version"]
     return {
         "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
         "version": "2.1.0",
         "runs": [
             {
-                "tool": {
-                    "driver": {"name": "omniflow", "version": report.get("tool_version"), "rules": list(rules.values())}
-                },
+                "tool": {"driver": driver},
                 "results": results,
             }
         ],

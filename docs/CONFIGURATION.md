@@ -88,6 +88,7 @@ An unreferenced breaking change remains visible as risk but does not fail the de
 
 - `enabled`: defaults to `true`.
 - `fail_on_new_only`: defaults to `false`; the checked-in example recommends `true` for gradual adoption.
+- `classify_comment_only`: defaults to `false`. When enabled, classify immutable PR inputs conservatively and report the result. This does not skip content validation or override failures; live content/draft correspondence is not established by Git equality.
 - `labels`: optional local filter applied after Omni validates the full model server-side.
 
 ### Model Validation
@@ -260,7 +261,7 @@ security:
 ```
 
 - `redaction_level` accepts `standard` or `strict`.
-- `strict` additionally removes content names, query names, owners, labels, and free-text messages from public output.
+- Both values now use the minimal version-2 public diagnostic allowlist: fixed codes, counts and statuses, not customer text or identifiers. These legacy redaction settings do not loosen public output. See [Diagnostic Privacy](DIAGNOSTIC_PRIVACY.md) for the schema migration and restricted support boundary.
 - `allow_raw_response_output` cannot be enabled through policy.
 - Restricted artifacts are deleted by default. Opt-in retention writes owner-only files but should be used only on isolated, ephemeral runners. The official example uploads only redacted public artifacts.
 - Unknown configuration keys fail closed so misspelled security or policy settings cannot be silently ignored.

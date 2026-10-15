@@ -17,11 +17,11 @@ from urllib.parse import quote, urlparse
 import requests
 
 from ..config import load_config
+from ..diagnostics import safe_exception_message
 from ..discovery import _is_probable_omni_file, _is_under_model_path, discover_contexts, load_flow_metadata
-from ..exceptions import ConfigError, OmniFlowError, SecurityPolicyError
+from ..exceptions import ConfigError, SecurityPolicyError
 from ..git import git_value
 from ..revision_data import FULL_SHA, REPOSITORY, pull_request_changed_files
-from ..security import redact
 
 CHECK_NAME = "OmniFlow deployment readiness"
 MAX_RESPONSE = 2 * 1024 * 1024
@@ -205,11 +205,19 @@ def revalidate(number: int, config_path: str = ".omniflow.yml") -> int:
                 if changed_files is None:
                     raise ConfigError("Readiness requires a complete immutable pull request inventory")
                 route, model_ids, dbt_count = _readiness_route(config, changed_files)
-                code = run_validation(["run", "--auto", "--config", config_path], changed_files=changed_files)
+                from ..diagnostics import capture_private_reports
+
+                with capture_private_reports() as private_reports:
+                    code = run_validation(["run", "--auto", "--config", config_path], changed_files=changed_files)
             finally:
                 os.environ.clear()
                 os.environ.update(prior)
-        report = json.loads((Path(config.reporting.output_dir) / "public/report.json").read_text())
+        # Public reports deliberately omit tenant identities and Git context.
+        # Readiness must use this invocation's in-memory evidence, not a stale
+        # on-disk report or a less-private artifact introduced for convenience.
+        if len(private_reports) != 1:
+            raise ConfigError("Current-head validation did not produce a unique private execution receipt")
+        report = private_reports[0]
         _validate_report(report, code, pr["head"]["sha"], route, model_ids, dbt_count)
         _same_snapshot(api, state_api, number, pr, sync_sha)
         label = hold.pending_label
@@ -220,8 +228,7 @@ def revalidate(number: int, config_path: str = ".omniflow.yml") -> int:
         api.request("PATCH", check_path, {
             "status": "completed", "conclusion": "success",
             "output": {"title": "Current-head deployment validation passed",
-                       "summary": f"Validated {route} route at head {pr['head']['sha']} "
-                                  f"against synchronized commit {sync_sha}. "
+                       "summary": f"Validated {route} route against the current head and synchronized commit. "
                                   "Manual merge remains subject to all required checks and reviews."},
         })
         return 0
@@ -232,7 +239,7 @@ def revalidate(number: int, config_path: str = ".omniflow.yml") -> int:
         finally:
             api.request("PATCH", check_path, {
                 "status": "completed", "conclusion": "failure",
-                "output": {"title": "Deployment readiness not established", "summary": redact(str(exc))[:1000]},
+                "output": {"title": "Deployment readiness not established", "summary": safe_exception_message(exc)},
             })
         raise
 
@@ -244,8 +251,8 @@ def main() -> int:
     args = parser.parse_args()
     try:
         return revalidate(args.pull_request, args.config)
-    except (OmniFlowError, OSError, ValueError) as exc:
-        print(redact(str(exc)))
+    except Exception as exc:
+        print(safe_exception_message(exc))
         return 1
 
 

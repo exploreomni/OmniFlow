@@ -41,7 +41,7 @@ OMNI_KEYS = {
     "timeout",
 }
 CHECK_KEYS = {"content_validation", "model_validation", "semantic_lint", "dbt_exposures", "dbt_impact", "ai_eval"}
-CONTENT_KEYS = {"enabled", "fail_on_new_only", "labels"}
+CONTENT_KEYS = {"enabled", "fail_on_new_only", "labels", "classify_comment_only"}
 MODEL_KEYS = {"enabled", "fail_on_warnings"}
 LINT_KEYS = {"enabled", "rules"}
 EXPOSURE_KEYS = {"enabled", "fail_on_unavailable"}
@@ -200,6 +200,7 @@ class OmniSettings:
 class ContentValidationSettings:
     enabled: bool = True
     fail_on_new_only: bool = False
+    classify_comment_only: bool = False
     labels: list[str] = field(default_factory=list)
 
 
@@ -372,6 +373,9 @@ def _to_config(raw: dict[str, Any], source: Path | None) -> OmniFlowConfig:
     )
     content = ContentValidationSettings(
         enabled=parse_bool("content_validation.enabled", content_raw.get("enabled"), True),
+        classify_comment_only=parse_bool(
+            "content_validation.classify_comment_only", content_raw.get("classify_comment_only"), False
+        ),
         fail_on_new_only=parse_bool(
             "content_validation.fail_on_new_only",
             os.getenv("OMNI_FAIL_ON_NEW_ONLY", content_raw.get("fail_on_new_only")),

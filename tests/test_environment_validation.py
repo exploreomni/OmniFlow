@@ -9,8 +9,10 @@ import pytest
 
 from omniflow.cli import _client_and_branch_for_context, _run_context, cmd_run
 from omniflow.config import load_config
+from omniflow.diagnostics import capture_private_reports
 from omniflow.discovery import ModelContext
 from omniflow.exceptions import ConfigError, OmniAuthError, SecurityPolicyError
+from omniflow.reporting.markdown_report import render_markdown_report
 
 MODEL_TEXT = "label: Orders\ndimensions:\n  id:\n    sql: ${TABLE}.id\n    primary_key: true\n"
 
@@ -123,22 +125,33 @@ def test_two_environment_run_validates_only_selected_candidate(promotion, monkey
     client = TargetClient(selected["model_id"], selected["base_branch"], selected["git_follower"], head_text)
     if orientation == "path_to_name":
         client.view_names = {"orders.view": "orders"}
-    with mock.patch("omniflow.cli.OmniClient", return_value=client) as constructor:
+    with capture_private_reports() as receipts, \
+         mock.patch("omniflow.cli.OmniClient", return_value=client) as constructor:
         assert cmd_run(run_args(), changed_files=["omni/shared/orders.view"]) == 0
     assert constructor.call_args.kwargs["base_url"] == selected["base_url"]
     assert ("content", "candidate-id") in client.calls
     assert ("model", "candidate-id") in client.calls
     assert ("yaml", "candidate-id") in client.calls
     report = json.loads((root / ".omniflow/public/report.json").read_text())
+    assert report["diagnostic_schema_version"] == 2
     assert report["validation_complete"] is True
     assert len(report["models"]) == 1
-    assert report["models"][0]["model_id"] == selected["model_id"]
-    proof = report["model_reports"][0]["candidate_verification"]
+    assert len(receipts) == 1
+    private_report = receipts[0]
+    assert private_report["models"][0]["model_id"] == selected["model_id"]
+    assert private_report["models"][0]["environment"] == target
+    proof = private_report["model_reports"][0]["candidate_verification"]
     assert proof["status"] == "verified"
     assert proof["head_sha"] == event["pull_request"]["head"]["sha"]
+    assert report["model_reports"][0]["candidate_verification"]["status"] == "verified"
+    assert "head_sha" not in report["model_reports"][0]["candidate_verification"]
     markdown = (root / ".omniflow/public/report.md").read_text()
-    assert target in markdown and "before and after checks" in markdown
-    assert "does not authorize deployment" in markdown
+    for identity in (selected["model_id"], selected["base_url"], target, proof["head_sha"], "omni/shared"):
+        assert identity not in json.dumps(report) + markdown
+    assert "Validation complete: `true`" in markdown
+    private_markdown = render_markdown_report(private_report)
+    assert target in private_markdown and "before and after checks" in private_markdown
+    assert "does not authorize deployment" in private_markdown
 
 
 @pytest.mark.parametrize("redaction", ["standard", "strict"])
@@ -148,13 +161,17 @@ def test_metadata_failure_keeps_environment_and_incomplete_candidate_evidence(pr
     client.view_names = {"PRIVATE-METADATA": "missing.view"}
     config = load_config(None)
     config.security.redaction_level = redaction
-    with mock.patch("omniflow.cli.OmniClient", return_value=client), \
+    with capture_private_reports() as receipts, \
+         mock.patch("omniflow.cli.OmniClient", return_value=client), \
          mock.patch("omniflow.cli.load_config", return_value=config):
         assert cmd_run(run_args(), changed_files=["omni/shared/orders.view"]) != 0
     report_text = (root / ".omniflow/public/report.json").read_text()
     report = json.loads(report_text)
     context = report["model_reports"][0]
-    assert context["environment"] == "production"
+    assert len(receipts) == 1
+    private_context = receipts[0]["model_reports"][0]
+    assert private_context["environment"] == "production"
+    assert "environment" not in context
     assert context["validation_complete"] is False
     assert context["candidate_verification"]["status"] == "pending_recheck"
     issue = next(item for item in context["issues"] if item.get("metadata_stage") == "view_names")
@@ -163,8 +180,10 @@ def test_metadata_failure_keeps_environment_and_incomplete_candidate_evidence(pr
     states = {item["validator"]: item["status"] for item in context["check_states"]}
     assert states["semantic_diff"] == "failed" and states["contracts"] == "not_run"
     markdown = (root / ".omniflow/public/report.md").read_text()
-    assert "Candidate coverage is incomplete" in markdown
-    assert "PRIVATE-METADATA" not in report_text + markdown
+    assert "Candidate coverage is incomplete" in render_markdown_report(receipts[0])
+    assert "Validation complete: `false`" in markdown
+    for identity in ("PRIVATE-METADATA", "production", "prod-model", "omni/shared", "candidate-id"):
+        assert identity not in report_text + markdown
 
 
 @pytest.mark.parametrize("failure", ["missing", "stale", "changed_during_checks"])
@@ -174,12 +193,16 @@ def test_candidate_failures_are_incomplete_not_clean_content(promotion, failure)
     client.disappear = failure == "missing"
     client.stale = failure == "stale"
     client.change_during_validation = failure == "changed_during_checks"
-    with mock.patch("omniflow.cli.OmniClient", return_value=client):
+    with capture_private_reports() as receipts, mock.patch("omniflow.cli.OmniClient", return_value=client):
         assert cmd_run(run_args(), changed_files=["omni/shared/orders.view"]) != 0
     report = json.loads((root / ".omniflow/public/report.json").read_text())
     assert report["validation_complete"] is False
     assert report["model_reports"][0]["candidate_verification"]["status"] == "unverified"
-    assert "Candidate coverage is incomplete" in (root / ".omniflow/public/report.md").read_text()
+    assert len(receipts) == 1
+    assert "Candidate coverage is incomplete" in render_markdown_report(receipts[0])
+    assert "Validation complete: `false`" in (root / ".omniflow/public/report.md").read_text()
+    assert "environment" not in report["model_reports"][0]
+    assert "model_id" not in report["model_reports"][0]
     if failure != "changed_during_checks":
         assert not any(kind in {"model", "content"} for kind, _ in client.calls)
 
@@ -195,14 +218,19 @@ def test_wrong_environment_binding_fails_before_client_construction(monkeypatch)
 def test_wrong_target_credential_never_falls_back_to_another_environment(promotion):
     root, _, _, head_text, _ = promotion
     client = TargetClient("prod-model", "main", True, head_text)
-    with mock.patch("omniflow.cli.OmniClient", return_value=client) as constructor, \
+    with capture_private_reports() as receipts, \
+         mock.patch("omniflow.cli.OmniClient", return_value=client) as constructor, \
          mock.patch.object(client, "get_git_configuration", side_effect=OmniAuthError("Access denied")):
         assert cmd_run(run_args(), changed_files=["omni/shared/orders.view"]) != 0
     constructor.assert_called_once()
     assert client.calls == []
     report = json.loads((root / ".omniflow/public/report.json").read_text())
     assert report["validation_complete"] is False
-    assert report["models"][0]["environment"] == "production"
+    assert len(receipts) == 1
+    assert receipts[0]["models"][0]["environment"] == "production"
+    assert receipts[0]["models"][0]["model_id"] == "prod-model"
+    assert "environment" not in report["models"][0]
+    assert "prod-model" not in json.dumps(report)
     assert report["models"][0]["candidate_verification"]["status"] == "unverified"
 
 

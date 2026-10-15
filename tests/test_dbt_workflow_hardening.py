@@ -15,6 +15,7 @@ from omniflow.config import DbtImpactSettings
 from omniflow.dbt_impact import COVERAGE_RULE, evaluate_dbt_impact
 from omniflow.dbt_manifest import diff_manifests, parse_manifest
 from omniflow.dbt_sql_diff import analyze_output_columns, diff_sql_columns
+from omniflow.diagnostics import capture_private_reports
 from omniflow.exceptions import ConfigError, SecurityPolicyError
 from omniflow.revision_data import pull_request_changed_files, read_git_text, read_head_text
 
@@ -80,10 +81,14 @@ class ExactRevisionTests(unittest.TestCase):
             route = json.loads(captured.getvalue())
             self.assertTrue(route["should_run"])
             self.assertFalse(route["requires_omni"])
-            self.assertEqual(main(["run", "--auto"]), 1)
+            with capture_private_reports() as private_reports:
+                self.assertEqual(main(["run", "--auto"]), 1)
         report = json.loads(Path(".omniflow/public/report.json").read_text())
-        self.assertEqual(report["git_sha"], self.head)
-        self.assertEqual(report["issues"][0]["column"], "customer_id")
+        self.assertEqual(private_reports[-1]["git_sha"], self.head)
+        self.assertEqual(private_reports[-1]["issues"][0]["column"], "customer_id")
+        self.assertEqual(report["diagnostic_schema_version"], 2)
+        self.assertNotIn("git_sha", report)
+        self.assertNotIn("customer_id", json.dumps(report))
         self.assertEqual(self.git("rev-parse", "HEAD"), self.base)
         self.assertNotIn("OMNI_API_KEY", os.environ)
         self.assertFalse(Path("untrusted.py").exists())
@@ -96,19 +101,23 @@ class ExactRevisionTests(unittest.TestCase):
     def test_cli_reuses_internal_inventory_without_reading_mutable_pr_files(self):
         changed_files = pull_request_changed_files()
         with mock.patch("omniflow.discovery.get_changed_files", side_effect=AssertionError("mutable PR files")), \
-             mock.patch("omniflow.cli.get_dbt_changed_files", side_effect=AssertionError("repeated inventory")):
+             mock.patch("omniflow.cli.get_dbt_changed_files", side_effect=AssertionError("repeated inventory")), \
+             capture_private_reports() as private_reports:
             self.assertEqual(main(["run", "--auto"], changed_files=changed_files), 1)
         report = json.loads(Path(".omniflow/public/report.json").read_text())
         self.assertEqual(report["operation"], "dbt_impact")
-        self.assertEqual(report["git_sha"], self.head)
+        self.assertEqual(private_reports[-1]["git_sha"], self.head)
+        self.assertNotIn("git_sha", report)
 
     def test_cli_empty_internal_inventory_does_not_fall_back_to_mutable_routing(self):
         with mock.patch("omniflow.discovery.get_changed_files", side_effect=AssertionError("mutable PR files")), \
-             mock.patch("omniflow.cli.get_dbt_changed_files", side_effect=AssertionError("repeated inventory")):
+             mock.patch("omniflow.cli.get_dbt_changed_files", side_effect=AssertionError("repeated inventory")), \
+             capture_private_reports() as private_reports:
             self.assertEqual(main(["run", "--auto"], changed_files=[]), 0)
         report = json.loads(Path(".omniflow/public/report.json").read_text())
         self.assertEqual(report["policy_decision"], "skipped")
-        self.assertEqual(report["git_sha"], self.head)
+        self.assertEqual(private_reports[-1]["git_sha"], self.head)
+        self.assertNotIn("git_sha", report)
 
     def test_git_reads_reject_oversized_files_and_missing_revisions(self):
         with self.assertRaises(SecurityPolicyError):

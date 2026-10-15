@@ -141,16 +141,28 @@ def test_api_to_cli_reports_incomplete_evidence_and_preserves_privacy(tmp_path, 
     public = tmp_path / ".omniflow/public"
     report = json.loads((public / "report.json").read_text())
     assert report["exit_code_reason"] == "Omni API error"
-    assert report["git_sha"] == input_sha
-    assert report["tool_revision"] == {"commit": action_sha, "source": "github_action_ref"}
+    assert report["diagnostic_schema_version"] == 2
+    assert len(report["run_reference"]) == 32
+    assert "git_sha" not in report
+    assert "tool_revision" not in report
+    assert "model_id" not in report["models"][0]
+    assert "model_path" not in report["models"][0]
     finding = report["issues"][0]
     assert finding["type"] == "content_evidence_unavailable"
     assert finding["validation_scope"] == scope
+    assert finding["reason_code"] == "missing_issue_message"
+    assert finding["comparison_status"] == "unavailable"
+    assert finding["content_health"] == finding["regression_status"] == "unknown"
+    assert "document_identifier" not in finding
+    assert "document_name" not in finding
+    assert finding["context_reference"] == report["models"][0]["context_reference"]
     assert report["policy_decision"] == "fail"
     assert report["model_reports"][0]["check_reports"][0]["coverage_complete"] is False
     evidence = json.loads((public / "evidence.json").read_text())
     assert evidence["exit_code_reason"] == "Omni API error"
-    assert evidence["tool_revision"] == report["tool_revision"]
+    assert evidence["diagnostic_schema_version"] == 2
+    assert evidence["run_reference"] == report["run_reference"]
+    assert "tool_revision" not in evidence
     assert json.loads((public / "report.sarif").read_text())["runs"][0]["results"][0]["level"] == "error"
     assert ElementTree.fromstring((public / "junit.xml").read_text()).get("failures") == "1"
     for path in public.iterdir():
@@ -158,8 +170,11 @@ def test_api_to_cli_reports_incomplete_evidence_and_preserves_privacy(tmp_path, 
         assert "private payload do not publish" not in text
         assert "private.example" not in text
         assert "Private owner" not in text
-        if privacy != "standard":
-            assert "Private dashboard" not in text
+        assert "Private dashboard" not in text
+        assert "doc-id" not in text
+        assert "doc-short" not in text
+        assert input_sha not in text
+        assert action_sha not in text
     assert not (tmp_path / ".omniflow/restricted").exists()
 
 

@@ -1,5 +1,20 @@
 # Release notes
 
+## Unreleased — minimal diagnostics and explicit content-regression evidence
+
+This is a development candidate, not a published release or confirmation of customer acceptance.
+
+- **Breaking public report schema 2:** public outputs now construct a minimal allowlist of fixed categories/statuses, bounded counts, boolean flags, and generated run/context references. Both standard and strict settings omit customer text, opaque prompt IDs, direct resource identities/paths, and Git/Action references. Migrate consumers that read those fields to authorized trusted/private evidence; do not use public JSON for identity-sensitive readiness decisions.
+- Supported workflow uploads use explicit diagnostic filenames, not broad output-directory uploads. Existing artifacts and logs are not retroactively sanitized. This is data minimization, not a PII/PHI/PCI detection or compliance guarantee.
+- Dashboard-filter validation supports the grouped `filter_name` / `issues` response reproduced in isolated live testing, while retaining legacy string/message-object compatibility. Exact filter identity and occurrence counts prevent different or increased failures from being hidden as existing issues. Duplicate group names remain ambiguous; unknown nesting and `null` are not treated as healthy evidence.
+- Unreadable content issues retain blocking behavior and include fixed structural reason codes and branch/base scope, without copying unsupported values. Empty API bodies and invalid JSON have separate safe reason codes; neither is presented as a confirmed content defect.
+- Content reports distinguish current versus baseline counts, comparison completeness, all-issues versus new-only policy, and content issue presence versus regression status. The global all-issues default is unchanged; new-only gating requires an explicit trusted-policy choice.
+- Optional comment-only classification is conservative and explanatory only. It never skips content validation because Git snapshots do not prove live content/draft provenance.
+
+The old parser failed with exit `4` on the live grouped response. The intended fixed outcomes are exit `1` for a new readable defect, exit `0` for an unchanged matched baseline issue under new-only policy, and exit `4` for incomplete evidence. Historical string/message fingerprints remain compatible; public reports cannot be reused as trusted history. Standalone content runs refresh standard outputs so stale reports/evidence are not uploaded as current results.
+
+Before customer acceptance, publish a reviewed revision, update the consumer's pinned Action SHA, and rerun their original PR against the intended live branch/base scope. Do not assume a comment-only PR is healthy or that the consumer receives new code automatically. See [Diagnostic Privacy](DIAGNOSTIC_PRIVACY.md) and [Validation Diagnostics](VALIDATION_DIAGNOSTICS.md).
+
 ## Unreleased — validation fixes and environment targets (#23–#25)
 
 This change is a development candidate, not a published release or a claim of customer acceptance.

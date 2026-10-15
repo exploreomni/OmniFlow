@@ -9,6 +9,7 @@ from unittest import mock
 from omniflow.cli import cmd_dbt_sync, main
 from omniflow.config import load_config
 from omniflow.dbt_sync import run_dbt_sync, validate_dbt_sync_environment
+from omniflow.diagnostics import capture_private_reports
 from omniflow.discovery import ModelContext
 from omniflow.exceptions import ConfigError, OmniAPIError, SecurityPolicyError
 
@@ -272,7 +273,8 @@ class DbtSyncTests(unittest.TestCase):
                                         "omniflow.cli.run_dbt_sync",
                                         return_value=(refresh_report, 0),
                                     ) as refresh:
-                                        exit_code = cmd_dbt_sync(args)
+                                        with capture_private_reports() as private_reports:
+                                            exit_code = cmd_dbt_sync(args)
                 self.assertEqual(exit_code, 0)
                 refresh.assert_called_once()
                 report = json.loads(Path(".omniflow/public/report.json").read_text(encoding="utf-8"))
@@ -280,7 +282,14 @@ class DbtSyncTests(unittest.TestCase):
                 self.assertEqual(report["summary"]["models_requested"], 2)
                 self.assertEqual(report["summary"]["refreshes_completed"], 1)
                 self.assertEqual(len(report["model_reports"]), 2)
-                self.assertEqual(sync["models"][0]["affected_model_ids"], ["model-1", "model-2"])
+                self.assertEqual(report["diagnostic_schema_version"], 2)
+                self.assertNotIn("affected_model_ids", sync["models"][0])
+                self.assertNotIn("model-1", json.dumps(sync))
+                self.assertNotIn("model-2", json.dumps(sync))
+                self.assertEqual(
+                    private_reports[-1]["model_reports"][0]["refresh"]["affected_model_ids"],
+                    ["model-1", "model-2"],
+                )
             finally:
                 os.chdir(original)
 
@@ -463,12 +472,14 @@ class DbtSyncTests(unittest.TestCase):
                                     return_value=(client, None),
                                 ):
                                     with mock.patch("omniflow.cli.run_dbt_sync") as refresh:
-                                        with self.assertRaises(ConfigError):
+                                        with self.assertRaisesRegex(ConfigError, "every shared model"):
                                             cmd_dbt_sync(args)
                 refresh.assert_not_called()
                 report = json.loads(Path(".omniflow/public/report.json").read_text(encoding="utf-8"))
                 self.assertEqual(report["exit_code"], 2)
-                self.assertIn("every shared model", report["issues"][0]["message"])
+                self.assertEqual(report["diagnostic_schema_version"], 2)
+                self.assertNotIn("model-1", json.dumps(report))
+                self.assertNotIn("model-2", json.dumps(report))
             finally:
                 os.chdir(original)
 
