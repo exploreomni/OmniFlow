@@ -112,8 +112,8 @@ class ExposureArtifactTests(unittest.TestCase):
                 self.assertEqual(stat.S_IMODE((Path(tmp) / "report.json").stat().st_mode), 0o600)
                 self.assertEqual(stat.S_IMODE((Path(tmp) / "public").stat().st_mode), 0o700)
         self.assertEqual(root_report, public_report)
-        self.assertEqual(root_report["issues"][0]["content_name"], "[REDACTED]")
-        self.assertEqual(root_report["issues"][0]["owner"], "[REDACTED]")
+        self.assertNotIn("content_name", root_report["issues"][0])
+        self.assertNotIn("owner", root_report["issues"][0])
 
     def test_artifact_manifest_documents_public_and_restricted_layout(self):
         with tempfile.TemporaryDirectory() as tmp:

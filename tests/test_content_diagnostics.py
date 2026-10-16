@@ -8,7 +8,7 @@ import pytest
 import yaml
 
 from omniflow.cli import build_parser, cmd_run
-from omniflow.config import load_config
+from omniflow.config import _to_config
 from omniflow.discovery import ModelContext
 from omniflow.git import tool_revision
 from omniflow.reporting.junit_report import to_junit
@@ -27,7 +27,7 @@ def payload(issue):
 def run_validation(tmp_path, current, base=None, **overrides):
     client = SimpleNamespace(
         validate_content=lambda *args, branch_id=None, **kwargs: current if branch_id else base,
-        list_content=lambda **kwargs: [],
+        list_content=lambda **kwargs: [{"identifier": "doc-short", "name": "Private dashboard"}],
     )
     return run_content_validation(
         client=client, model_id="model", branch_id="branch", user_id=None,
@@ -66,7 +66,8 @@ def test_valid_filter_issues_keep_identity_and_new_only_policy(tmp_path, issue):
     assert code == 1
     assert (report["new_issues"], report["existing_issues"], report["resolved_issues"]) == (1, 1, 0)
     existing = next(item for item in report["issues"] if item["state"] == "existing")
-    assert existing["severity"] == "info"
+    assert existing["severity"] == "error"
+    assert existing["blocking"] is False
     assert existing["issue_type"] == "dashboard_filter"
     assert existing["document_name"] == "Private dashboard"
     assert "Filter references an unknown field" in existing["message"]
@@ -109,6 +110,9 @@ def test_evidence_context_redacts_before_truncating_long_values(monkeypatch):
 @pytest.mark.parametrize("privacy", ["standard", "names", "strict"])
 def test_api_to_cli_reports_incomplete_evidence_and_preserves_privacy(tmp_path, monkeypatch, scope, privacy):
     monkeypatch.chdir(tmp_path)
+    # This test isolates API/report behavior; immutable PR snapshots are covered
+    # by the real-Git regression integration tests.
+    monkeypatch.delenv("GITHUB_EVENT_NAME", raising=False)
     action_sha, input_sha = "a" * 40, "b" * 40
     monkeypatch.setenv("OMNIFLOW_ACTION_REF", action_sha)
     # Model the PR head separately from the merge ref, without inheriting the
@@ -117,7 +121,7 @@ def test_api_to_cli_reports_incomplete_evidence_and_preserves_privacy(tmp_path, 
     event_path = tmp_path / "event.json"
     event_path.write_text(json.dumps({"pull_request": {"head": {"sha": input_sha}}}), encoding="utf-8")
     monkeypatch.setenv("GITHUB_EVENT_PATH", str(event_path))
-    config = load_config(None)
+    config = _to_config({}, None)
     config.content_validation.fail_on_new_only = True
     config.security.redaction_level = "strict" if privacy == "strict" else "standard"
     config.security.redact_document_names = privacy == "names"
@@ -141,16 +145,28 @@ def test_api_to_cli_reports_incomplete_evidence_and_preserves_privacy(tmp_path, 
     public = tmp_path / ".omniflow/public"
     report = json.loads((public / "report.json").read_text())
     assert report["exit_code_reason"] == "Omni API error"
-    assert report["git_sha"] == input_sha
-    assert report["tool_revision"] == {"commit": action_sha, "source": "github_action_ref"}
+    assert report["diagnostic_schema_version"] == 2
+    assert len(report["run_reference"]) == 32
+    assert "git_sha" not in report
+    assert "tool_revision" not in report
+    assert "model_id" not in report["models"][0]
+    assert "model_path" not in report["models"][0]
     finding = report["issues"][0]
     assert finding["type"] == "content_evidence_unavailable"
     assert finding["validation_scope"] == scope
+    assert finding["reason_code"] == "missing_issue_message"
+    assert finding["comparison_status"] == "unavailable"
+    assert finding["content_health"] == finding["regression_status"] == "unknown"
+    assert "document_identifier" not in finding
+    assert "document_name" not in finding
+    assert finding["context_reference"] == report["models"][0]["context_reference"]
     assert report["policy_decision"] == "fail"
     assert report["model_reports"][0]["check_reports"][0]["coverage_complete"] is False
     evidence = json.loads((public / "evidence.json").read_text())
     assert evidence["exit_code_reason"] == "Omni API error"
-    assert evidence["tool_revision"] == report["tool_revision"]
+    assert evidence["diagnostic_schema_version"] == 2
+    assert evidence["run_reference"] == report["run_reference"]
+    assert "tool_revision" not in evidence
     assert json.loads((public / "report.sarif").read_text())["runs"][0]["results"][0]["level"] == "error"
     assert ElementTree.fromstring((public / "junit.xml").read_text()).get("failures") == "1"
     for path in public.iterdir():
@@ -158,8 +174,61 @@ def test_api_to_cli_reports_incomplete_evidence_and_preserves_privacy(tmp_path, 
         assert "private payload do not publish" not in text
         assert "private.example" not in text
         assert "Private owner" not in text
-        if privacy != "standard":
-            assert "Private dashboard" not in text
+        assert "Private dashboard" not in text
+        assert "doc-id" not in text
+        assert "doc-short" not in text
+        assert input_sha not in text
+        assert action_sha not in text
+    assert not (tmp_path / ".omniflow/restricted").exists()
+
+
+def test_cli_unverified_draft_is_safe_operational_failure_not_new_content_defect(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("GITHUB_EVENT_NAME", raising=False)
+    monkeypatch.delenv("GITHUB_EVENT_PATH", raising=False)
+    config = _to_config({}, None)
+    config.content_validation.fail_on_new_only = True
+    config.reporting.formats = ["json", "markdown", "sarif", "junit"]
+    context = ModelContext(base_url="https://omni.example", model_id="model", model_path="model", branch_id="branch")
+    current = payload("Synthetic private field missing")
+    current["content"][0].update(identifier="synthetic-draft", document_id="synthetic-draft-physical")
+    client = SimpleNamespace(
+        validate_content=lambda *args, branch_id=None, **kwargs: (
+            current if branch_id else payload("Synthetic private field missing")
+        ),
+        list_content=lambda **kwargs: [{"identifier": "doc-short"}],
+        list_document_drafts=lambda parent: [{
+            "identifier": "synthetic-draft", "publishedIdentifier": "doc-short",
+            "branch": {"id": "wrong-private-branch"}, "status": "active", "draftOutOfDate": False,
+            "updatedAt": "2026-10-15T12:00:00.000Z",
+        }],
+    )
+    args = build_parser().parse_args(["run", "--auto"])
+    with mock.patch("omniflow.cli.load_config", return_value=config), \
+            mock.patch("omniflow.cli.discover_contexts", return_value=[context]), \
+            mock.patch("omniflow.cli._client_and_branch_for_context", return_value=(client, "branch")), \
+            mock.patch("omniflow.cli.run_model_validation") as model_validation:
+        assert cmd_run(args, changed_files=[]) == 4
+    model_validation.assert_not_called()
+    public = tmp_path / ".omniflow/public"
+    report = json.loads((public / "report.json").read_text())
+    assert report["exit_code"] == 4 and report["policy_decision"] == "fail"
+    assert report["diagnostic_schema_version"] == 2
+    finding = report["issues"][0]
+    assert finding["type"] == "content_evidence_unavailable"
+    assert finding["reason_code"] == "document_identity_unavailable"
+    assert finding["validation_scope"] == "branch"
+    assert finding["comparison_mode"] == "new_only"
+    assert finding["comparison_status"] == "unavailable"
+    assert finding["regression_status"] == "unknown"
+    assert finding["blocking"] is True
+    assert all(issue["type"] != "content_validation_issue" for issue in report["issues"])
+    assert report["model_reports"][0]["check_reports"][0]["coverage_complete"] is False
+    captured = capsys.readouterr()
+    rendered = captured.out + captured.err + "".join(path.read_text() for path in public.iterdir())
+    for private in ("synthetic-draft", "doc-short", "wrong-private-branch", "Synthetic private field missing",
+                    "Private dashboard", "private.example"):
+        assert private not in rendered
     assert not (tmp_path / ".omniflow/restricted").exists()
 
 

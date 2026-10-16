@@ -103,6 +103,34 @@ class DocumentationTests(unittest.TestCase):
         repair = (ROOT / "docs/AI_REPAIR.md").read_text(encoding="utf-8")
         self.assertIn("do not use an Organization API Key for this unreleased repair scaffold", repair)
 
+    def test_credential_guidance_keeps_minimal_public_and_repository_diagnostics_separate(self):
+        for relative in (
+            "README.md", "SECURITY.md", "docs/INSTALLATION.md", "docs/SECURITY_MODEL.md",
+            "docs/ENVIRONMENT_TARGETS.md", "docs/TESTING.md",
+        ):
+            with self.subTest(document=relative):
+                text = (ROOT / relative).read_text(encoding="utf-8")
+                self.assertIn("reporting.diagnostics.mode: minimal", text)
+                self.assertIn("repository-only", text)
+                self.assertIn("standard", text.lower())
+                self.assertIn("strict", text.lower())
+                self.assertNotIn("Standard redaction can retain content names", text)
+                self.assertNotIn("standard public reports may include content names", text)
+                self.assertNotIn("use strict redaction where required", text)
+
+    def test_pat_history_guidance_preserves_fail_closed_comparison(self):
+        text = (ROOT / "docs/VALIDATION_DIAGNOSTICS.md").read_text(encoding="utf-8")
+        for phrase in (
+            "missing usable baseline fails with exit `4`",
+            "even if the current issue list is empty",
+            "With a PAT, leave `omni.user_id`, `OMNI_USER_ID`, and `--user-id` unset",
+            "persisted-history reuse is unavailable through this path",
+            "strict health", "omniflow run --auto", "invalidated_public_diagnostic",
+        ):
+            self.assertIn(phrase, text)
+        self.assertNotIn("repeated new findings when historical comparison", text)
+        self.assertNotIn("one-time increase in findings", text)
+
     def test_ai_repair_guide_documents_every_required_safety_gate(self):
         text = (ROOT / "docs/AI_REPAIR.md").read_text(encoding="utf-8")
         for required_text in (
@@ -125,6 +153,33 @@ class DocumentationTests(unittest.TestCase):
         manifest = (ROOT / "MANIFEST.in").read_text(encoding="utf-8")
         self.assertIn("include SUPPORT.md", manifest)
         self.assertIn("recursive-include docs *.md", manifest)
+        self.assertIn("include .omniflow.yml", manifest)
+        self.assertNotIn("include .omniflow.example.yml", manifest)
+
+    def test_required_policy_and_bootstrap_are_documented(self):
+        for relative in ("README.md", "docs/INSTALLATION.md", "docs/CONFIGURATION.md"):
+            text = (ROOT / relative).read_text(encoding="utf-8")
+            self.assertIn(".omniflow.yml", text)
+            self.assertIn(".github/workflows/omniflow.yml", text)
+            self.assertIn("customer repository root", text)
+            self.assertIn("required", text)
+            self.assertIn("PR head", text)
+            self.assertNotIn(".omniflow.example.yml", text)
+            self.assertNotIn("policy file is optional", text)
+        configuration = (ROOT / "docs/CONFIGURATION.md").read_text(encoding="utf-8")
+        self.assertIn("configuration exit code `2`", configuration)
+        self.assertIn("cannot replace it", configuration)
+        self.assertIn("fail_on_new_only: true", configuration)
+
+    def test_dual_validator_regression_and_strict_health_boundaries_are_documented(self):
+        text = (ROOT / "docs/CONFIGURATION.md").read_text(encoding="utf-8")
+        for phrase in (
+            "### Model Validation", "### Content Validation", "OMNI_FAIL_ON_NEW_ONLY",
+            "content validation only", "occurrence counts", "fail_on_warnings",
+            "Orchestrated runs without a branch", "post-sync validation", "repair verification",
+            "strict health", "Standalone `content validate`", "Older versions reject unknown policy keys",
+        ):
+            self.assertIn(phrase, text)
 
     def test_workflow_example_has_two_pinned_action_placeholders(self):
         workflow = (ROOT / ".github/workflow-examples/omniflow.yml").read_text(encoding="utf-8")

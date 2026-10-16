@@ -17,6 +17,11 @@ OmniFlow does not configure these settings or refresh follower schemas for you.
 
 ## 1. Register the actual targets
 
+First copy the canonical [`.omniflow.yml`](../.omniflow.yml) into the customer
+repository root on **both protected base branches** through the reviewed bootstrap
+process. This required policy is separate from the GitHub workflow. A missing policy
+or one present only on the PR head cannot validate that PR; missing policy exits `2`.
+
 Review the real model IDs, hostnames, repository URL, base branches and model path
 with the model owner. Do not assume the same model ID represents both environments.
 Commit this complete non-secret registry to **both protected base branches** through
@@ -63,7 +68,7 @@ reviewed bootstrap PRs before enabling version 2 validation:
   environment or omit other affected models.
 - Version 2 requires `--auto`. Remove legacy explicit host, model, path or branch
   overrides from policy, environment variables and CLI arguments.
-- There is no initialization command: bootstrap is a reviewed registry/workflow edit.
+- There is no initialization command: bootstrap is a reviewed registry/policy/workflow edit.
   `doctor --auto` checks access and settings; it does not create registrations.
 
 Keep the complete registry synchronized across the protected branches. A release
@@ -83,8 +88,12 @@ Do not use one repository-wide credential across different Omni hosts or environ
 boundaries. Keep production approvals and branch protections enabled. These are human
 setup steps, not changes OmniFlow makes. Choosing an Organization API Key does not add
 models to the trusted registry, enable personal-folder coverage, or establish that the
-whole instance has been validated. Consider `security.redaction_level: strict` for broad
-credentials when repository readers should not see all accessible content metadata.
+whole instance has been validated. Standard and strict redaction settings share the
+same minimal public schema. Eligible private runs can separately expose verified
+authored identifiers and source locations through repository-only diagnostics;
+set `reporting.diagnostics.mode: minimal` on each trusted base to disable that tier.
+Strict redaction does not disable repository-only diagnostics. See
+[Diagnostic Privacy](DIAGNOSTIC_PRIVACY.md) before sharing either class of output.
 
 Copy the [two-environment workflow example](../.github/workflow-examples/omniflow-environments.yml)
 and replace the action placeholder with the reviewed release's full commit SHA.

@@ -5,10 +5,12 @@ from pathlib import Path
 from typing import Any
 
 from . import __version__
+from .diagnostics import public_diagnostic, record_private_report
 from .exceptions import OmniFlowError, SecurityPolicyError
 from .git import tool_revision
 from .reporting.writer import write_reports
-from .security import public_safe, secure_write_text
+from .repository_diagnostics import clear_repository_reports, write_repository_reports
+from .security import secure_write_text
 from .timestamps import utc_now_iso
 
 PUBLIC_DIR = "public"
@@ -33,9 +35,26 @@ def write_public_reports(
     report = dict(report)
     report.setdefault("tool_revision", tool_revision())
     try:
-        safe_report = public_safe(report, redaction_level=redaction_level)
-        write_reports(safe_report, output_dir=output_dir, formats=formats)
-        write_reports(safe_report, output_dir=public_dir(output_dir), formats=formats)
+        clear_repository_reports(output_dir)
+        safe_report = public_diagnostic(report)
+        # A changed format preference must not leave a previous, possibly
+        # identity-rich report available for the workflow to upload.
+        current_formats = set(formats)
+        for directory in (Path(output_dir), public_dir(output_dir)):
+            for name, output_format in STANDARD_REPORT_FORMATS.items():
+                path = directory / name
+                if path.exists() or path.is_symlink():
+                    current_formats.add(output_format)
+        write_reports(safe_report, output_dir=output_dir, formats=sorted(current_formats))
+        write_reports(safe_report, output_dir=public_dir(output_dir), formats=sorted(current_formats))
+        for directory in (Path(output_dir), public_dir(output_dir)):
+            evidence_path = directory / "evidence.json"
+            if evidence_path.exists() or evidence_path.is_symlink():
+                # Normal orchestration replaces this with its current evidence
+                # envelope next. Until then, only current safe evidence remains.
+                secure_write_text(evidence_path, json.dumps(safe_report, indent=2) + "\n")
+        record_private_report(report)
+        write_repository_reports(report, safe_report, output_dir=output_dir)
     except SecurityPolicyError:
         # Never retry an output path rejected by the filesystem safety checks.
         raise
@@ -51,11 +70,12 @@ def write_emergency_failure(*, output_dir: str | Path) -> None:
     Deliberately fixed text: arbitrary exceptions, payloads and partial model
     metadata must never be serialized by this last-resort public path.
     """
+    clear_repository_reports(output_dir)
     message = "OmniFlow could not complete this run. Current validation evidence is incomplete; do not merge."
     issue = {"validator": "execution", "type": "internal_execution_failure", "severity": "error", "message": message}
     report = {
-        "tool": "omniflow", "tool_version": __version__, "generated_at": utc_now_iso(),
-        "tool_revision": tool_revision(), "policy_decision": "fail", "validation_complete": False,
+        "tool": "omniflow", "diagnostic_schema_version": 2,
+        "policy_decision": "fail", "validation_complete": False,
         "exit_code": 6, "exit_code_reason": "internal tool error", "issues": [issue],
         "summary": {"total_issues": 1, "errors": 1, "warnings": 0},
         "check_states": [{"validator": "execution", "status": "failed", "exit_code": 6}],
@@ -89,7 +109,7 @@ def write_public_json(
     if payload.get("tool") == "omniflow":
         payload = dict(payload)
         payload.setdefault("tool_revision", tool_revision())
-    safe_payload = public_safe(payload, redaction_level=redaction_level)
+    safe_payload = public_diagnostic(payload)
     target = Path(path)
     secure_write_text(target, json.dumps(safe_payload, indent=2, sort_keys=True) + "\n")
     return safe_payload
@@ -105,6 +125,7 @@ def write_artifact_manifest(
     public_files = _inventory_files(root / PUBLIC_DIR)
     restricted_files = _inventory_files(root / RESTRICTED_DIR)
     restricted_present = (root / RESTRICTED_DIR).exists()
+    repository_files = _inventory_files(root / "repository")
     categories: dict[str, int] = {}
     for path in restricted_files:
         category = next(
@@ -118,8 +139,17 @@ def write_artifact_manifest(
         "public_dir": PUBLIC_DIR,
         "restricted_dir": RESTRICTED_DIR,
         "restricted_artifacts_enabled": restricted_artifacts_enabled,
-        "redaction_level": redaction_level,
-        "public_artifacts": [f"{PUBLIC_DIR}/{path.as_posix()}" for path in public_files],
+        "redaction_level": redaction_level if redaction_level in {"standard", "strict"} else "unknown",
+        "diagnostic_schema_version": 2,
+        "public_artifacts": [f"{PUBLIC_DIR}/{path.as_posix()}" for path in public_files
+                             if path.as_posix() in PUBLIC_REPORT_NAMES],
+        "unrecognized_public_file_count": sum(path.as_posix() not in PUBLIC_REPORT_NAMES for path in public_files),
+        "repository_diagnostics": {
+            "audience": "repository_readers",
+            "artifacts": [f"repository/{path.as_posix()}" for path in repository_files
+                          if path.as_posix() in {"report.json", "report.md", "report.sarif", "junit.xml", "status.json"}],
+            "shareable": False,
+        },
         # This manifest is public. Count all restricted files, but never publish
         # customer model IDs, authored filenames, or content-derived paths.
         "restricted_inventory": {
@@ -157,6 +187,15 @@ RESTRICTED_REPORT_NAMES = (
     "report.json",
     "semantic-diff.json",
 )
+
+PUBLIC_REPORT_NAMES = frozenset({
+    "report.json", "report.md", "report.sarif", "junit.xml", "evidence.json", "repair.json", "repair.md",
+    "dbt-impact.json", "dbt-sync.json",
+})
+
+STANDARD_REPORT_FORMATS = {
+    "report.json": "json", "report.md": "markdown", "report.sarif": "sarif", "junit.xml": "junit",
+}
 
 
 def _inventory_files(directory: Path) -> list[Path]:

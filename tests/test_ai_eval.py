@@ -8,7 +8,8 @@ from types import SimpleNamespace
 from unittest import mock
 
 from omniflow.cli import cmd_run
-from omniflow.config import load_config
+from omniflow.config import _to_config
+from omniflow.diagnostics import capture_private_reports
 from omniflow.discovery import ModelContext
 from omniflow.exceptions import ConfigError, OmniAPIError, SecurityPolicyError
 from omniflow.validators.ai_eval import accuracy, build_comparison, run_ai_eval_validation
@@ -232,7 +233,7 @@ class AiEvalCliTests(unittest.TestCase):
     """Exercise the actual model orchestration and every final public artifact."""
 
     def run_cli(self, client, *, max_samples=20, fail_on_regression=True, contexts=None, prompt_sets=None, retain=True):
-        config = load_config(None)
+        config = _to_config({}, None)
         for check in (config.content_validation, config.model_validation, config.semantic_lint, config.contracts):
             check.enabled = False
         config.ai_eval.enabled = True
@@ -268,14 +269,17 @@ class AiEvalCliTests(unittest.TestCase):
                     mock.patch("omniflow.cli._client_and_branch_for_context", side_effect=client_for),
                     mock.patch("omniflow.cli.run_ai_eval_validation", side_effect=evaluate),
                     mock.patch("builtins.print"),
+                    capture_private_reports() as private_reports,
                 ):
                     exit_code = cmd_run(SimpleNamespace(config=None, auto=True, skip_reason=None))
+                self.private_report = private_reports[-1]
                 files = {
                     str(path.relative_to(".omniflow")): path.read_text()
                     for path in Path(".omniflow").rglob("*")
                     if path.is_file()
                 }
                 report = json.loads(files["public/report.json"])
+                self.assertEqual(report["diagnostic_schema_version"], 2)
                 for path, body in files.items():
                     if not path.startswith("restricted/"):
                         self.assertNotIn("CONFIDENTIAL", body, path)
@@ -309,7 +313,9 @@ class AiEvalCliTests(unittest.TestCase):
         self.assertEqual(exit_code, 1)
         check = report["model_reports"][0]["check_reports"][0]
         self.assertEqual(check["regressed_count"], 1)
-        self.assertEqual(check["issues"][0]["prompt_ids"], [])
+        self.assertNotIn("prompt_ids", check["issues"][0])
+        private_check = self.private_report["model_reports"][0]["check_reports"][0]
+        self.assertEqual(private_check["issues"][0]["prompt_ids"], [])
         self.assertTrue(observed_journals)
         self.assertIn("CONFIDENTIAL-PROMPT", files["restricted/model-1/ai-eval-detail.json"])
 
@@ -340,7 +346,9 @@ class AiEvalCliTests(unittest.TestCase):
                 self.assertEqual(exit_code, 4)
                 self.assertEqual(report["policy_decision"], "fail")
                 self.assertTrue(report["model_reports"][0]["check_reports"][0]["operational_failure"])
-                self.assertIn("incomplete comparison", files["public/report.md"])
+                self.assertIn("Omni API error", files["public/report.md"])
+                self.assertIn("ai_eval", files["public/report.md"])
+                self.assertIn("Check Execution", files["public/report.md"])
                 self.assertNotIn("AI eval is disabled", files["public/report.md"])
 
     def test_warning_mode_allows_complete_regression_and_cleans_detail(self):
@@ -442,7 +450,7 @@ class AiEvalCliTests(unittest.TestCase):
 
 class AiEvalConfigTests(unittest.TestCase):
     def test_disabled_by_default(self, tmp_path=None):
-        config = load_config(None)
+        config = _to_config({}, None)
         self.assertFalse(config.ai_eval.enabled)
         self.assertEqual(config.ai_eval.prompt_sets, [])
         self.assertTrue(config.ai_eval.fail_on_regression)

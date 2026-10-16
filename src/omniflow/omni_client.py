@@ -9,7 +9,7 @@ from typing import Any
 import requests
 
 from . import __version__
-from .exceptions import ConfigError, OmniAPIError, OmniAuthError
+from .exceptions import ConfigError, OmniAPIError, OmniAuthError, OmniResponseError
 from .model_response import normalize_model_response
 from .model_yaml import validate_editable_yaml_file_name
 from .security import redact, validate_base_url, validate_path_segment
@@ -267,6 +267,29 @@ class OmniClient:
             restricted_params.update({"scope": "restricted", "creatorId": user_id})
             records.extend(self._paginate("/api/v1/content", params=restricted_params))
         return records
+
+    def list_document_drafts(self, published_identifier: str) -> list[dict[str, Any]]:
+        """Read active draft identity metadata, never workbook or actor details.
+
+        The documented endpoint returns an array, not a paginated envelope.
+        Omitting ``include=archived`` requests active drafts only. Preserve any
+        returned status/staleness/branch values for the resolver to evaluate;
+        this adapter does not select, silently discard, or authorize a draft.
+        """
+        if not isinstance(published_identifier, str) or not published_identifier:
+            raise ConfigError("Published document identifier must be a non-empty string")
+        published_identifier = validate_path_segment(published_identifier, name="published_identifier")
+        try:
+            payload = self._request("GET", f"/api/v1/documents/{published_identifier}/drafts")
+        except OmniAuthError:
+            raise OmniAuthError("Document draft lookup was not authorized") from None
+        except OmniAPIError:
+            # The shared transport error can contain the requested API path.
+            # Do not copy the document identifier into this adapter's errors.
+            raise OmniAPIError("Document draft lookup failed") from None
+        if not isinstance(payload, list):
+            raise OmniAPIError("Document draft lookup returned an invalid response shape")
+        return [_document_draft_metadata(record) for record in payload]
 
     def create_ai_job(self, model_id: str, *, branch_id: str, prompt: str) -> dict[str, str]:
         model_id = validate_path_segment(model_id, name="model_id")
@@ -597,6 +620,30 @@ def _retry_after_seconds(value: str | None) -> int | None:
         return None
 
 
+def _document_draft_metadata(record: Any) -> dict[str, Any]:
+    required = {"identifier", "publishedIdentifier", "branch", "status", "draftOutOfDate", "updatedAt"}
+    if not isinstance(record, Mapping) or not required.issubset(record):
+        raise OmniAPIError("Document draft lookup returned invalid metadata")
+    if any(not isinstance(record[key], str) or not record[key].strip()
+           for key in ("identifier", "publishedIdentifier", "updatedAt")):
+        raise OmniAPIError("Document draft lookup returned invalid metadata")
+    if record["status"] not in ("active", "archived") or type(record["draftOutOfDate"]) is not bool:
+        raise OmniAPIError("Document draft lookup returned invalid metadata")
+    branch = record["branch"]
+    if branch is not None and (
+        not isinstance(branch, Mapping) or not isinstance(branch.get("id"), str) or not branch["id"].strip()
+    ):
+        raise OmniAPIError("Document draft lookup returned invalid metadata")
+    return {
+        "identifier": record["identifier"],
+        "publishedIdentifier": record["publishedIdentifier"],
+        "branch": {"id": branch["id"]} if branch is not None else None,
+        "status": record["status"],
+        "draftOutOfDate": record["draftOutOfDate"],
+        "updatedAt": record["updatedAt"],
+    }
+
+
 def _validate_content_response_identity(payload: Any, *, model_id: str, branch_id: str | None) -> None:
     """Reject contradictory optional identity metadata shared by validation and searches.
 
@@ -688,15 +735,17 @@ def _bounded_response_json(response: Any) -> Any:
                     raise OmniAPIError("Omni API response exceeded the 64 MiB safety limit")
         except requests.RequestException as exc:
             raise OmniAPIError("Omni API response could not be read safely") from exc
+        if not body:
+            raise OmniResponseError("empty_api_response")
         try:
             return json.loads(body)
         except (UnicodeDecodeError, ValueError) as exc:
-            raise OmniAPIError("Omni API did not return valid JSON") from exc
+            raise OmniResponseError("invalid_json_response") from exc
 
     try:
         payload = response.json()
     except ValueError as exc:
-        raise OmniAPIError("Omni API did not return valid JSON") from exc
+        raise OmniResponseError("invalid_json_response") from exc
     try:
         encoded_size = len(json.dumps(payload, separators=(",", ":")).encode("utf-8"))
     except (TypeError, ValueError) as exc:

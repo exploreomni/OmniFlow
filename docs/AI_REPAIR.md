@@ -90,7 +90,7 @@ The workflow must retain these controls:
 - Keep `cancel-in-progress: false` so GitHub does not terminate a write workflow between mutation and rollback.
 - Check out only the trusted base branch with `persist-credentials: false`.
 - Pass only `OMNIFLOW_REPAIR_API_KEY` to `mode: repair`.
-- Upload only `.omniflow/public` repair evidence.
+- Explicitly list the supported schema-2 public repair/report filenames in the upload step. Do not upload the whole `.omniflow/public` directory, unknown files, or restricted output.
 
 ## Step 5: Create The Authorization Label
 
@@ -111,12 +111,14 @@ Use a non-production model for the entire maintainer test.
 3. Confirm routine OmniFlow validation fails for the expected model error.
 4. Have an authorized maintainer apply `omniflow-ai-repair`.
 5. Have a different trusted reviewer approve the protected environment run when possible.
-6. Confirm the repair workflow identifies the exact model, branch, PR, and head SHA.
-7. Review `.omniflow/public/repair.md` and the resulting GitHub pull-request diff.
+6. Confirm the exact model, branch, PR, and head SHA through trusted workflow inputs, authorized private execution evidence, and the actual Omni/Git state. These identities are deliberately absent from the shareable schema.
+7. Review the minimal status/count evidence in `.omniflow/public/repair.md` alongside the actual GitHub pull-request diff; the diagnostic reference is not proof of commit or model identity.
 8. Confirm routine validation reruns on the new commit and passes independently.
 9. Remove the label after testing. A new repair for the same head SHA is blocked; a new commit creates a new head SHA and requires a fresh label event and approval.
 
 This test cannot authorize customer use while the required public Modeling Agent API contract remains unavailable.
+
+Public repair output follows [Diagnostic Privacy](DIAGNOSTIC_PRIVACY.md): fixed statuses/categories, permitted counts/flags, and generated references only. Standard and strict settings share this minimum-data boundary. Do not use minimal public JSON to authorize writes, reconstruct resource identity, or establish that rollback restored the intended branch; those decisions require verified private evidence. Historical artifacts are not retroactively sanitized.
 
 ## Runtime Sequence
 
@@ -129,7 +131,7 @@ This test cannot authorize customer use while the required public Modeling Agent
 7. It submits one bounded metadata-only prompt to the Omni AI job API.
 8. It polls only job state. On timeout, it requests cancellation before any rollback.
 9. It fetches authored YAML again and rejects additions, deletions, unrelated files, oversized changes, secrets, SQL, data-source, access, visibility, ownership, and governance changes.
-10. It forces model validation, then reruns configured content validation, semantic lint, semantic diff, downstream contracts, and optional dbt exposures.
+10. It forces model validation, then reruns configured content validation, semantic lint, semantic diff, downstream contracts, and optional dbt exposures. Model/content verification uses strict health, not the PR new-only switches or historical suppression; existing model errors cannot be accepted as a successful repair. Model warnings follow `fail_on_warnings`.
 11. It rechecks that the branch did not change during validation.
 12. It updates the Git-connected branch using `require_branch_exists: true` only after all gates pass.
 13. GitHub shows the resulting commit for human review. Ordinary required checks and approvals still govern merge.

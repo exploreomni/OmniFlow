@@ -48,7 +48,7 @@ contracts:
         self.assertEqual(config.content_validation.labels, ["Verified"])
         self.assertFalse(config.contracts.fail_on_deleted_referenced_fields)
 
-    def test_policy_config_can_be_empty_for_auto_mode(self):
+    def test_policy_config_can_omit_model_identity_for_auto_mode(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / ".omniflow.yml"
             path.write_text("checks:\n  model_validation:\n    enabled: true\n", encoding="utf-8")
@@ -212,22 +212,26 @@ deployment:
             with self.assertRaises(SecurityPolicyError):
                 load_config(path)
 
+    @mock.patch.dict(os.environ, {"GITHUB_EVENT_NAME": "", "GITHUB_BASE_REF": ""})
     def test_rejects_output_directory_symlinked_outside_repository(self):
         original = os.getcwd()
         with tempfile.TemporaryDirectory() as repo, tempfile.TemporaryDirectory() as outside:
             os.chdir(repo)
             try:
+                Path(".omniflow.yml").write_text("checks: {}\n", encoding="utf-8")
                 Path(".omniflow").symlink_to(outside, target_is_directory=True)
                 with self.assertRaises(SecurityPolicyError):
                     load_config()
             finally:
                 os.chdir(original)
 
+    @mock.patch.dict(os.environ, {"GITHUB_EVENT_NAME": "", "GITHUB_BASE_REF": ""})
     def test_rejects_output_directory_symlinked_within_repository(self):
         original = os.getcwd()
         with tempfile.TemporaryDirectory() as repo:
             os.chdir(repo)
             try:
+                Path(".omniflow.yml").write_text("checks: {}\n", encoding="utf-8")
                 Path("actual-output").mkdir()
                 Path(".omniflow").symlink_to("actual-output", target_is_directory=True)
                 with self.assertRaises(SecurityPolicyError):

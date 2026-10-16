@@ -7,7 +7,7 @@ from unittest import mock
 
 from omniflow.artifacts import write_artifact_manifest
 from omniflow.cli import _run_context, build_parser, main
-from omniflow.config import load_config
+from omniflow.config import _to_config
 from omniflow.discovery import ModelContext
 from omniflow.repair.reporting import write_repair_artifacts
 
@@ -67,8 +67,11 @@ class RepairCliReportingTests(unittest.TestCase):
                 )
                 markdown = Path(".omniflow/public/repair.md").read_text(encoding="utf-8")
                 manifest = json.loads(Path(".omniflow/artifact-manifest.json").read_text(encoding="utf-8"))
-                self.assertIn("&lt;tag&gt;", markdown)
-                self.assertIn("&#64;reviewer", markdown)
+                self.assertNotIn("&lt;tag&gt;", markdown)
+                self.assertNotIn("reviewer", markdown)
+                self.assertNotIn("orders.view", markdown)
+                self.assertIn("Modified file count: `1`", markdown)
+                self.assertIn("committed", markdown)
                 self.assertIn("public/repair.json", manifest["public_artifacts"])
                 self.assertIn("public/repair.md", manifest["public_artifacts"])
                 self.assertNotIn("prompt", Path(".omniflow/public/repair.json").read_text(encoding="utf-8"))
@@ -76,7 +79,7 @@ class RepairCliReportingTests(unittest.TestCase):
                 os.chdir(original)
 
     def test_repair_validation_runner_injects_repair_key_into_full_context_gate(self):
-        config = load_config()
+        config = _to_config({}, None)
         config.content_validation.enabled = False
         config.model_validation.enabled = False
         config.semantic_lint.enabled = False

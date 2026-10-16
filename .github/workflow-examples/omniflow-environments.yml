@@ -30,6 +30,7 @@ jobs:
           python-version: "3.11"
 
       - name: Validate same-repository candidate
+        id: omniflow
         if: github.event.pull_request.head.repo.full_name == github.repository
         uses: exploreomni/OmniFlow@<pinned-commit-sha> # zizmor: ignore[unpinned-uses] replace with reviewed release
         with:
@@ -50,6 +51,26 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: omniflow-environment-public-summary
-          path: .omniflow/public/
+          path: |
+            .omniflow/public/report.json
+            .omniflow/public/report.md
+            .omniflow/public/report.sarif
+            .omniflow/public/junit.xml
+            .omniflow/public/evidence.json
           if-no-files-found: ignore
+          include-hidden-files: true
+
+      - name: Upload repository diagnostics
+        if: always() && steps.omniflow.outputs.repository-diagnostics-ready == 'true' && github.event.repository.private == true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: omniflow-environment-repository-diagnostics
+          path: |
+            .omniflow/repository/report.json
+            .omniflow/repository/report.md
+            .omniflow/repository/report.sarif
+            .omniflow/repository/junit.xml
+            .omniflow/repository/status.json
+          retention-days: 7
+          if-no-files-found: error
           include-hidden-files: true

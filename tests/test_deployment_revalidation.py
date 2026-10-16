@@ -9,6 +9,7 @@ from unittest import mock
 
 import yaml
 
+from omniflow.diagnostics import capture_private_reports, record_private_report
 from omniflow.exceptions import ConfigError
 from omniflow.github.revalidation import CHECK_NAME, revalidate
 
@@ -47,7 +48,7 @@ class RevalidationTests(unittest.TestCase):
         self.directory.cleanup()
 
     def run_check(self, *, code=0, report=None, base=BASE, changed_files=("omni/views/orders.view",),
-                  inventory_error=None):
+                  inventory_error=None, receipt_count=1, public_report=None, write_public=True):
         inventory = list(changed_files) if changed_files is not None else None
 
         def validate(argv, *, changed_files):
@@ -59,7 +60,16 @@ class RevalidationTests(unittest.TestCase):
             payload = report if report is not None else {
                 "policy_decision": "pass", "models": [{"model_id": "m1"}], "git_sha": HEAD, "exit_code": 0,
             }
-            (self.output / "public/report.json").write_text(json.dumps(payload))
+            for _ in range(receipt_count):
+                record_private_report(payload)
+            if write_public:
+                # Shareable artifacts no longer carry the tenant identities or
+                # exact Git SHA that readiness needs for authorization.
+                public_payload = public_report if public_report is not None else {
+                    "schema_version": 2, "policy_decision": payload.get("policy_decision"),
+                    "exit_code": payload.get("exit_code"),
+                }
+                (self.output / "public/report.json").write_text(json.dumps(public_payload))
             return code
 
         with mock.patch.dict(os.environ, {"GITHUB_EVENT_NAME": "workflow_dispatch", "GITHUB_REF": "refs/heads/main",
@@ -86,6 +96,52 @@ class RevalidationTests(unittest.TestCase):
         self.assertEqual(calls[-1].args[2]["conclusion"], "success")
         self.assertFalse(any("merge" in call.args[1] for call in calls))
         self.assertEqual(self.state.sync_sha.call_count, 3)
+
+    def test_current_private_receipt_succeeds_without_any_public_file(self):
+        self.assertEqual(self.run_check(write_public=False), 0)
+        self.assertFalse((self.output / "public/report.json").exists())
+
+    def test_failure_check_does_not_publish_exception_text(self):
+        marker = "SYNTHETIC_PATIENT_MRN_TEST_DIAGNOSIS"
+        with self.assertRaises(ConfigError):
+            self.run_check(inventory_error=ConfigError(marker))
+        summary = self.api.request.call_args.args[2]["output"]["summary"]
+        self.assertNotIn(marker, summary)
+        self.assertIn("details withheld", summary)
+
+    def test_stale_or_forged_public_report_cannot_authorize_without_current_private_receipt(self):
+        forged = {"policy_decision": "pass", "models": [{"model_id": "m1"}],
+                  "git_sha": HEAD, "exit_code": 0}
+        for public_sha in (HEAD, "f" * 40):
+            with self.subTest(public_sha=public_sha):
+                forged["git_sha"] = public_sha
+                (self.output / "public/report.json").write_text(json.dumps(forged))
+                with self.assertRaisesRegex(ConfigError, "unique private execution receipt"):
+                    self.run_check(receipt_count=0, write_public=False)
+        self.assertFalse(any(call.args[0] == "DELETE" for call in self.api.request.call_args_list))
+        self.assertEqual(self.api.request.call_args.args[2]["conclusion"], "failure")
+
+    def test_duplicate_private_receipts_are_not_a_unique_validation_result(self):
+        with self.assertRaisesRegex(ConfigError, "unique private execution receipt"):
+            self.run_check(receipt_count=2)
+        self.assertFalse(any(call.args[0] == "DELETE" for call in self.api.request.call_args_list))
+
+    def test_prior_private_receipt_does_not_authorize_another_invocation(self):
+        with capture_private_reports() as prior_reports:
+            record_private_report({"policy_decision": "pass", "models": [{"model_id": "m1"}],
+                                   "git_sha": HEAD, "exit_code": 0})
+            with self.assertRaisesRegex(ConfigError, "unique private execution receipt"):
+                self.run_check(receipt_count=0)
+            self.assertEqual(len(prior_reports), 1)
+        self.assertFalse(any(call.args[0] == "DELETE" for call in self.api.request.call_args_list))
+
+    def test_forged_passing_public_report_cannot_override_private_head_mismatch(self):
+        forged = {"policy_decision": "pass", "models": [{"model_id": "m1"}],
+                  "git_sha": HEAD, "exit_code": 0}
+        stale = dict(forged, git_sha="f" * 40)
+        with self.assertRaisesRegex(ConfigError, "current PR head"):
+            self.run_check(report=stale, public_report=forged)
+        self.assertFalse(any(call.args[0] == "DELETE" for call in self.api.request.call_args_list))
 
     def test_changed_head_never_releases_label(self):
         changed = copy.deepcopy(self.pr)

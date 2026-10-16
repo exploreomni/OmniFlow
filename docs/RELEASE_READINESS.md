@@ -4,7 +4,7 @@
 
 OmniFlow remains controlled alpha. A merge, successful CI run, signed preflight, release publication, and adopter acceptance are different states. No checklist entry is satisfied merely by this document existing.
 
-This hardening branch prepares version `0.5.0a1`; no release tag, publication, or production acceptance is implied. Safer failure defaults and artifact manifest v2 need adopter review before upgrading from `0.4.0`.
+This hardening branch prepares version `0.5.0a1`; no release tag, publication, or production acceptance is implied. Safer failure behavior, artifact manifest v2, and breaking public diagnostic schema 2 need adopter review before upgrading from `0.4.0` or another earlier reporting revision. Schema 2 removes direct identities, paths, customer text, prompt IDs, and Git/Action references from shareable reports under both standard and strict settings.
 
 | Capability | Candidate policy | Acceptance needed before required production gating |
 | --- | --- | --- |
@@ -30,7 +30,7 @@ The package version alone is not a stability claim. Use the exact Git commit, di
 
 ## Adopter evidence record
 
-Copy this record for each capability and installation. Leave missing evidence marked `pending`, not `pass`.
+Copy this record into the approved private evidence store for each capability and installation. Direct tenant/resource IDs and Git provenance belong here, not in shareable diagnostic JSON. Leave missing evidence marked `pending`, not `pass`.
 
 | Field | Value |
 | --- | --- |
@@ -40,23 +40,30 @@ Copy this record for each capability and installation. Leave missing evidence ma
 | Candidate SHA / policy hash / configured Action SHA | Pending candidate selection |
 | Expected decision and exact test input identity | Pending approved fixture |
 | Actual exit code, coverage, run/check URL and head SHA | Pending execution |
-| Public artifact checksums and redaction inspection | Pending inspection |
+| Public artifact checksums, schema-2 privacy inspection, and explicit upload inventory | Pending inspection |
 | Restricted run/job records and retention policy | Pending review; never publish raw payloads |
 | Failure recovery result and residual state | Pending exercise |
 | Reviewer decision, limitations, supported modes | Pending acceptance |
 
 Core cases: valid and intentionally invalid models/content; correct discovery/branch mapping; representative semantic and downstream changes; malformed/unavailable evidence; withheld-secret/fork behavior; public JSON, Markdown, SARIF, JUnit and log inspection; blocked invalid/unreviewed merge; reviewed recovery.
 
+Diagnostic migration cases: verify both standard and strict produce only the minimum-data public schema; verify generated references do not replace trusted identity checks; inspect supported-file-only uploads and stale-file exclusion. Exercise synthetic PII/PHI/payment-like markers, unknown fields, names/paths, and exception text without real regulated test data. This evidence does not certify compliance or establish zero possible leakage. Prior artifacts require a separate retention/exposure review.
+
+Content-regression cases: explicitly approved new-only branch/base scope; existing readable issues remain visible without blocking, new/increased occurrences block, and incomplete evidence stays failed. Comment-only classification remains opt-in and never skips validation. Isolated live testing reproduced the grouped dashboard-filter response and justified a narrow adapter; retain evidence from the exact candidate's healthy/broken/restored replay. The actual customer response, API-owner contract agreement, and a successful live consumer pilot remain separate acceptance evidence—not satisfied by a synthetic replay or this documentation.
+
+Model-regression cases: independent explicit model policy; same live model/base and credential scope; matching existing errors, extra occurrences, changed severity, and warning enforcement; malformed/unavailable and ambiguous identity cannot establish a pass. Verify model and content are strict for orchestrated no-branch health, post-sync, and repair verification. Passing comparisons do not certify clean health or prove PR causality.
+
 dbt impact cases: additive change, referenced column/model removal, surviving node changing physical relation, distinct base/head content, Jinja/SELECT */unsupported SQL or missing manifest, untrusted/fork data, irrelevant skip. Record analyzer and coverage; no heuristic result is comprehensive validation.
 
 dbt sync/hold cases: successful deploy/refresh/post-validation; failed deploy prevents refresh; refresh failure after successful deploy records partial state; current PR head changing during sync/revalidation; absent/unreachable sync state; failed state write/reread; custom hold label; no deployment loop; manual merge only after the current-head readiness check and review. Use expand → migrate → contract. A hold cannot make a hard warehouse rename safe by itself.
 
-AI eval cases: zero sample limit still blocks regressions; cancelled/incomplete/missing scores; unsupported fractional scores; multiple models; duplicate/missing prompt rows; partial or ambiguous run creation; timeout and known-run reconciliation; strict privacy through CLI/Action/artifacts. Confirm actual API execution, permissions, quota, and cost with the tenant owner. Do not assume core validation's no-query behavior applies.
+AI eval cases: zero sample limit still blocks regressions; cancelled/incomplete/missing scores; unsupported fractional scores; multiple models; duplicate/missing prompt rows; partial or ambiguous run creation; timeout and known-run reconciliation; minimal schema privacy through CLI/Action/artifacts in both standard and strict settings, including no public prompt IDs. Confirm actual API execution, permissions, quota, and cost with the tenant owner. Do not assume core validation's no-query behavior applies.
 
 ## Operations, upgrade and recovery
 
 - Start with a bounded non-production pilot. Move to advisory production observation only after evidence review; agree duration, monitoring, owners, and escalation before enabling a required production check.
-- Upgrade through a reviewed PR changing the pinned Action SHA and any policy/schema changes together. Preserve the previous verified SHA, policy hash, and evidence. Re-run only affected capability acceptance plus the core smoke checks.
+- If upgrading a policy-free installation, first bootstrap a compatible required root [`.omniflow.yml`](../.omniflow.yml) on the protected base through review, then coordinate the supporting Action SHA and new settings. A policy introduced only in the upgrade PR head is not trusted by that run. Older pins reject `checks.model_validation.fail_on_new_only`; do not introduce it while leaving an incompatible Action active. The canonical template explicitly enables both model and content new-only gating; review those independent choices with the owners.
+- Upgrade through reviewed changes to the pinned Action SHA and policy/schema. Preserve the previous verified SHA, policy hash, and evidence. Re-run only affected capability acceptance plus the core smoke checks; verify missing policy fails with configuration exit `2` and cannot be replaced by environment or identity overrides.
 - Recover a validator regression by a reviewed revert or restoring the prior verified Action SHA. Preserve branch protections. If urgent governance recovery is necessary, a named administrator must record the reason, exact temporary change and restoration; it is not approval to force a known-invalid merge.
 - On a partial dbt failure, pause further changes, inspect the warehouse and recorded refresh/job state, restore compatibility or use a reviewed forward fix, then explicitly revalidate the current PR head. Completed dbt/warehouse changes do not automatically roll back when Omni fails.
 - For an interrupted AI eval, reconcile known owned run IDs before retrying. Ambiguous creation must be investigated, not blindly retried. Restrict lifecycle records and apply the approved retention policy.

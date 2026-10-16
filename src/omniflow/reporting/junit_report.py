@@ -7,6 +7,7 @@ from typing import Any
 from xml.etree import ElementTree  # nosec B405
 
 from ..security import secure_write_text
+from .issue_policy import is_blocking
 
 
 def to_junit(report: dict[str, Any]) -> str:
@@ -39,4 +40,4 @@ def write_junit_report(path: str | Path, report: dict[str, Any]) -> None:
 
 
 def _is_failure(issue: dict[str, Any]) -> bool:
-    return issue.get("active", True) and (issue.get("severity") == "error" or issue.get("blocking") is True)
+    return is_blocking(issue)

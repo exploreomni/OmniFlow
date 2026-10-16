@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=83,<84", "wheel"]
+requires = ["setuptools>=84,<85", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -25,6 +25,7 @@ classifiers = [
 dependencies = [
   "PyYAML>=6.0.3,<7",
   "requests>=2.34.2,<3",
+  "urllib3>=2.8.0,<3",
 ]
 
 [project.optional-dependencies]

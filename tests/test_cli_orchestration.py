@@ -15,7 +15,7 @@ from omniflow.cli import (
     cmd_route,
     cmd_run,
 )
-from omniflow.config import load_config
+from omniflow.config import _to_config
 from omniflow.discovery import ModelContext
 from omniflow.exceptions import ConfigError, OmniAPIError, SecurityPolicyError
 from omniflow.security import secure_write_text
@@ -30,11 +30,13 @@ class FakeClient:
 
 
 class CliOrchestrationTests(unittest.TestCase):
+    @mock.patch.dict(os.environ, {"GITHUB_EVENT_NAME": "", "GITHUB_BASE_REF": ""})
     def test_route_skips_and_writes_evidence_without_an_omni_api_key(self):
         original = os.getcwd()
         with tempfile.TemporaryDirectory() as tmp:
             os.chdir(tmp)
             try:
+                Path(".omniflow.yml").write_text("checks: {}\n", encoding="utf-8")
                 args = SimpleNamespace(
                     config=None,
                     auto=True,
@@ -59,11 +61,13 @@ class CliOrchestrationTests(unittest.TestCase):
             finally:
                 os.chdir(original)
 
+    @mock.patch.dict(os.environ, {"GITHUB_EVENT_NAME": "", "GITHUB_BASE_REF": ""})
     def test_route_allows_relevant_context_without_writing_skip_artifacts(self):
         original = os.getcwd()
         with tempfile.TemporaryDirectory() as tmp:
             os.chdir(tmp)
             try:
+                Path(".omniflow.yml").write_text("checks: {}\n", encoding="utf-8")
                 args = SimpleNamespace(
                     config=None,
                     auto=True,
@@ -91,11 +95,13 @@ class CliOrchestrationTests(unittest.TestCase):
             finally:
                 os.chdir(original)
 
+    @mock.patch.dict(os.environ, {"GITHUB_EVENT_NAME": "", "GITHUB_BASE_REF": ""})
     def test_multi_context_run_aggregates_partial_failure_and_cleans_restricted_data(self):
         original = os.getcwd()
         with tempfile.TemporaryDirectory() as tmp:
             os.chdir(tmp)
             try:
+                Path(".omniflow.yml").write_text("checks: {}\n", encoding="utf-8")
                 contexts = [
                     ModelContext(
                         base_url="https://omni.example",
@@ -158,7 +164,7 @@ class CliOrchestrationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             os.chdir(tmp)
             try:
-                config = load_config(None)
+                config = _to_config({}, None)
                 stale = Path(".omniflow/restricted/stale/private.json")
                 stale.parent.mkdir(parents=True)
                 stale.write_text("private", encoding="utf-8")
@@ -258,7 +264,7 @@ class CliOrchestrationTests(unittest.TestCase):
         )
         with tempfile.TemporaryDirectory() as tmp:
             report, exit_code = _write_context_failure_artifacts(
-                config=load_config(None),
+                config=_to_config({}, None),
                 context=context,
                 output_dir=Path(tmp),
                 exc=OmniAPIError("Omni API request failed"),
@@ -271,13 +277,14 @@ class CliOrchestrationTests(unittest.TestCase):
     def test_setup_failure_writes_security_policy_artifacts(self):
         with tempfile.TemporaryDirectory() as tmp:
             _write_setup_failure_artifacts(
-                config=load_config(None),
+                config=_to_config({}, None),
                 output_dir=Path(tmp),
                 exc=SecurityPolicyError("unsafe marker"),
             )
             report = (Path(tmp) / "public/report.json").read_text(encoding="utf-8")
         self.assertIn("security policy violation", report)
-        self.assertIn("unsafe marker", report)
+        self.assertNotIn("unsafe marker", report)
+        self.assertIn("diagnostic_schema_version", report)
 
 
 if __name__ == "__main__":

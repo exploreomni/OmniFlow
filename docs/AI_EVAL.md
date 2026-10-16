@@ -19,7 +19,7 @@ Routine validation uses YAML and validation/metadata endpoints. AI eval starts a
 | Missing/duplicate prompt rows, malformed results, wrong run identity, or an empty/archived set | Operational failure, always blocks |
 | Numeric score other than exactly `0` or `1` | Unsupported scoring contract; operational failure |
 
-`fail_on_regression: false` changes complete accuracy regressions into warnings. It never downgrades operational failures. `security.max_report_samples` only limits sampled opaque prompt IDs, including when set to zero; full regression counts always determine the gate.
+`fail_on_regression: false` changes complete accuracy regressions into warnings. It never downgrades operational failures. `security.max_report_samples` limits sampled detail in the internal report, including when set to zero; full regression counts always determine the gate. Public schema 2 omits prompt IDs entirely, regardless of the sample setting.
 
 ## Prerequisite
 
@@ -56,12 +56,13 @@ The [start-run API](https://docs.omni.co/api/ai-eval/start-an-eval-run) describe
 
 ## Evidence
 
-Each run writes two artifacts:
+The run produces minimal reports and separate restricted lifecycle/detail files:
 
 ```text
 .omniflow/
-  report.json          # aggregate report; ai_eval appears in check_reports
-  report.md            # includes an "AI Eval" section per model
+  public/
+    report.json        # schema 2; safe ai_eval counts/flags in check_reports
+    report.md          # minimal check execution and fixed finding categories
   restricted/<model>/
     ai-eval-detail.json  # restricted: full per-prompt rows, conversation IDs, timing
     ai-eval-runs.json    # restricted: durable run IDs, last status, cleanup/recovery state
@@ -69,13 +70,15 @@ Each run writes two artifacts:
 
 `ai-eval-detail.json` is written only to the restricted artifact path and is never included in `public/`. It carries the same kind of data-bearing fields (timing, conversation ID) that `get_ai_job_status` already discards for AI Repair, for the same reason: it can reflect customer prompt and answer content.
 
-The public report (`report.json`, `report.md`, `report.sarif`, `junit.xml`) carries only:
+Public JSON (`report.json`) carries permitted AI-eval evidence; Markdown, SARIF, and JUnit provide format-specific subsets:
 
-- Per prompt set aggregate accuracy (main vs. branch)
-- Complete regression counts and a bounded list (`security.max_report_samples`) of opaque hashed prompt IDs
-- Fixed operational reason codes and a cleanup-required flag
+- Complete regression/improvement/unchanged counts and prompt-set counts, where available.
+- Fixed check/finding categories, exit reasons, and operational-failure/cleanup-required flags.
+- Generated anonymous model-context references, not direct model, branch, prompt-set, or run identities.
 
-Prompt text, configured labels, judge errors, conversation identifiers, and response details never enter any public format, even with standard redaction. The restricted detail maps opaque prompt IDs to full prompts. Restricted artifacts follow the default deletion policy; explicitly enable approved restricted retention when recovery evidence must survive the run, and keep uploads restricted to authorized operators.
+Prompt text, opaque prompt IDs, configured labels, judge errors, conversation identifiers, and response details are excluded by the minimal public schema under both standard and strict settings. Per-prompt-set accuracy/detail is not part of this shareable schema. The restricted detail maps opaque prompt IDs to full prompts and must be treated as confidential. Restricted artifacts follow the default deletion policy; explicitly enable approved restricted retention only when recovery evidence must survive the run, and keep any separately authorized handoff limited to appropriate operators.
+
+Upload only the supported public report filenames explicitly listed in the reviewed workflow, not the whole public or restricted directory. Verify exact model/branch/set/run identities through trusted private evidence and Omni before taking recovery action. See [Diagnostic Privacy](DIAGNOSTIC_PRIVACY.md); these controls are not a blanket PII/PHI/PCI or compliance guarantee.
 
 ## Failure Recovery
 

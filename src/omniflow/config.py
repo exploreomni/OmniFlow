@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .exceptions import ConfigError, SecurityPolicyError
+from .exceptions import ConfigError, MissingPolicyError, SecurityPolicyError
 from .security import contains_secret_key, reject_secret_keys, validate_repo_output_path
 from .trust import read_trusted_repo_text
 from .yaml_security import parse_secure_yaml
@@ -41,8 +41,8 @@ OMNI_KEYS = {
     "timeout",
 }
 CHECK_KEYS = {"content_validation", "model_validation", "semantic_lint", "dbt_exposures", "dbt_impact", "ai_eval"}
-CONTENT_KEYS = {"enabled", "fail_on_new_only", "labels"}
-MODEL_KEYS = {"enabled", "fail_on_warnings"}
+CONTENT_KEYS = {"enabled", "fail_on_new_only", "labels", "classify_comment_only"}
+MODEL_KEYS = {"enabled", "fail_on_warnings", "fail_on_new_only"}
 LINT_KEYS = {"enabled", "rules"}
 EXPOSURE_KEYS = {"enabled", "fail_on_unavailable"}
 DBT_IMPACT_KEYS = {
@@ -65,7 +65,9 @@ AI_EVAL_KEYS = {
 }
 PROMPT_SET_KEYS = {"id", "label", "model_id"}
 MAX_PROMPT_SETS = 20
-REPORTING_KEYS = {"formats", "output_dir"}
+REPORTING_KEYS = {"formats", "output_dir", "diagnostics"}
+DIAGNOSTICS_KEYS = {"mode"}
+DIAGNOSTICS_MODES = {"repository", "minimal"}
 SECURITY_KEYS = {
     "redact_logs",
     "allow_raw_response_output",
@@ -170,19 +172,17 @@ def config_hash(payload: dict[str, Any]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
-def load_raw_config(path: str | Path | None = None) -> tuple[dict[str, Any], Path | None]:
-    candidates = [Path(path)] if path else [Path(DEFAULT_CONFIG_PATH)]
-    for candidate in candidates:
-        text = read_trusted_repo_text(candidate)
-        if text is None:
-            continue
-        payload = parse_secure_yaml(text, source=str(candidate))
-        if not isinstance(payload, dict):
-            raise ConfigError(f"Config file '{candidate}' must contain a top-level mapping")
-        reject_secret_keys(payload, source=str(candidate))
-        _validate_config_schema(payload)
-        return expand_env_vars(payload), candidate
-    return {}, None
+def load_raw_config(path: str | Path | None = None) -> tuple[dict[str, Any], Path]:
+    candidate = Path(path) if path else Path(DEFAULT_CONFIG_PATH)
+    text = read_trusted_repo_text(candidate)
+    if text is None:
+        raise MissingPolicyError()
+    payload = parse_secure_yaml(text, source=str(candidate))
+    if not isinstance(payload, dict) or not payload:
+        raise ConfigError(f"Config file '{candidate}' must contain a non-empty top-level mapping")
+    reject_secret_keys(payload, source=str(candidate))
+    _validate_config_schema(payload)
+    return expand_env_vars(payload), candidate
 
 
 @dataclass
@@ -200,6 +200,7 @@ class OmniSettings:
 class ContentValidationSettings:
     enabled: bool = True
     fail_on_new_only: bool = False
+    classify_comment_only: bool = False
     labels: list[str] = field(default_factory=list)
 
 
@@ -207,6 +208,7 @@ class ContentValidationSettings:
 class ModelValidationSettings:
     enabled: bool = True
     fail_on_warnings: bool = False
+    fail_on_new_only: bool = False
 
 
 @dataclass
@@ -255,6 +257,7 @@ class AiEvalSettings:
 class ReportingSettings:
     formats: list[str] = field(default_factory=lambda: list(DEFAULT_REPORT_FORMATS))
     output_dir: str = ".omniflow"
+    diagnostics_mode: str = "repository"
 
 
 @dataclass
@@ -372,6 +375,9 @@ def _to_config(raw: dict[str, Any], source: Path | None) -> OmniFlowConfig:
     )
     content = ContentValidationSettings(
         enabled=parse_bool("content_validation.enabled", content_raw.get("enabled"), True),
+        classify_comment_only=parse_bool(
+            "content_validation.classify_comment_only", content_raw.get("classify_comment_only"), False
+        ),
         fail_on_new_only=parse_bool(
             "content_validation.fail_on_new_only",
             os.getenv("OMNI_FAIL_ON_NEW_ONLY", content_raw.get("fail_on_new_only")),
@@ -382,6 +388,7 @@ def _to_config(raw: dict[str, Any], source: Path | None) -> OmniFlowConfig:
     model = ModelValidationSettings(
         enabled=parse_bool("model_validation.enabled", model_raw.get("enabled"), True),
         fail_on_warnings=parse_bool("model_validation.fail_on_warnings", model_raw.get("fail_on_warnings"), False),
+        fail_on_new_only=parse_bool("model_validation.fail_on_new_only", model_raw.get("fail_on_new_only"), False),
     )
     lint = SemanticLintSettings(
         enabled=parse_bool("semantic_lint.enabled", lint_raw.get("enabled"), True),
@@ -484,6 +491,7 @@ def _to_config(raw: dict[str, Any], source: Path | None) -> OmniFlowConfig:
     reporting = ReportingSettings(
         formats=formats,
         output_dir=output_dir,
+        diagnostics_mode=_diagnostics_mode(reporting_raw),
     )
     security = SecuritySettings(
         redact_logs=parse_bool("security.redact_logs", security_raw.get("redact_logs"), True),
@@ -805,6 +813,7 @@ def _validate_config_schema(raw: dict[str, Any]) -> None:
     _reject_unknown_keys(omni, OMNI_KEYS, "omni")
     _reject_unknown_keys(checks, CHECK_KEYS, "checks")
     _reject_unknown_keys(reporting, REPORTING_KEYS, "reporting")
+    _diagnostics_mode(reporting)
     _reject_unknown_keys(security, SECURITY_KEYS, "security")
     _reject_unknown_keys(contracts, CONTRACT_KEYS, "contracts")
     _reject_unknown_keys(repairs, REPAIR_KEYS, "repairs")
@@ -895,6 +904,19 @@ def _report_formats(value: Any) -> list[str]:
     if unknown:
         raise ConfigError(f"Unknown reporting format(s): {', '.join(unknown)}")
     return formats
+
+
+def _diagnostics_mode(reporting: dict[str, Any]) -> str:
+    """Disclosure policy is literal; environment expansion must not enable it."""
+    diagnostics = reporting.get("diagnostics", {})
+    if not isinstance(diagnostics, dict):
+        raise ConfigError("reporting.diagnostics must be a mapping")
+    if any(key not in DIAGNOSTICS_KEYS for key in diagnostics):
+        raise ConfigError("reporting.diagnostics contains unsupported keys")
+    mode = diagnostics.get("mode", "repository")
+    if not isinstance(mode, str) or mode not in DIAGNOSTICS_MODES:
+        raise ConfigError("reporting.diagnostics.mode must be 'repository' or 'minimal'")
+    return mode
 
 
 def _output_dir(value: Any) -> str:

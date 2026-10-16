@@ -5,9 +5,166 @@ from pathlib import Path
 from typing import Any
 
 from ..security import redact, secure_write_text
+from .finding_groups import group_findings
+from .issue_policy import is_blocking
+
+
+def _render_minimal_diagnostic(report: dict[str, Any]) -> str:
+    repository_detail = report.get("diagnostic_audience") == "repository"
+    summary = report.get("summary", {})
+    findings = report.get("issues", [])
+    blocking_count = sum(is_blocking(finding) for finding in findings)
+    lines = [
+        "# OmniFlow", "", "## Decision", "",
+        f"**{_decision_label(report.get('policy_decision', 'unknown'), operation=report.get('operation', 'validation'))}**",
+        "", f"- Exit reason: `{_safe_code(report.get('exit_code_reason', 'unknown'))}`",
+        f"- Run reference: `{_safe_code(report.get('run_reference', 'unavailable'))}`",
+        f"- Validation complete: `{str(report.get('validation_complete', False)).lower()}`",
+        f"- Blocking issues (all checks): `{blocking_count}`",
+        f"- Recorded errors: `{summary.get('errors', 0)}`; warnings: `{summary.get('warnings', 0)}`",
+        "", ("Repository-only diagnostics: verified source identifiers and locations are included. "
+             "Do not forward as a shareable support report. Raw API messages and data values remain excluded."
+             if repository_detail else
+             "This report explains check categories and policy decisions without exposing customer text or resource identities."),
+        "Health counts and policy blockers are different. A passing regression check does not establish "
+        "that all model or content issues are resolved.",
+    ]
+    classification = report.get("change_classification")
+    if isinstance(classification, dict):
+        lines.extend([
+            "", "## PR Change Classification", "",
+            f"- Classification: `{_safe_code(classification.get('classification', 'unverified'))}`",
+            f"- Reason: `{_safe_code(classification.get('reason_code', 'unknown'))}`",
+            "- Content validation remains required: Git-only classification cannot verify live content or drafts.",
+        ])
+    if repository_detail:
+        detail = report.get("repository_diagnostics", {})
+        lines.extend([
+            "", f"- Findings with verified source locations: `{detail.get('mapped_findings', 0)}`",
+            f"- Findings without verified source locations: `{detail.get('unmapped_findings', 0)}`",
+            "- Locations refer to the recorded head or base snapshot, not necessarily the latest branch contents.",
+            "- Unmapped findings retain safe guidance. No location or underlying cause is guessed.",
+        ])
+    lines.extend(_public_finding_lines(findings, repository_detail=repository_detail))
+    contexts = report.get("model_reports") or [report]
+    lines.extend(["", "## Check Execution", ""])
+    for context in contexts:
+        reference = _safe_code(context.get("context_reference", "context"))
+        states = context.get("check_states", [])
+        for state in states:
+            lines.append(f"- `{reference}` / `{_safe_code(state.get('validator', 'unknown'))}`: "
+                         f"`{_safe_code(state.get('status', 'unknown'))}`")
+        if not states:
+            lines.append(f"- `{reference}`: execution evidence unavailable.")
+        checks = context.get("check_reports") or [context]
+        for check in checks:
+            validator = check.get("validator")
+            if validator not in {"content", "model"}:
+                continue
+            title = "Content" if validator == "content" else "Model"
+            lines.extend(["", f"### {title} Comparison — {reference}", ""])
+            lines.extend([_comparison_outcome(check, validator), ""])
+            health_summary = check.get("summary")
+            if isinstance(health_summary, dict):
+                lines.append(f"- Current health errors: `{health_summary.get('errors', 0)}`; "
+                             f"warnings: `{health_summary.get('warnings', 0)}`")
+            for key in ("comparison_mode", "comparison_status", "comparison_source", f"{validator}_health",
+                        "regression_status", "blocking_issues", "baseline_issues", "current_issues",
+                        "new_issues", "existing_issues", "resolved_issues", "improved_issues"):
+                if key in check:
+                    value = "unknown" if check[key] is None else str(check[key])
+                    lines.append(f"- {key.replace('_', ' ')}: `{_safe_code(value)}`")
+    lines.extend([
+        "", "## Next Steps", "",
+        "- For readable content findings, inspect Content Validator in Omni for the same model, branch, "
+        "and visibility scope. Sensitive object details are intentionally omitted here.",
+        "- For model findings, validate the same model branch in Omni. Current errors remain health findings "
+        "even when matched baseline issues do not block the PR.",
+        "- Under new-only policy, unchanged matched baseline issues are nonblocking; new, increased, or worsened "
+        "issues follow severity policy. Under all-issues policy, current issues follow severity policy even "
+        "if they already existed. Model warnings block only when warning gating is enabled.",
+        "- For unavailable evidence, resolve the response or access problem and rerun. Do not treat "
+        "missing evidence as a clean baseline or disable validation to obtain a pass.",
+    ])
+    return "\n".join(lines) + "\n"
+
+
+def _public_finding_lines(findings: list[dict[str, Any]], *, repository_detail: bool = False) -> list[str]:
+    lines = ["", "## Findings", ""]
+    if not findings:
+        return lines + ["No findings recorded. Check execution completeness before interpreting this as a pass."]
+    groups = group_findings(findings)
+    for blocking, title in ((True, "Blocking findings"), (False, "Nonblocking findings")):
+        selected = [(finding, count) for finding, count in groups if is_blocking(finding) is blocking]
+        total = sum(count for _, count in selected)
+        lines.extend([f"### {title} — {total} occurrence{'s' if total != 1 else ''}", ""])
+        if not selected:
+            lines.extend(["None recorded.", ""])
+            continue
+        if not blocking:
+            lines.extend(["These findings do not cause this run to fail. Counts are occurrences, not unique objects. "
+                          "Lint findings describe the checked model; they are not proof of a new PR regression.", ""])
+        for index, (finding, count) in enumerate(selected[:20], 1):
+            code = finding.get("rule_id") or finding.get("type", "omniflow_finding")
+            lines.append(f"{index}. `{_safe_code(finding.get('validator', 'execution'))}` / `{_safe_code(code)}` "
+                         f"({_safe_code(finding.get('severity', 'unknown'))}) — "
+                         f"**{count} occurrence{'s' if count != 1 else ''}**: "
+                         f"{_safe_text(finding.get('message', 'No recognized diagnostic category was supplied.'))}")
+            lines.append(f"   - policy: `{'blocking' if blocking else 'nonblocking'}`")
+            if repository_detail:
+                for key in ("file", "line", "field", "view", "topic", "source_revision", "diagnostic_code"):
+                    if key in finding:
+                        lines.append(f"   - {key.replace('_', ' ')}: `{_safe_code(finding[key])}`")
+            for key in ("context_reference", "validation_scope", "state", "reason_code", "candidate_reason",
+                        "comparison_mode", "comparison_status", "content_health", "model_health",
+                        "regression_status", "active"):
+                if key in finding:
+                    value = str(finding[key]).lower() if type(finding[key]) is bool else finding[key]
+                    lines.append(f"   - {key.replace('_', ' ')}: `{_safe_code(value)}`")
+        if len(selected) > 20:
+            omitted = sum(count for _, count in selected[20:])
+            lines.append(f"Additional safe findings are available in the JSON report: "
+                         f"{len(selected) - 20} more categories, {omitted} occurrences.")
+        lines.append("")
+    return lines
+
+
+def _comparison_outcome(check: dict[str, Any], validator: str) -> str:
+    title = "Content" if validator == "content" else "Model"
+    noun = title.lower()
+    mode = check.get("comparison_mode")
+    blocking = check.get("blocking_issues")
+    if type(blocking) is not int:
+        if "issues" in check:
+            blocking = sum(is_blocking(issue) for issue in check["issues"])
+        elif validator == "content":
+            # Compatibility for earlier content-only reports without explicit
+            # blocking counts. Model warning policy cannot be inferred this way.
+            blocking = check.get("new_issues" if mode == "new_only" else "current_issues", 0)
+    if mode == "all_issues" and check.get("current_issues", 0) > 0:
+        if blocking:
+            return (f"{title} issues were found. The configured all-issues policy blocks current issues, "
+                    "including existing ones.")
+        return f"Current {noun} issues remain; none are recorded as blocking under the configured severity policy."
+    if (mode == "all_issues" and check.get("validation_complete") is True
+            and check.get("current_issues") == 0 and blocking == 0
+            and check.get(f"{validator}_health") == "no_issues_in_scope"):
+        return (f"Current {noun} health check found no current issues. "
+                "This all-issues policy does not require a regression comparison.")
+    if check.get("comparison_status") == "complete":
+        if check.get("new_issues", 0) > 0:
+            if blocking:
+                return f"New {noun} issues were detected relative to the baseline; this check blocks the PR."
+            return f"New {noun} issues were detected, but they do not block under the configured severity policy."
+        if check.get("current_issues", 0) > 0:
+            return "No new issues were detected. Existing issues remain; the new-only regression check passes."
+        return f"No current {noun} issues were found in the evaluated scope."
+    return f"A complete baseline comparison is unavailable. Do not infer that the PR introduced a {noun} defect."
 
 
 def render_markdown_report(report: dict[str, Any]) -> str:
+    if report.get("diagnostic_schema_version") == 2:
+        return _render_minimal_diagnostic(report)
     summary = report.get("summary", {})
     decision = str(report.get("policy_decision") or "unknown")
     exit_reason = str(report.get("exit_code_reason") or "")
@@ -619,7 +776,7 @@ def _reviewer_actions(
 
 
 def _is_blocking(issue: dict[str, Any]) -> bool:
-    return issue.get("active", True) and (issue.get("severity") == "error" or issue.get("blocking") is True)
+    return is_blocking(issue)
 
 
 def _uncertain_warning_lines(issues: list[dict[str, Any]]) -> list[str]:

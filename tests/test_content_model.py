@@ -90,7 +90,8 @@ class ContentModelTests(unittest.TestCase):
                 fail_on_new_only=True,
             )
         self.assertEqual(report["new_issues"], 1)
-        self.assertEqual(exit_code, 1)
+        self.assertEqual(exit_code, 4)
+        self.assertFalse(report["validation_complete"])
 
     def test_branch_content_compares_to_base_model_without_persisted_history(self):
         client = FakeClient()

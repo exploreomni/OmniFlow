@@ -32,6 +32,7 @@ from .config import (
 from .contracts import evaluate_contracts
 from .dbt_impact import evaluate_dbt_impact
 from .dbt_sync import run_dbt_sync, validate_dbt_sync_environment
+from .diagnostics import diagnostic_session, public_diagnostic, safe_exception_message
 from .diff.diff_engine import diff_graphs
 from .diff.semantic_graph import has_inheritance, load_yaml_graph
 from .diff.yaml_loader import load_yaml_files
@@ -43,18 +44,29 @@ from .discovery import (
     load_flow_metadata,
 )
 from .downstream import generate_downstream_dependencies
-from .exceptions import ConfigError, ExitCodes, OmniAuthError, OmniFlowError, SecurityPolicyError
+from .exceptions import ConfigError, ExitCodes, OmniAuthError, OmniFlowError, OmniResponseError, SecurityPolicyError
 from .execution import ValidationProgress, scope_findings
 from .exposures import run_dbt_exposure_enrichment
 from .git import current_branch, current_sha, event_name, git_executable, git_value, is_pull_request_event, pr_number
-from .github.annotations import annotation_lines
+from .github.annotations import public_annotation_lines
 from .github.repair_attempt import GitHubRepairAttemptGuard, load_repair_event
 from .logging import configure_logging
+from .nonsemantic import classify_pr_change
 from .omni_client import OmniClient
 from .repair.orchestrator import run_ai_repair, validate_ai_repair_policy
 from .repair.reporting import write_repair_artifacts
+from .reporting.issue_policy import is_blocking
 from .reporting.json_report import write_json_report
-from .reporting.writer import write_reports
+from .repository_diagnostics import (
+    REPORT_NAMES as REPOSITORY_REPORT_NAMES,
+)
+from .repository_diagnostics import (
+    clear_repository_reports,
+    finish_repository_context,
+    publish_repository_output,
+    repository_reporting,
+    start_repository_context,
+)
 from .revision_data import pull_request_changed_files, pull_request_revision
 from .security import redact, validate_path_segment, validate_repo_output_path
 from .timestamps import utc_now_iso
@@ -79,10 +91,10 @@ def main(argv: list[str] | None = None, *, changed_files: list[str] | None = Non
             return cmd_run(args, changed_files=changed_files)
         return args.func(args)
     except OmniFlowError as exc:
-        print(redact(str(exc)), file=sys.stderr)
+        print(safe_exception_message(exc), file=sys.stderr)
         return exc.exit_code
     except Exception as exc:
-        print(redact(f"Internal omniflow error: {exc}"), file=sys.stderr)
+        print(safe_exception_message(exc), file=sys.stderr)
         return ExitCodes.INTERNAL_ERROR
 
 
@@ -196,7 +208,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _add_config_arg(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--config", default=None)
+    parser.add_argument(
+        "--config", default=None,
+        help="Required policy file (default: .omniflow.yml); PRs read the trusted base branch",
+    )
 
 
 def _add_common_omni_args(parser: argparse.ArgumentParser) -> None:
@@ -209,6 +224,7 @@ def _add_common_omni_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--include-personal-folders", action=argparse.BooleanOptionalAction, default=None)
 
 
+@diagnostic_session()
 def cmd_run(args: argparse.Namespace, *, changed_files: list[str] | None = None) -> int:
     try:
         config = _override_config(load_config(args.config), args)
@@ -218,7 +234,8 @@ def cmd_run(args: argparse.Namespace, *, changed_files: list[str] | None = None)
     output_dir = Path(config.reporting.output_dir)
     _validate_run_output_layout(output_dir)
     try:
-        return _execute_run(args, config=config, output_dir=output_dir, changed_files=changed_files)
+        with repository_reporting(config, output_dir=output_dir):
+            return _execute_run(args, config=config, output_dir=output_dir, changed_files=changed_files)
     except OmniFlowError:
         raise
     except Exception:
@@ -232,7 +249,7 @@ def _execute_run(args, *, config, output_dir: Path, changed_files: list[str] | N
         _purge_restricted_path(restricted_dir(output_dir))
     if args.skip_reason:
         _write_skipped_artifacts(config=config, output_dir=output_dir, reason=args.skip_reason)
-        print(f"OmniFlow skipped: {args.skip_reason}")
+        print("OmniFlow skipped under the trusted workflow policy; see the sanitized report.")
         return 0
     try:
         contexts = discover_contexts(
@@ -260,6 +277,7 @@ def _execute_run(args, *, config, output_dir: Path, changed_files: list[str] | N
     all_reports = []
     all_issues: list[dict[str, Any]] = []
     exit_code = 0
+    classification = classify_pr_change(contexts) if config.content_validation.classify_comment_only else None
     if changed_files is None:
         changed_files = get_changed_files() if config.breaking_change_hold.enabled else []
     for context in contexts:
@@ -290,6 +308,10 @@ def _execute_run(args, *, config, output_dir: Path, changed_files: list[str] | N
 
     summary = _summarize(all_issues)
     report = _aggregate_report(config, contexts, exit_code, all_issues, summary, all_reports)
+    if classification is not None:
+        # Classification is explanatory only. Git cannot prove the absence of
+        # extra Omni drafts; no classification may suppress an enabled check.
+        report["change_classification"] = classification
     public_report = write_public_reports(
         report,
         output_dir=output_dir,
@@ -324,6 +346,7 @@ def _execute_run(args, *, config, output_dir: Path, changed_files: list[str] | N
         redaction_level=config.security.redaction_level,
     )
     _emit_hold_output(all_issues, settings=config.breaking_change_hold)
+    publish_repository_output()
     print(f"OmniFlow complete: models={len(contexts)} issues={summary['total_issues']} exit_code={exit_code}")
     return exit_code
 
@@ -687,15 +710,21 @@ def _run_context(
     comparison_base_yaml_dir: Path | None = None,
     changed_files: list[str] | None = None,
     enforce_breaking_hold: bool = False,
+    strict_health: bool = False,
 ) -> tuple[dict[str, Any], int]:
     progress = ValidationProgress(config, branch_id=context.branch_id, enforce_breaking_hold=enforce_breaking_hold)
-    if context.environment:
+    regression_pr = not strict_health and is_pull_request_event() and (
+        (config.content_validation.enabled and config.content_validation.fail_on_new_only)
+        or (config.model_validation.enabled and config.model_validation.fail_on_new_only)
+    )
+    if context.environment or regression_pr:
         progress.states["candidate"] = {"validator": "candidate", "status": "not_run"}
     try:
         return _run_context_steps(
             config=config, context=context, output_dir=output_dir, api_key=api_key,
             comparison_base_yaml_dir=comparison_base_yaml_dir, changed_files=changed_files,
             enforce_breaking_hold=enforce_breaking_hold, progress=progress,
+            strict_health=strict_health, regression_pr=regression_pr,
         )
     except Exception as exc:
         progress.fail(exc)
@@ -707,6 +736,7 @@ def _run_context_steps(
     *, config, context: ModelContext, output_dir: Path, api_key: str | None,
     comparison_base_yaml_dir: Path | None, changed_files: list[str] | None,
     enforce_breaking_hold: bool, progress: ValidationProgress,
+    strict_health: bool, regression_pr: bool,
 ) -> tuple[dict[str, Any], int]:
     if context.environment and (config.breaking_change_hold.enabled or config.dbt_sync.enabled):
         raise SecurityPolicyError(
@@ -720,7 +750,9 @@ def _run_context_steps(
     all_issues = progress.issues
     reports = progress.reports
     exit_code = 0
-    if context.environment:
+    verify_provenance = bool(context.environment) or regression_pr
+    baseline_proof = None
+    if verify_provenance:
         from .candidate import verify_candidate
 
         progress.begin("candidate")
@@ -728,6 +760,14 @@ def _run_context_steps(
         context.candidate_verification = verify_candidate(client, context)
         # Completion requires the second sample after every enabled check.
         context.candidate_verification["status"] = "pending_recheck"
+        if regression_pr:
+            baseline_proof = verify_candidate(client, context, revision_side="base")
+
+    repository_evidence = start_repository_context(
+        context, client, branch_id=branch_id,
+        head_proof=context.candidate_verification if verify_provenance else None,
+        base_proof=baseline_proof,
+    )
 
     if config.content_validation.enabled:
         progress.begin("content")
@@ -741,7 +781,7 @@ def _run_context_steps(
             history_in=output_dir / "history.json",
             history_out=output_dir / "history.json",
             report_out=output_dir / "content-report.json",
-            fail_on_new_only=config.content_validation.fail_on_new_only,
+            fail_on_new_only=config.content_validation.fail_on_new_only and bool(branch_id) and not strict_health,
             max_samples=config.security.max_report_samples,
             redact_document_names=config.security.redact_document_names,
             allow_raw_response_output=config.security.allow_raw_response_output,
@@ -758,6 +798,7 @@ def _run_context_steps(
             model_id=context.model_id,
             branch_id=branch_id,
             fail_on_warnings=config.model_validation.fail_on_warnings,
+            fail_on_new_only=config.model_validation.fail_on_new_only and not strict_health,
         )
         reports.append(model_report)
         all_issues.extend(model_report.get("issues", []))
@@ -911,15 +952,23 @@ def _run_context_steps(
                 exit_code = max(exit_code, ExitCodes.VALIDATION_FAILED)
         progress.complete("breaking_change_hold", 1 if any(issue.get("severity") == "error" for issue in hold_issues) else 0)
 
-    if context.environment:
+    if verify_provenance:
         progress.begin("candidate")
         before = dict(context.candidate_verification, status="verified")
         after = verify_candidate(client, context)
         if before != after:
             context.candidate_verification = {"status": "unverified", "reason": "changed_during_validation"}
             raise ConfigError("Candidate evidence changed during validation; rerun the current PR")
+        if baseline_proof is not None and baseline_proof != verify_candidate(client, context, revision_side="base"):
+            context.candidate_verification = {"status": "unverified", "reason": "changed_during_validation"}
+            raise ConfigError("Base evidence changed during validation; rerun the current PR")
         context.candidate_verification = after
         progress.complete("candidate")
+    finish_repository_context(
+        repository_evidence, context, client, all_issues, branch_id=branch_id,
+        head_proof=context.candidate_verification if verify_provenance else None,
+        base_proof=baseline_proof,
+    )
     progress.begin("reporting")
     progress.complete("reporting")
     scope_findings(all_issues, model_id=context.model_id, branch_id=branch_id, branch_name=context.branch_name)
@@ -966,11 +1015,15 @@ def _write_context_failure_artifacts(
     }
     if isinstance(exc, ContentEvidenceError):
         issue = exc.report_issue(redact_document_names=config.security.redact_document_names)
+    if isinstance(exc, OmniResponseError):
+        issue = exc.report_issue(validator=progress.current)
     if isinstance(exc, ViewNamesMetadataError):
         issue.update(metadata_stage=exc.metadata_stage, metadata_reason=exc.metadata_reason)
-    if context.environment and progress.current == "candidate":
+    if progress.current == "candidate":
         reason = getattr(exc, "candidate_reason", "verification_unavailable")
         issue.update(type="candidate_verification_failed", candidate_reason=reason, coverage_complete=False)
+        if getattr(exc, "validation_scope", None) in {"base", "branch"}:
+            issue["validation_scope"] = exc.validation_scope
         context.candidate_verification = {"status": "unverified", "reason": reason}
     issues = [*progress.issues, issue]
     scope_findings(issues, model_id=context.model_id, branch_id=progress.branch_id, branch_name=context.branch_name)
@@ -986,29 +1039,72 @@ def _write_context_failure_artifacts(
     return report, code
 
 
+@diagnostic_session()
 def cmd_content_validate(args: argparse.Namespace) -> int:
     config = _override_config(load_config(args.config), args)
-    client, branch_id = _client_and_branch(config)
     output_dir = Path(config.reporting.output_dir)
     labels = _labels_from_args(args) or config.content_validation.labels
     fail_on_new_only = (
         config.content_validation.fail_on_new_only if args.fail_on_new_only is None else args.fail_on_new_only
     )
-    report, exit_code = run_content_validation(
-        client=client,
-        model_id=_required(config.omni.model_id, "omni.model_id"),
-        branch_id=branch_id,
-        user_id=config.omni.user_id,
-        include_personal_folders=config.omni.include_personal_folders,
-        labels=labels,
-        history_in=args.history_in or output_dir / "history.json",
-        history_out=args.history_out or output_dir / "history.json",
-        report_out=args.report_out or output_dir / "report.json",
-        fail_on_new_only=fail_on_new_only,
-        max_samples=config.security.max_report_samples,
-        redact_document_names=config.security.redact_document_names,
-        allow_raw_response_output=args.unsafe_raw_output,
-    )
+    _validate_run_output_layout(output_dir)
+    private = restricted_dir(output_dir) / "content-validation"
+    if args.unsafe_raw_output and (
+        os.getenv("GITHUB_ACTIONS") == "true" or not config.security.retain_restricted_artifacts
+    ):
+        raise SecurityPolicyError("Raw diagnostics require explicit local restricted retention and cannot run in CI")
+    history_out = Path(args.history_out) if args.history_out else private / "history.json"
+    if args.history_out:
+        if not config.security.retain_restricted_artifacts or not history_out.resolve().is_relative_to(
+            restricted_dir(output_dir).resolve()
+        ):
+            raise SecurityPolicyError("History output requires explicit retention inside the restricted directory")
+        validate_repo_output_path(history_out)
+    try:
+        if fail_on_new_only and is_pull_request_event():
+            raise ConfigError("PR regression validation requires omniflow run --auto for trusted Git snapshot verification")
+        client, branch_id = _client_and_branch(config)
+        fail_on_new_only = fail_on_new_only and bool(branch_id or args.history_in or args.fail_on_new_only is True)
+        report, exit_code = run_content_validation(
+            client=client,
+            model_id=_required(config.omni.model_id, "omni.model_id"),
+            branch_id=branch_id,
+            user_id=config.omni.user_id,
+            include_personal_folders=config.omni.include_personal_folders,
+            labels=labels,
+            history_in=args.history_in or private / "history.json",
+            history_out=history_out,
+            report_out=private / "report.json",
+            fail_on_new_only=fail_on_new_only,
+            max_samples=config.security.max_report_samples,
+            redact_document_names=config.security.redact_document_names,
+            allow_raw_response_output=args.unsafe_raw_output,
+        )
+        report.update(exit_code=exit_code, policy_decision="fail" if exit_code else "pass",
+                      validation_complete=report.get("validation_complete", True))
+        write_public_reports(report, output_dir=output_dir, formats=config.reporting.formats,
+                             redaction_level=config.security.redaction_level)
+        if args.report_out:
+            write_public_json(args.report_out, report, redaction_level=config.security.redaction_level)
+    except Exception as exc:
+        issue = exc.report_issue() if isinstance(exc, (ContentEvidenceError, OmniResponseError)) else {
+            "validator": "content", "type": "validation_execution_failed", "severity": "error",
+            "message": safe_exception_message(exc), "comparison_status": "unavailable",
+            "content_health": "unknown", "regression_status": "unknown",
+        }
+        failure = {"validator": "content", "exit_code": exc.exit_code if isinstance(exc, OmniFlowError) else 6,
+                              "policy_decision": "fail", "validation_complete": False,
+                              "issues": [issue]}
+        # A rejected filesystem target must never be retried by a fallback writer.
+        if not isinstance(exc, SecurityPolicyError):
+            write_public_reports(failure, output_dir=output_dir, formats=config.reporting.formats,
+                                 redaction_level=config.security.redaction_level)
+            if args.report_out:
+                write_public_json(args.report_out, failure, redaction_level=config.security.redaction_level)
+        raise
+    finally:
+        if not config.security.retain_restricted_artifacts:
+            _purge_restricted_path(private)
     print(
         "Content validator results: "
         f"total={report['total_issues']} new={report['new_issues']} "
@@ -1017,19 +1113,42 @@ def cmd_content_validate(args: argparse.Namespace) -> int:
     return exit_code
 
 
+@diagnostic_session()
 def cmd_model_validate(args: argparse.Namespace) -> int:
     config = _override_config(load_config(args.config), args)
-    client, branch_id = _client_and_branch(config)
+    output_dir = Path(config.reporting.output_dir)
+    _validate_run_output_layout(output_dir)
     fail_on_warnings = (
         config.model_validation.fail_on_warnings if args.fail_on_warnings is None else args.fail_on_warnings
     )
-    report, exit_code = run_model_validation(
-        client=client,
-        model_id=_required(config.omni.model_id, "omni.model_id"),
-        branch_id=branch_id,
-        fail_on_warnings=fail_on_warnings,
-    )
-    write_json_report(Path(config.reporting.output_dir) / "model-report.json", report)
+    try:
+        if config.model_validation.fail_on_new_only and is_pull_request_event():
+            raise ConfigError("PR regression validation requires omniflow run --auto for trusted Git snapshot verification")
+        client, branch_id = _client_and_branch(config)
+        report, exit_code = run_model_validation(
+            client=client,
+            model_id=_required(config.omni.model_id, "omni.model_id"),
+            branch_id=branch_id,
+            fail_on_warnings=fail_on_warnings,
+            fail_on_new_only=config.model_validation.fail_on_new_only,
+        )
+        report.update(exit_code=exit_code, policy_decision="fail" if exit_code else "pass",
+                      validation_complete=report.get("validation_complete", True))
+        write_public_reports(report, output_dir=output_dir, formats=config.reporting.formats,
+                             redaction_level=config.security.redaction_level)
+        write_public_json(output_dir / "model-report.json", report, redaction_level=config.security.redaction_level)
+    except Exception as exc:
+        issue = exc.report_issue(validator="model") if isinstance(exc, OmniResponseError) else {
+            "validator": "model", "type": "validation_execution_failed", "severity": "error",
+            "message": safe_exception_message(exc),
+        }
+        failure = {"validator": "model", "exit_code": exc.exit_code if isinstance(exc, OmniFlowError) else 6,
+                   "policy_decision": "fail", "validation_complete": False, "issues": [issue]}
+        if not isinstance(exc, SecurityPolicyError):
+            write_public_reports(failure, output_dir=output_dir, formats=config.reporting.formats,
+                                 redaction_level=config.security.redaction_level)
+            write_public_json(output_dir / "model-report.json", failure, redaction_level=config.security.redaction_level)
+        raise
     print(f"Model validation: errors={report['summary']['errors']} warnings={report['summary']['warnings']}")
     return exit_code
 
@@ -1065,6 +1184,7 @@ def cmd_exposures_pull(args: argparse.Namespace) -> int:
     return exit_code
 
 
+@diagnostic_session()
 def cmd_dbt_sync(args: argparse.Namespace) -> int:
     try:
         config = _override_config(load_config(args.config), args)
@@ -1212,6 +1332,7 @@ def cmd_dbt_sync(args: argparse.Namespace) -> int:
                         output_dir=validation_output_dir,
                         api_key=sync_api_key,
                         comparison_base_yaml_dir=prepared.get("comparison_base_yaml_dir"),
+                        strict_health=True,
                     )
                 except Exception as exc:
                     validation_report, validation_exit = _write_context_failure_artifacts(
@@ -1347,9 +1468,9 @@ def cmd_diff(args: argparse.Namespace) -> int:
     head_graph = load_yaml_graph(args.head)
     report = diff_graphs(base_graph, head_graph)
     if args.report_out:
-        write_json_report(args.report_out, report)
+        write_public_json(args.report_out, report, redaction_level="strict")
     else:
-        print(redact(report))
+        print(json.dumps(public_diagnostic(report), sort_keys=True))
     return 1 if report["risk_level"] in {"breaking", "security_sensitive"} else 0
 
 
@@ -1357,7 +1478,7 @@ def cmd_report(args: argparse.Namespace) -> int:
     import json
 
     report = json.loads(Path(args.input).read_text(encoding="utf-8"))
-    write_reports(report, output_dir=args.output_dir, formats=args.format)
+    write_public_reports(report, output_dir=args.output_dir, formats=args.format, redaction_level="strict")
     return 0
 
 
@@ -1404,14 +1525,15 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             issues.extend(_git_configuration_issues(context, git_config))
     if issues:
         raise ConfigError("Omni Git configuration mismatch: " + "; ".join(issues))
-    for warning in warnings:
-        print(f"omniflow doctor warning: {warning}", file=sys.stderr)
+    for _ in warnings:
+        print("omniflow doctor warning: Git metadata verification unavailable for one model context.", file=sys.stderr)
     print(f"omniflow doctor passed: {len(contexts)} model context(s) ready")
     if any(context.environment for context in contexts):
         print("Target access/settings verified only; run PR validation to establish candidate coverage.")
     return 0
 
 
+@diagnostic_session()
 def cmd_repair_ai(args: argparse.Namespace) -> int:
     try:
         config = _override_config(load_config(args.config), args)
@@ -1460,6 +1582,7 @@ def cmd_repair_ai(args: argparse.Namespace) -> int:
                 context=context,
                 output_dir=validation_output,
                 api_key=repair_key,
+                strict_health=True,
             ),
         )
         write_repair_artifacts(
@@ -1636,6 +1759,8 @@ def _summarize(issues: list[dict[str, Any]]) -> dict[str, Any]:
         "new_issues": sum(1 for issue in issues if issue.get("state") == "new"),
         "existing_issues": sum(1 for issue in issues if issue.get("state") == "existing"),
         "resolved_issues": sum(1 for issue in issues if issue.get("state") == "resolved"),
+        "improved_issues": sum(1 for issue in issues if issue.get("state") == "improved"),
+        "blocking_issues": sum(is_blocking(issue) for issue in issues),
         "risk_level": max(
             risks or ["info"],
             key=lambda risk: risk_order.index(risk) if risk in risk_order else 0,
@@ -1744,7 +1869,7 @@ def _runner_metadata() -> dict[str, Any]:
 def _emit_github_annotations(issues: list[dict[str, Any]], *, limit: int) -> None:
     if os.getenv("GITHUB_ACTIONS") != "true":
         return
-    for line in annotation_lines(issues[:limit]):
+    for line in public_annotation_lines(issues, limit=limit):
         print(line)
 
 
@@ -1760,8 +1885,8 @@ def _emit_hold_output(issues: list[dict[str, Any]], *, settings) -> None:
         with open(output_path, "a", encoding="utf-8") as handle:
             handle.write(f"hold_triggered={'true' if triggered else 'false'}\n")
             handle.write(f"hold_pending_label={settings.pending_label}\n")
-    except OSError as exc:
-        print(redact(f"Could not write the OmniFlow hold decision output: {exc}"), file=sys.stderr)
+    except OSError:
+        print("Could not write the OmniFlow hold decision output; path and details withheld.", file=sys.stderr)
 
 
 def _validate_run_output_layout(output_dir: Path) -> None:
@@ -1775,12 +1900,20 @@ def _validate_run_output_layout(output_dir: Path) -> None:
         "repair.json",
         "repair.md",
     )
-    for path in (output_dir, public_dir(output_dir), restricted_dir(output_dir)):
+    for path in (output_dir, public_dir(output_dir), restricted_dir(output_dir), output_dir / "repository"):
         validate_repo_output_path(path)
     for name in report_names:
         validate_repo_output_path(output_dir / name)
         validate_repo_output_path(public_dir(output_dir) / name)
     validate_repo_output_path(output_dir / "artifact-manifest.json")
+    for name in (*REPOSITORY_REPORT_NAMES, "status.json"):
+        path = output_dir / "repository" / name
+        validate_repo_output_path(path)
+        if path.exists() and not path.is_file():
+            raise SecurityPolicyError("Repository diagnostic output must be a regular file")
+    # Routing, repair, and early standalone guards may never reach the common
+    # report writer. Preflight every expected path before clearing old detail.
+    clear_repository_reports(output_dir)
 
 
 def _validate_context_output_layout(output_dir: Path) -> None:
@@ -1817,6 +1950,8 @@ def _write_unconfigured_failure_artifacts(*, output_dir: Path, exc: OmniFlowErro
     _validate_run_output_layout(output_dir)
     _purge_restricted_path(restricted_dir(output_dir))
     issue = {"severity": "error", "validator": "setup", "message": redact(str(exc))}
+    if getattr(exc, "reason_code", None) == "missing_policy_config":
+        issue["reason_code"] = "missing_policy_config"
     report = {
         "tool": "omniflow",
         "tool_version": __version__,

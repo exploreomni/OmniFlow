@@ -8,7 +8,8 @@ import pytest
 
 from omniflow.artifacts import write_public_reports
 from omniflow.cli import build_parser, cmd_run
-from omniflow.config import load_config
+from omniflow.config import _to_config
+from omniflow.diagnostics import capture_private_reports
 from omniflow.discovery import ModelContext
 from omniflow.exceptions import OmniAPIError, OmniFlowError
 from omniflow.security import secure_write_text
@@ -16,7 +17,7 @@ from omniflow.security import secure_write_text
 
 def configured_run(monkeypatch, tmp_path, client, *, two_models=False):
     monkeypatch.chdir(tmp_path)
-    config = load_config(None)
+    config = _to_config({}, None)
     config.reporting.formats = ["json", "markdown", "sarif", "junit"]
     config.content_validation.fail_on_new_only = False
     config.semantic_lint.enabled = True
@@ -41,7 +42,8 @@ def test_later_failure_keeps_completed_content_and_classifies_later_checks(tmp_p
         validate_model=mock.Mock(side_effect=exception),
     )
     _, args = configured_run(monkeypatch, tmp_path, client)
-    code = cmd_run(args, changed_files=[])
+    with capture_private_reports() as receipts:
+        code = cmd_run(args, changed_files=[])
     assert code == (4 if isinstance(exception, OmniAPIError) else 6)
     report = json.loads(Path(".omniflow/public/report.json").read_text())
     assert report["validation_complete"] is False
@@ -53,7 +55,11 @@ def test_later_failure_keeps_completed_content_and_classifies_later_checks(tmp_p
     assert states["ai_eval"] == "disabled"
     assert len(report["issues"]) == 2
     assert report["issues"][0]["state"] == "new"
-    assert all(issue["model_id"] == "model-a" and issue["branch_id"] == "branch-a" for issue in report["issues"])
+    assert len(receipts) == 1
+    assert all(issue["model_id"] == "model-a" and issue["branch_id"] == "branch-a" for issue in receipts[0]["issues"])
+    assert all("model_id" not in issue and "branch_id" not in issue for issue in report["issues"])
+    assert all(issue["context_reference"] == model["context_reference"] for issue in report["issues"])
+    assert "model-a" not in json.dumps(report) and "branch-a" not in json.dumps(report)
     assert model["check_reports"][0]["validator"] == "content"
     assert json.loads(Path(".omniflow/public/evidence.json").read_text())["validation_complete"] is False
     assert not Path(".omniflow/restricted").exists()
@@ -68,11 +74,17 @@ def test_failed_model_does_not_discard_another_models_complete_validation(tmp_pa
     client = SimpleNamespace(validate_content=lambda *a, **k: {"content": []}, list_content=lambda **k: [], validate_model=validate_model)
     config, args = configured_run(monkeypatch, tmp_path, client, two_models=True)
     config.semantic_lint.enabled = config.contracts.enabled = False
-    assert cmd_run(args, changed_files=[]) == 4
+    with capture_private_reports() as receipts:
+        assert cmd_run(args, changed_files=[]) == 4
     report = json.loads(Path(".omniflow/public/report.json").read_text())
     assert [model["validation_complete"] for model in report["model_reports"]] == [False, True]
     assert report["validation_complete"] is False
-    assert report["issues"][0]["model_id"] == "model-a"
+    assert len(receipts) == 1
+    assert receipts[0]["issues"][0]["model_id"] == "model-a"
+    assert "model_id" not in report["issues"][0]
+    assert report["issues"][0]["context_reference"] == report["model_reports"][0]["context_reference"]
+    assert report["model_reports"][0]["context_reference"] != report["model_reports"][1]["context_reference"]
+    assert all(value not in json.dumps(report) for value in ("model-a", "model-b", "branch-a", "branch-b"))
     assert len(report["model_reports"][1]["check_reports"]) == 2
 
 
@@ -103,9 +115,12 @@ def test_unexpected_failure_replaces_stale_public_artifacts_without_private_exce
 
 
 def test_emergency_report_does_not_reenter_broken_privacy_or_formatting_pipeline(tmp_path, monkeypatch):
-    monkeypatch.setattr("omniflow.artifacts.public_safe", mock.Mock(side_effect=RecursionError("PRIVATE-PAYLOAD")))
+    projection = mock.Mock(side_effect=RecursionError("PRIVATE-PAYLOAD"))
+    monkeypatch.setattr("omniflow.artifacts.public_diagnostic", projection)
     with pytest.raises(OmniFlowError, match="Report generation failed"):
         write_public_reports({"issues": []}, output_dir=tmp_path, formats=["json", "markdown"], redaction_level="strict")
     report = json.loads((tmp_path / "public/report.json").read_text())
+    projection.assert_called_once()
+    assert report["diagnostic_schema_version"] == 2
     assert report["exit_code"] == 6
     assert "PRIVATE" not in (tmp_path / "public/report.md").read_text()

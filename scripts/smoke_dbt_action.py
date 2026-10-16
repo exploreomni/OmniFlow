@@ -26,7 +26,9 @@ def prepare(root: Path, event_path: Path):
     if (root / ".git").exists() or (root / "models").exists() or (root / ".omniflow.yml").exists():
         raise SystemExit("Fixture preparation requires an empty consumer workspace; checkout tooling into a subdirectory")
     git(root, "init", "-b", "main")
-    (root / ".git/info/exclude").write_text(".omniflow-tooling/\n.omniflow/\n.fixture-state.json\n")
+    (root / ".git/info/exclude").write_text(
+        ".omniflow-tooling/\n.omniflow/\n.fixture-state.json\n.fixture-private-reports.json\n"
+    )
     git(root, "config", "user.name", "OmniFlow fixture")
     git(root, "config", "user.email", "fixture@example.invalid")
     (root / "models").mkdir()
@@ -82,10 +84,28 @@ def prepare(root: Path, event_path: Path):
 def verify(root: Path):
     state = json.loads((root / ".fixture-state.json").read_text())
     report = json.loads((root / ".omniflow/public/report.json").read_text())
+    impact = json.loads((root / ".omniflow/public/dbt-impact.json").read_text())
+    assert report["diagnostic_schema_version"] == 2
     assert report["policy_decision"] == "fail"
     assert report["operation"] == "dbt_impact"
-    assert report["git_sha"] == state["head"]
-    assert any(issue.get("column") == "customer_id" for issue in report["issues"])
+    assert report["exit_code"] == 1 and impact["coverage_complete"] is True
+    assert any(issue.get("severity") == "error" for issue in report["issues"])
+    # This receipt comes from the actual CLI invocation in this synthetic
+    # fixture, not from public output (which is deliberately non-authoritative).
+    receipts = json.loads((root / ".fixture-private-reports.json").read_text())
+    assert len(receipts) == 1
+    private = receipts[0]
+    assert private["git_sha"] == state["head"]
+    assert private["operation"] == "dbt_impact" and private["exit_code"] == 1
+    assert any(issue.get("column") == "customer_id" for issue in private["issues"])
+    for path in (root / ".omniflow").rglob("*"):
+        if path.is_file():
+            text = path.read_text()
+            assert not any(marker in text for marker in (
+                state["head"], state["base"], "customer_id", "fixture-model", "fixture-head",
+                '"git_sha"', '"column"', '"model_id"', '"model_path"',
+            )), f"Synthetic identity escaped to {path.name}"
+    assert not (root / ".omniflow/restricted").exists()
     assert git(root, "rev-parse", "HEAD") == state["base"]
     assert not (root / "untrusted.py").exists()
     assert "enabled: true" in (root / ".omniflow.yml").read_text()
@@ -101,8 +121,17 @@ if __name__ == "__main__":
             "GITHUB_BASE_REF": "main", "GITHUB_HEAD_REF": "fixture-head", "GITHUB_SHA": state["base"],
         })
         from omniflow.cli import main
+        from omniflow.diagnostics import capture_private_reports
 
-        raise SystemExit(main(sys.argv[2:]))
+        with capture_private_reports() as receipts:
+            exit_code = main(sys.argv[2:])
+        if receipts:
+            # Test-only evidence, outside .omniflow and not uploaded by the
+            # Action. Exclusive creation rejects a stale earlier receipt.
+            fd = os.open(".fixture-private-reports.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd, "w") as stream:
+                json.dump(receipts, stream)
+        raise SystemExit(exit_code)
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("operation", choices=("prepare", "verify"))
     parser.add_argument("--workspace", type=Path, default=Path.cwd())

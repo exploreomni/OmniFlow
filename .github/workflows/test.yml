@@ -31,7 +31,7 @@ jobs:
 
       - name: Install development dependencies
         run: |
-          python -m pip install --disable-pip-version-check --no-input --upgrade "pip==26.2" "setuptools==83.0.0"
+          python -m pip install --disable-pip-version-check --no-input --upgrade "pip==26.2" "setuptools==84.0.0"
           python -m pip install --disable-pip-version-check --no-input -e ".[dev]"
 
       - name: Lint
@@ -61,7 +61,7 @@ jobs:
 
       - name: Build and inspect distributions
         run: |
-          python -m pip install --disable-pip-version-check --no-input --upgrade "pip==26.2" "setuptools==83.0.0"
+          python -m pip install --disable-pip-version-check --no-input --upgrade "pip==26.2" "setuptools==84.0.0"
           python -m pip install --disable-pip-version-check --no-input ".[dev]"
           python -m venv /tmp/omniflow-release-build
           /tmp/omniflow-release-build/bin/python -m pip install --require-hashes --only-binary=:all: --requirement requirements/release-py311-linux-x86_64.txt
@@ -116,6 +116,10 @@ jobs:
           python-version: "3.11"
       - name: Exercise automatic non-Omni routing without a secret
         uses: ./
+        with:
+          # Tool-only, secret-free fixture: the bootstrap PR's base may not yet
+          # contain policy. Consumer workflows retain trusted-base relative paths.
+          config: ${{ github.workspace }}/.omniflow.yml
       - name: Verify public-only skip artifacts
         run: |
           test -f .omniflow/public/report.json

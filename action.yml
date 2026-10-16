@@ -6,7 +6,7 @@ inputs:
     required: false
     default: validate
   config:
-    description: Path to .omniflow.yml
+    description: Required policy file path (default repository-root .omniflow.yml, separate from the GitHub workflow). Must exist on the trusted base for PR validation.
     required: false
     default: .omniflow.yml
   omni-api-key:
@@ -36,6 +36,9 @@ inputs:
     required: false
     default: ""
 outputs:
+  repository-diagnostics-ready:
+    description: Fresh repository-only reports were generated for this trusted private run. Not shareable output.
+    value: ${{ steps.validate.outputs.repository_diagnostics_ready }}
   hold-triggered:
     description: >-
       "true" when the breaking-change hold policy found same-PR dbt overlap,

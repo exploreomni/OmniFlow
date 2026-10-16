@@ -1,6 +1,6 @@
 import unittest
 
-from omniflow.config import load_config
+from omniflow.config import _to_config
 from omniflow.discovery import ModelContext
 from omniflow.exceptions import ExitCodes, OmniAPIError
 from omniflow.github.repair_attempt import RepairEventContext
@@ -114,7 +114,7 @@ class FakeRepairClient:
 
 
 def enabled_config():
-    config = load_config()
+    config = _to_config({}, None)
     config.ai_repair.enabled = True
     config.ai_repair.allow_query_execution = True
     config.ai_repair.poll_timeout_seconds = 30

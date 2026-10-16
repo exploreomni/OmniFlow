@@ -5,6 +5,8 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+from packaging.requirements import Requirement
+from packaging.version import Version
 
 ROOT = Path(__file__).resolve().parents[1]
 PINNED_USE_RE = re.compile(r"^[^@\s]+@[0-9a-f]{40}$")
@@ -146,12 +148,50 @@ class RepositoryHardeningTests(unittest.TestCase):
 
     def test_build_and_ci_use_patched_setuptools(self):
         pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
-        self.assertIn("setuptools>=83,<84", pyproject["build-system"]["requires"])
-
-        for path in [ROOT / ".github/workflows/dependency-scan.yml", ROOT / ".github/workflows/test.yml"]:
-            self.assertIn("setuptools==83.0.0", path.read_text(encoding="utf-8"), msg=str(path))
+        requirements = [Requirement(value) for value in pyproject["build-system"]["requires"]]
+        setuptools = next(value for value in requirements if value.name == "setuptools")
         lock = (ROOT / "requirements/action-py311-linux-x86_64.txt").read_text(encoding="utf-8")
-        self.assertIn("setuptools==83.0.0", lock)
+        locked = next(entry for entry in locked_requirements(lock) if entry.startswith("setuptools=="))
+        pin = Requirement(locked.split(" --hash=", 1)[0])
+        locked_version = Version(next(iter(pin.specifier)).version)
+        self.assertGreaterEqual(locked_version, Version("83.0.0"))
+        self.assertIsNone(setuptools.url)
+        self.assertIsNone(setuptools.marker)
+        self.assertFalse(setuptools.extras)
+        # The reviewed hash-lock pin is authoritative; allow only its approved major.
+        self.assertEqual(
+            {(bound.operator, Version(bound.version)) for bound in setuptools.specifier},
+            {(">=", Version(str(locked_version.major))), ("<", Version(str(locked_version.major + 1)))},
+        )
+        self.assertIn(locked_version, setuptools.specifier)
+
+        for relative in (
+            ".github/workflows/dependency-scan.yml",
+            ".github/workflows/test.yml",
+            "README.md",
+            "CONTRIBUTING.md",
+            "docs/TESTING.md",
+        ):
+            text = (ROOT / relative).read_text(encoding="utf-8")
+            bootstrap = re.findall(r"setuptools[^\s\"']*", text)
+            self.assertTrue(bootstrap, msg=relative)
+            for value in bootstrap:
+                self.assertEqual(Requirement(value), pin, msg=f"Bootstrap differs from hash lock: {relative}")
+
+    def test_project_dependency_floor_covers_non_locked_urllib3_installs(self):
+        pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+        requirements = [Requirement(value) for value in pyproject["project"]["dependencies"]]
+        urllib3 = next(value for value in requirements if value.name == "urllib3")
+        self.assertEqual(urllib3, Requirement("urllib3>=2.8.0,<3"))
+        lock = (ROOT / "requirements/action-py311-linux-x86_64.txt").read_text(encoding="utf-8")
+        locked = next(entry for entry in locked_requirements(lock) if entry.startswith("urllib3=="))
+        pin = Requirement(locked.split(" --hash=", 1)[0])
+        self.assertIn(Version(next(iter(pin.specifier)).version), urllib3.specifier)
+
+    def test_dependency_scan_audits_runtime_and_release_locks(self):
+        text = (ROOT / ".github/workflows/dependency-scan.yml").read_text(encoding="utf-8")
+        for relative in ("requirements/action-py311-linux-x86_64.txt", "requirements/release-py311-linux-x86_64.txt"):
+            self.assertIn(f"python -m pip_audit --requirement {relative}", text)
 
     def test_action_install_is_hash_locked_and_token_is_runtime_only(self):
         action = yaml.safe_load((ROOT / "action.yml").read_text(encoding="utf-8"))

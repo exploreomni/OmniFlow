@@ -5,7 +5,7 @@ include README.md
 include SECURITY.md
 include SUPPORT.md
 include action.yml
-include .omniflow.example.yml
+include .omniflow.yml
 recursive-include .github *.yml
 recursive-include .omni *.json
 recursive-include docs *.md

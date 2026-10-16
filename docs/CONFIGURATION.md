@@ -1,11 +1,12 @@
 # OmniFlow Configuration
 
-OmniFlow separates trusted model identity, optional policy, and secrets so each has a clear owner and security boundary.
+OmniFlow separates trusted model identity, required policy, the GitHub workflow, and secrets so each has a clear owner and security boundary.
 
 | Input | File or location | Required |
 | --- | --- | --- |
 | Model identity and routing | `.omni/flow.json` | Yes for `omniflow run --auto` |
-| Validation and reporting policy | `.omniflow.yml` | No |
+| Validation and reporting policy | `.omniflow.yml` in the customer repository root | Yes; an explicit custom `--config` file may replace this path, not the file requirement |
+| GitHub Actions workflow | `.github/workflows/omniflow.yml` | Yes for the supported GitHub installation; not a substitute for the policy |
 | Omni credential (Org key or PAT) | `OMNI_API_KEY` environment variable or GitHub Actions secret | Yes for Omni validation |
 | dbt sync API key | `OMNIFLOW_SYNC_API_KEY` protected GitHub environment secret | Only for optional post-deployment sync |
 | AI repair API key | `OMNIFLOW_REPAIR_API_KEY` protected GitHub environment secret | Only for optional AI Repair |
@@ -55,9 +56,9 @@ Rules:
 - Secret-like keys are rejected.
 - A pull-request marker cannot provide or override `base_url`.
 
-## Optional Policy
+## Required Policy
 
-Start from [the complete example](../.omniflow.example.yml). A minimal recommended policy is:
+Copy the complete canonical [`.omniflow.yml`](../.omniflow.yml) into the customer repository root. It is the shipped policy template, not `.github/workflows/omniflow.yml`. The template enables the main safety checks and explicitly selects regression gating for both model and content validation; optional integrations and label filters remain commented. This excerpt shows key settings, not the complete installation template:
 
 ```yaml
 contracts:
@@ -72,13 +73,18 @@ checks:
   content_validation:
     fail_on_new_only: true
   model_validation:
+    fail_on_new_only: true
     fail_on_warnings: false
 
 security:
   redaction_level: standard
 ```
 
-The policy file is optional and must not contain credentials. In a privileged GitHub pull-request run, OmniFlow reads policy from the trusted base branch rather than from proposed pull-request changes.
+The policy file is required and must not contain credentials. In a privileged GitHub pull-request run, OmniFlow reads policy from the trusted base branch rather than from proposed pull-request changes. Bootstrap it through the approved setup process before validating Omni PRs; a copy that exists only in the PR head is not trusted.
+
+A missing selected file produces configuration exit code `2` with safe, actionable setup guidance. There is no silent missing-file fallback. Environment variables and CLI identity overrides are applied to an existing policy; they cannot replace it. Explicit custom paths remain supported through `--config` or the Action's `config` input, subject to the same trusted-base requirements. Defaults documented below apply to omitted settings inside a valid policy, not to an absent policy file.
+
+The file must contain a non-empty YAML mapping; a blank file or comments alone do not satisfy setup. In customer PR workflows, keep `config` repository-relative so it is read from the trusted base. Absolute paths are intended only for explicitly trusted local files, not for loading proposed PR policy.
 
 ## Contract Gates
 
@@ -99,15 +105,36 @@ An unreferenced breaking change remains visible as risk but does not fail the de
 ### Content Validation
 
 - `enabled`: defaults to `true`.
-- `fail_on_new_only`: defaults to `false`; the checked-in example recommends `true` for gradual adoption.
+- `fail_on_new_only`: the canonical `.omniflow.yml` explicitly sets `true` to block new issues while reporting unchanged, identity-matched baseline issues. The underlying default for a custom policy that omits this key remains `false` (all current issues block); an explicit `false` remains supported. A passing regression gate is not a clean bill of health for existing content, and malformed/incomplete comparison evidence still blocks.
+- `classify_comment_only`: defaults to `false`. When enabled, classify immutable PR inputs conservatively and report the result. This does not skip content validation or override failures; live content/draft correspondence is not established by Git equality.
 - `labels`: optional local filter applied after Omni validates content for the selected model server-side.
+- `OMNI_FAIL_ON_NEW_ONLY` remains an override for content validation only; it never changes model-validation policy.
 
 Omni documents that large documents may receive surface checks unless `force_full_validation` is requested. OmniFlow does not currently expose that parameter; do not add it to policy or interpret a successful response as guaranteed full-depth validation. See the [Content Validator API](https://docs.omni.co/api/content-validator/validate-content).
 
 ### Model Validation
 
 - `enabled`: defaults to `true`.
-- `fail_on_warnings`: defaults to `false`. Model errors always fail.
+- `fail_on_new_only`: the canonical `.omniflow.yml` explicitly sets `true`. A custom policy that omits this key defaults to `false`; explicit `false` enforces all current model errors. This setting is independent of content validation and has no shared environment override.
+- `fail_on_warnings`: defaults to `false`, so model warnings remain advisory. With `true`, warnings block according to the selected comparison mode: new warnings in new-only PR mode, or all current warnings in strict-health mode.
+
+### Shared regression and health boundaries
+
+In PR branch validation, each enabled new-only validator fetches its own fresh live-base response for the same model and compares it with the branch response. The client credential and applicable user/visibility scope stay the same. Model matching retains issue identity, severity, and occurrence counts: an additional occurrence or warning-to-error change cannot be hidden as an existing issue. Content matching also preserves occurrence and supported document/query/filter identity.
+
+New-only PR validation requires immutable Git base/head revisions and verifies live authored model YAML against those revisions before and after the checks: the Omni candidate must match the PR head, and the live base must match the trusted Git base. Unavailable, unverifiable, or out-of-sync snapshots block; a missing repository or identity override cannot replace this evidence. Synchronize the intended Omni branch/base and rerun rather than weakening the check. These before/after observations are sampled consistency checks, not an atomic lock over live models, content, or drafts.
+
+Matched existing findings remain visible without blocking that new-only validator; new model errors and new content issues block, while model warnings follow `fail_on_warnings`. Missing, malformed, or ambiguous evidence cannot prove that a finding already existed or that a comparison passed. A pass is not proof of a clean model/content inventory, complete instance health, or causal attribution to the PR. Other configured checks remain independent gates.
+
+Content validation retains the API's default validation depth for both requests. Matching request scope does not guarantee exhaustive content coverage, particularly for large or changing content inventories; record any API coverage limits separately from a passing regression decision.
+
+Orchestrated runs without a branch, post-sync validation, and repair verification enforce strict health for both validators, even when their policy switches are `true`. They must not compare the base against itself or reuse historical issues to obtain a pass. Standalone `content validate` retains its separately selected and scoped history behavior; see [Validation Diagnostics](VALIDATION_DIAGNOSTICS.md).
+
+Without a branch, standalone `content validate` also defaults to strict health, even when the canonical content policy is new-only. Explicit `--history-in` or `--fail-on-new-only` requests history comparison; a missing usable baseline exits `4`, not a successful empty comparison. Inside a GitHub PR, standalone content/model new-only validation is rejected with configuration exit `2`: use `omniflow run --auto`, which verifies both immutable Git revisions and the live snapshots.
+
+Matched existing content issues keep their original error severity with `state: existing` and `blocking: false` under new-only policy. Nonblocking does not mean the underlying issue has become informational or has been fixed.
+
+The model `fail_on_new_only` key is a development change requiring a reviewed supporting Action revision, not a released-version promise. Older versions reject unknown policy keys. Use the [trusted-base upgrade sequence](INSTALLATION.md#step-5-merge-the-setup-into-the-base-branch); do not apply the new template blindly to an incompatible old pin.
 
 ### dbt Exposures
 
@@ -257,9 +284,15 @@ All rules default to `warn` except `forbid_personal_folder_validation_scope`, wh
 reporting:
   formats: [json, markdown, sarif, junit]
   output_dir: .omniflow
+  diagnostics:
+    mode: repository  # default; set minimal to opt out
 ```
 
 The output directory must be a relative path inside the repository. Supported format names are `json`, `markdown` or `md`, `sarif`, and `junit` or `xml`.
+
+`diagnostics.mode` accepts the literal values `repository` (default) and `minimal`; environment substitution and unknown nested keys are rejected. Commit an opt-out to the trusted target branch. Repository detail is generated only by `omniflow run` with verified private same-repository GitHub.com eligibility, a trusted immutable policy/registry, and matching authored Git/Omni snapshots. It does not change pass/fail decisions. Forks, public/unknown repositories, stale revisions, standalone commands and unsupported origins remain minimal. Missing detail never waives a validator finding.
+
+Repository output is separate under `output_dir/repository/` (JSON, Markdown, SARIF, JUnit plus a safe status file). It always includes those four formats for consistent troubleshooting, independently of public `formats`. Only verified source metadata is added; no raw API prose, values, SQL or Omni-only document identities. Minimal public/root reports, PR comments, logs and annotations remain unchanged. Updated validation workflow examples upload the explicitly listed repository files only when the Action returns `repository-diagnostics-ready: true`, with seven-day retention. If changing `output_dir`, update those paths too. See [Diagnostic Privacy](DIAGNOSTIC_PRIVACY.md).
 
 ## Security Settings
 
@@ -274,9 +307,9 @@ security:
 ```
 
 - `redaction_level` accepts `standard` or `strict`.
-- `strict` additionally removes content names, query names, owners, labels, and free-text messages from public output.
+- Both values now use the minimal version-2 public diagnostic allowlist: fixed codes, counts and statuses, not customer text or identifiers. These legacy redaction settings do not loosen public output. See [Diagnostic Privacy](DIAGNOSTIC_PRIVACY.md) for the schema migration and restricted support boundary.
 - `allow_raw_response_output` cannot be enabled through policy.
-- Restricted artifacts are deleted by default. Opt-in retention writes owner-only files but should be used only on isolated, ephemeral runners. The official example uploads only redacted public artifacts.
+- Restricted artifacts are deleted by default. Opt-in retention writes owner-only files but should be used only on isolated, ephemeral runners. The validation examples upload minimal public artifacts and, when freshly authorized, a separate repository-metadata artifact; they never upload raw restricted artifacts.
 - Unknown configuration keys fail closed so misspelled security or policy settings cannot be silently ignored.
 - Personal folders are excluded by default.
 
@@ -311,6 +344,8 @@ Explicit identity flags such as `--base-url`, `--model-id`, `--model-path`, `--b
 ```bash
 omniflow run --auto --config .omniflow.yml
 ```
+
+Run from a trusted checkout containing the required policy. To use a different reviewed file, pass `--config path/to/policy.yml`; the file must exist. Identity flags and environment variables do not bypass this requirement.
 
 The validation credential is read from `OMNI_API_KEY`; dbt sync uses `OMNIFLOW_SYNC_API_KEY`, and the unsupported repair scaffold uses `OMNIFLOW_REPAIR_API_KEY`. Never add credentials to either configuration file.
 

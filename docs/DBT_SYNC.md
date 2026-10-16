@@ -15,6 +15,8 @@ OmniFlow can refresh Omni after a production dbt deployment so new dbt metadata 
 9. After a successful refresh, OmniFlow reruns model validation, Content Validator, semantic lint, contract impact, and any enabled dbt exposure checks for every affected configured model.
 10. GitHub uploads redacted reports and evidence even when refresh or validation fails.
 
+Post-sync model and content validation enforce strict health, even when PR policy has either `fail_on_new_only` switch enabled. Existing failures cannot be suppressed by comparing the refreshed base with itself or by reusing history. Model warnings still follow `fail_on_warnings`.
+
 OmniFlow does not run dbt itself. The customer's reviewed production dbt command remains the source of truth for whether warehouse deployment succeeded.
 
 ## Enable The Policy
@@ -88,7 +90,7 @@ Each run emits:
   public/
 ```
 
-The sync artifact contains model ID, branch ID when used, refresh job ID, refresh mode, status, polling count, elapsed time, validation outcome, Git SHA, Git branch, and policy decision. It does not contain API keys, raw Omni responses, authored YAML, warehouse rows, or query results.
+The public sync artifact uses diagnostic schema 2: permitted status/count/policy fields and generated anonymous references, not model, branch, refresh-job, or Git identities. Standard and strict settings share this minimal boundary. Verify the exact target and refresh job through trusted workflow/Omni state and authorized private execution evidence. Public output does not contain API keys, raw Omni responses, authored YAML, warehouse rows, or query results. See [Diagnostic Privacy](DIAGNOSTIC_PRIVACY.md).
 
 Pre-refresh and post-refresh authored YAML snapshots are restricted artifacts. They are deleted by default and are never included in the example evidence upload. If `security.retain_restricted_artifacts` is explicitly enabled, they remain only in the runner workspace unless a customer separately changes artifact handling.
 

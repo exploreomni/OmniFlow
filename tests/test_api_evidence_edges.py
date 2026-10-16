@@ -105,7 +105,7 @@ def test_strict_public_outputs_redact_all_auto_fix_metadata(tmp_path):
     safe = write_public_reports(
         report, output_dir=tmp_path, formats=["json", "markdown", "sarif", "junit"], redaction_level="strict",
     )
-    assert safe["issues"][0]["auto_fix"] == "[REDACTED]"
+    assert "auto_fix" not in safe["issues"][0]
     for path in tmp_path.rglob("*"):
         if path.is_file():
             assert marker not in path.read_text()

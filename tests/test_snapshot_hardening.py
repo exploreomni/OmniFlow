@@ -3,12 +3,14 @@ import json
 import pytest
 
 from omniflow.cli import _pull_analysis_yaml, _run_context, build_parser, cmd_run
-from omniflow.config import load_config
+from omniflow.config import _to_config
+from omniflow.diagnostics import capture_private_reports
 from omniflow.diff.diff_engine import diff_graphs
 from omniflow.diff.semantic_graph import build_graph, load_yaml_graph
 from omniflow.diff.yaml_loader import load_yaml_files
 from omniflow.discovery import ModelContext
 from omniflow.exceptions import ConfigError, OmniAPIError, SecurityPolicyError
+from omniflow.reporting.markdown_report import render_markdown_report
 from omniflow.yaml_pull import pull_yaml
 
 
@@ -123,7 +125,7 @@ def test_inheritance_uses_resolved_api_evidence_without_losing_authored_snapshot
             return {"content": [{"document_id": "dashboard"}] if referenced and find == "orders.window" else []}
 
     client = Client()
-    config = load_config(None)
+    config = _to_config({}, None)
     config.content_validation.enabled = config.model_validation.enabled = config.semantic_lint.enabled = False
     monkeypatch.setattr("omniflow.cli._client_and_branch_for_context", lambda *a, **k: (client, "branch"))
     saved = _pull_analysis_yaml(client=client, model_id="model", branch_id=None, output_dir=tmp_path / "saved") if reuse_base else None
@@ -166,7 +168,7 @@ def test_metadata_failure_reports_safe_reason_and_incomplete_dependent_checks(tm
 
     monkeypatch.chdir(tmp_path)
     client = Client()
-    config = load_config(None)
+    config = _to_config({}, None)
     config.content_validation.enabled = config.model_validation.enabled = config.ai_eval.enabled = False
     config.semantic_lint.enabled = config.contracts.enabled = config.breaking_change_hold.enabled = True
     config.reporting.formats = ["json", "markdown", "sarif", "junit"]
@@ -175,10 +177,15 @@ def test_metadata_failure_reports_safe_reason_and_incomplete_dependent_checks(tm
     monkeypatch.setattr("omniflow.cli.load_config", lambda _: config)
     monkeypatch.setattr("omniflow.cli.discover_contexts", lambda **_: [context])
     monkeypatch.setattr("omniflow.cli._client_and_branch_for_context", lambda *a, **k: (client, "branch"))
-    assert cmd_run(build_parser().parse_args(["run", "--auto"]), changed_files=[]) == 2
+    with capture_private_reports() as receipts:
+        assert cmd_run(build_parser().parse_args(["run", "--auto"]), changed_files=[]) == 2
 
     public = tmp_path / ".omniflow/public"
     report = json.loads((public / "report.json").read_text())
+    assert len(receipts) == 1
+    assert receipts[0]["model_reports"][0]["model_id"] == "model"
+    assert receipts[0]["model_reports"][0]["branch_id"] == "branch"
+    assert report["diagnostic_schema_version"] == 2
     assert report["validation_complete"] is False
     assert report["policy_decision"] == "fail"
     model = report["model_reports"][0]
@@ -195,8 +202,11 @@ def test_metadata_failure_reports_safe_reason_and_incomplete_dependent_checks(tm
     assert model["check_reports"][0]["coverage_complete"] is False
     assert model["check_reports"][0]["issues"][0]["metadata_reason"] == "invalid_identity"
     assert json.loads((public / "evidence.json").read_text())["validation_complete"] is False
-    assert "YAML metadata / View identity unavailable" in (public / "report.md").read_text()
+    assert "YAML metadata / View identity unavailable" in render_markdown_report(receipts[0])
+    assert "Validation complete: `false`" in (public / "report.md").read_text()
+    assert "model_id" not in model and "branch_id" not in model
     assert client.searches == []
     assert not (tmp_path / ".omniflow/restricted").exists()
     for path in public.iterdir():
         assert "PRIVATE-" not in path.read_text()
+        assert "omni/model" not in path.read_text()

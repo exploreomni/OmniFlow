@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from ..security import secure_write_text
+from .issue_policy import is_blocking
 
 
 def to_sarif(report: dict[str, Any]) -> dict[str, Any]:
@@ -16,33 +17,37 @@ def to_sarif(report: dict[str, Any]) -> dict[str, Any]:
         rules.setdefault(rule_id, {"id": rule_id, "name": rule_id, "shortDescription": {"text": rule_id}})
         level = _sarif_level(issue.get("severity") or issue.get("risk"))
         file_path = issue.get("file") or "omniflow"
+        location = {"artifactLocation": {"uri": file_path}}
+        if report.get("diagnostic_audience") == "repository":
+            if type(issue.get("line")) is int and issue["line"] > 0:
+                location["region"] = {"startLine": issue["line"]}
+        else:
+            location["region"] = {"startLine": 1}
         results.append(
             {
                 "ruleId": rule_id,
                 "level": level,
+                "kind": "fail" if is_blocking(issue) else "informational",
                 "properties": {
-                    "policy_blocking": bool(issue.get("active", True))
-                    and (issue.get("severity") == "error" or issue.get("blocking") is True),
+                    "policy_blocking": is_blocking(issue),
                 },
                 "message": {"text": issue.get("message") or issue.get("summary") or "OmniFlow issue"},
                 "locations": [
                     {
-                        "physicalLocation": {
-                            "artifactLocation": {"uri": file_path},
-                            "region": {"startLine": 1},
-                        }
+                        "physicalLocation": location
                     }
                 ],
             }
         )
+    driver = {"name": "omniflow", "rules": list(rules.values())}
+    if isinstance(report.get("tool_version"), str):
+        driver["version"] = report["tool_version"]
     return {
         "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
         "version": "2.1.0",
         "runs": [
             {
-                "tool": {
-                    "driver": {"name": "omniflow", "version": report.get("tool_version"), "rules": list(rules.values())}
-                },
+                "tool": {"driver": driver},
                 "results": results,
             }
         ],

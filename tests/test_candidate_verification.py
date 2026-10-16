@@ -83,7 +83,10 @@ def test_exact_candidate_uses_immutable_event_head_not_checkout_or_branch_name(s
 def test_root_model_scope_includes_all_semantic_files_but_not_readme_or_code(snapshot):
     snapshot.context.model_path = "."
     Path("root.view").write_text("dimensions: {}\n")
-    git("add", "root.view")
+    Path(".omniflow.yml").write_text("checks: {}\n")
+    Path(".github/workflows").mkdir(parents=True)
+    Path(".github/workflows/omniflow.yml").write_text("name: OmniFlow\n")
+    git("add", "root.view", ".omniflow.yml", ".github")
     git("commit", "-m", "Synthetic root-scoped semantic file")
     snapshot.event["pull_request"]["head"]["sha"] = git("rev-parse", "HEAD")
     Path("event.json").write_text(json.dumps(snapshot.event))

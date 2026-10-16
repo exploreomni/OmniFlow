@@ -30,11 +30,19 @@ Do not put the key in command history or a local file. Remove it from the proces
 
 ## Common Results
 
+### Required Policy File Is Missing
+
+**Result:** Configuration exit code `2` with setup guidance.
+
+Copy the canonical [`.omniflow.yml`](../.omniflow.yml) into the customer repository root and merge it onto the protected base branch through the approved setup process. It is separate from `.github/workflows/omniflow.yml`; having the workflow alone is not enough. A policy added only in the PR head is deliberately not trusted by the privileged workflow.
+
+Check the exact filename, the workflow checkout's trusted base revision, the PR target branch, and any explicit Action `config` / CLI `--config` path. A custom selected file is supported but must exist. Environment variables or identity flags cannot replace the file, and missing policy does not silently revert to built-in defaults. For an upgrade from a policy-free installation, bootstrap the policy before updating the Action pin. See [installation step 5](INSTALLATION.md#step-5-merge-the-setup-into-the-base-branch).
+
 ### The Pull Request Was Skipped
 
 **Message:** The policy decision is `skipped`.
 
-This is expected when changed files do not belong to a registered Omni model path and no Omni context marker is present. dbt-only and application-only pull requests should not fail because OmniFlow is installed.
+With valid trusted policy, this is expected when changed files do not belong to a registered Omni model path and no Omni context marker is present (unless an enabled optional check applies). dbt-only and application-only pull requests should not fail merely because OmniFlow is installed. Missing policy is a setup failure, not a skip.
 
 If the pull request contains Omni files, verify that `model_path` in `.omni/flow.json` is the exact repository prefix for those files.
 
@@ -70,6 +78,8 @@ Confirm that:
 - The `model_id` identifies the base model rather than an unrelated model or old branch.
 
 ### Omni Git Configuration Mismatch
+
+PR new-only validation additionally verifies live authored candidate/base YAML against immutable Git head/base before and after checks. Missing, unverifiable, or out-of-sync snapshots block even when current issue lists are empty. Confirm the exact selected model/branch and Git objects, synchronize the Omni candidate and base, then rerun. Do not use missing-repository or identity overrides to manufacture a baseline. Sampled matches and the API's default validation depth are not atomic or exhaustive content-coverage guarantees.
 
 `omniflow doctor --auto` compares configured model path, base branch, provider, and repository URL with Omni when the API allows it. Correct the stale value in `.omni/flow.json` or the Omni Git integration. Do not disable the comparison without resolving which system is authoritative.
 

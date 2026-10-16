@@ -75,6 +75,23 @@ jobs:
         with:
           sarif_file: .omniflow/public/report.sarif
 
+      # Repository-only metadata, NOT a shareable support artifact. Repository
+      # readers can download it. PR comments and Code Security keep public output.
+      - name: Upload repository diagnostics
+        if: always() && steps.omniflow.outputs.repository-diagnostics-ready == 'true' && github.event.repository.private == true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: omniflow-repository-diagnostics
+          path: |
+            .omniflow/repository/report.json
+            .omniflow/repository/report.md
+            .omniflow/repository/report.sarif
+            .omniflow/repository/junit.xml
+            .omniflow/repository/status.json
+          retention-days: 7
+          if-no-files-found: error
+          include-hidden-files: true
+
       - name: Comment on PR
         if: always() && github.event_name == 'pull_request_target' && hashFiles('.omniflow/public/report.md') != ''
         env:
