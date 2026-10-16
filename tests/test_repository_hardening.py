@@ -146,6 +146,18 @@ class RepositoryHardeningTests(unittest.TestCase):
         self.assertNotIn("publish-pypi", text)
         self.assertNotIn("gh-action-pypi-publish", text)
 
+    def test_sbom_generation_cannot_publish_release_assets(self):
+        workflow = yaml.safe_load((ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8"))
+        build = workflow["jobs"]["build"]
+        self.assertEqual(build["permissions"]["contents"], "read")
+        sbom = next(step for step in build["steps"] if step.get("uses", "").startswith("anchore/sbom-action@"))
+        self.assertIs(sbom["with"].get("upload-release-assets"), False)
+        self.assertEqual(sbom["with"]["output-file"], "dist/omniflow.spdx.json")
+        publish = workflow["jobs"]["publish-github"]
+        self.assertEqual(publish["if"], "startsWith(github.ref, 'refs/tags/v')")
+        self.assertEqual(publish["environment"]["name"], "github-release")
+        self.assertEqual(publish["permissions"]["contents"], "write")
+
     def test_build_and_ci_use_patched_setuptools(self):
         pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
         requirements = [Requirement(value) for value in pyproject["build-system"]["requires"]]
