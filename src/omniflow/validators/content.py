@@ -10,13 +10,21 @@ from ..exceptions import OmniAPIError, OmniResponseError
 from ..omni_client import OmniClient
 from ..security import redact, secure_write_text
 from ..timestamps import utc_now_iso
+from .content_identity import (
+    CANONICAL_DOCUMENT,
+    CANONICAL_QUERY,
+    IDENTITY_MESSAGES,
+    DocumentIdentityError,
+    evidence_signature,
+    resolve_documents,
+)
 
-HISTORY_SCHEMA_VERSION = 1
+HISTORY_SCHEMA_VERSION = 2
 QUERY_IDENTITY_KEYS = ("query_presentation_id", "query_id_map_key", "query_id")
 CONTENT_EVIDENCE_REASON_CODES = frozenset({
     "invalid_issue_container", "invalid_issue_entry", "missing_issue_message",
     "invalid_issue_message", "unsupported_issue_shape",
-    "invalid_filter_identity",
+    "invalid_filter_identity", *IDENTITY_MESSAGES,
 })
 
 
@@ -73,11 +81,11 @@ class ContentEvidenceError(OmniAPIError):
             else "unsupported_issue_shape"
         )
         category = {"dashboard_filter": "dashboard-filter", "query": "query"}.get(issue_type, "content")
-        super().__init__(
+        super().__init__(IDENTITY_MESSAGES.get(self.reason_code) or (
             f"Content Validator response contains unreadable {category} issue details. "
             "Validation evidence is incomplete; a specific content defect cannot be determined. "
             f"Reason code: {self.reason_code}."
-        )
+        ))
         self.issue_type = issue_type if issue_type in {"dashboard_filter", "query"} else "content"
         self.validation_scope: str | None = None
         self.comparison_mode = "unknown"
@@ -109,6 +117,9 @@ class ContentEvidenceError(OmniAPIError):
             "content_health": "unknown",
             "regression_status": "unknown",
             "severity": "error",
+            "blocking": True,
+            "active": True,
+            "coverage_complete": False,
             "message": str(self),
         }
 
@@ -234,6 +245,8 @@ def collect_content_issues(payload: dict[str, Any]) -> list[Any]:
             "document_labels": extract_label_names(document),
             "document_owner": extract_owner(document),
         }
+        if CANONICAL_DOCUMENT in document:
+            doc_context[CANONICAL_DOCUMENT] = document[CANONICAL_DOCUMENT]
         dashboard_issues = document.get("dashboard_filter_issues")
         if isinstance(dashboard_issues, list):
             for item in _dashboard_filter_entries(dashboard_issues, document=document):
@@ -262,6 +275,7 @@ def collect_content_issues(payload: dict[str, Any]) -> list[Any]:
                         "issue_type": "query",
                         "query_name": query.get("query_name"),
                         **{key: query.get(key) for key in QUERY_IDENTITY_KEYS},
+                        **({CANONICAL_QUERY: query[CANONICAL_QUERY]} if CANONICAL_QUERY in query else {}),
                         "comparison_eligible": query_keys[_query_identity(query)] == 1,
                         **doc_context,
                     }
@@ -308,10 +322,17 @@ def issue_identity(issue: Any) -> str:
                 # Prefer the strongest available query identity. Optional auxiliary
                 # identifiers must not make the same presentation appear new.
                 query_key = _query_identity(comparable)
+                comparable.pop(CANONICAL_QUERY, None)
                 for key in QUERY_IDENTITY_KEYS:
                     comparable.pop(key, None)
                 if query_key is not None:
                     comparable[query_key[0]] = query_key[1]
+                # A verified draft alias is the same logical document as its
+                # published parent. Physical document IDs differ across drafts.
+                logical = comparable.pop(CANONICAL_DOCUMENT, None)
+                if isinstance(logical, str) and logical.strip():
+                    comparable.pop("document_id", None)
+                    comparable["document_identifier"] = logical
             value = json.dumps(comparable, sort_keys=True, separators=(",", ":"))
         except TypeError:
             value = str(issue)
@@ -339,6 +360,9 @@ def issue_summary(issue: Any) -> str:
 
 
 def _query_identity(issue: dict[str, Any]) -> tuple[str, str] | None:
+    canonical = issue.get(CANONICAL_QUERY)
+    if isinstance(canonical, str) and canonical.strip():
+        return "query_id_map_key", canonical
     return next(
         ((key, issue[key]) for key in QUERY_IDENTITY_KEYS if isinstance(issue.get(key), str) and issue[key].strip()),
         None,
@@ -410,7 +434,7 @@ def filter_validator_payload(payload: Any, allowed_identifiers: set[str]) -> Any
         for document in documents
         if isinstance(document, dict)
         and isinstance(document.get("identifier"), str)
-        and document["identifier"] in allowed_identifiers
+        and document.get(CANONICAL_DOCUMENT, document["identifier"]) in allowed_identifiers
     ]
     return filtered
 
@@ -428,7 +452,8 @@ def enrich_validator_payload(
             enriched_content.append(document)
             continue
         next_document = dict(document)
-        identifiers = (next_document.get("identifier"), next_document.get("document_id"))
+        identifiers = (next_document.get(CANONICAL_DOCUMENT), next_document.get("identifier"),
+                       next_document.get("document_id"))
         content_record = next(
             (
                 content_records_by_identifier[value]
@@ -540,6 +565,9 @@ def run_content_validation(
         include_personal_folders=include_personal_folders,
         comparison_mode=comparison_mode,
     )
+    payload = _prepare_validator_payload(
+        payload, [], {}, validation_scope="branch" if branch_id else "base", comparison_mode=comparison_mode,
+    )
     records = client.list_content(
         labels=labels,
         branch_id=branch_id,
@@ -552,6 +580,66 @@ def run_content_validation(
     ):
         raise OmniAPIError("Content metadata is missing an identity required for label filtering")
     records_by_identifier = index_content_records(records)
+    baseline_payload = None
+    if branch_id and (fail_on_new_only or labels):
+        baseline_payload = _fetch_validator_payload(
+            client, model_id, branch_id=None, user_id=user_id,
+            include_personal_folders=include_personal_folders, comparison_mode=comparison_mode,
+        )
+        baseline_payload = _prepare_validator_payload(
+            baseline_payload, [], {}, validation_scope="base", comparison_mode=comparison_mode,
+        )
+        if (isinstance(payload, dict) and "content" in payload
+                and isinstance(baseline_payload, dict) and "content" in baseline_payload):
+            try:
+                current_docs = content_documents(payload)
+                base_docs = content_documents(baseline_payload)
+                identity_records = records
+                # Label-selected metadata alone cannot identify an unselected
+                # draft or prove that a previously healthy/new document is new.
+                if labels:
+                    identity_records = client.list_content(
+                        labels=[], branch_id=branch_id, include_personal_folders=include_personal_folders,
+                        user_id=user_id,
+                    )
+                current, base, proof = resolve_documents(
+                    client=client, branch_id=branch_id, current=current_docs, baseline=base_docs,
+                    records=identity_records,
+                )
+                if proof.mappings:
+                    # Bracket the actual validator evidence with mapping/version
+                    # reads. A changed draft must never reuse stale error waivers.
+                    for scope, before in ((branch_id, current_docs), (None, base_docs)):
+                        after = _fetch_validator_payload(
+                            client, model_id, branch_id=scope, user_id=user_id,
+                            include_personal_folders=include_personal_folders, comparison_mode=comparison_mode,
+                        )
+                        after = _prepare_validator_payload(
+                            after, [], {}, validation_scope="branch" if scope else "base",
+                            comparison_mode=comparison_mode,
+                        )
+                        if evidence_signature(before) != evidence_signature(content_documents(after)):
+                            raise DocumentIdentityError("document_identity_changed")
+                    proof.recheck()
+                    if labels:
+                        after_records = client.list_content(
+                            labels=labels, branch_id=branch_id, include_personal_folders=include_personal_folders,
+                            user_id=user_id,
+                        )
+                        if set(index_content_records(after_records)) != set(records_by_identifier):
+                            raise DocumentIdentityError("document_identity_changed")
+                payload = {**payload, "content": current}
+                baseline_payload = {**baseline_payload, "content": base}
+            except DocumentIdentityError as exc:
+                error = ContentEvidenceError(reason_code=exc.reason_code)
+                error.validation_scope = "branch"
+                error.comparison_mode = comparison_mode
+                raise error from None
+            except ContentEvidenceError as exc:
+                if exc.validation_scope is None:
+                    exc.validation_scope = "branch"
+                exc.comparison_mode = comparison_mode
+                raise
     payload = _prepare_validator_payload(
         payload, labels, records_by_identifier, validation_scope="branch" if branch_id else "base",
         comparison_mode=comparison_mode,
@@ -570,13 +658,6 @@ def run_content_validation(
     }
     history_status = "not_used_live_base"
     if branch_id and fail_on_new_only:
-        baseline_payload = _fetch_validator_payload(
-            client, model_id,
-            branch_id=None,
-            user_id=user_id,
-            include_personal_folders=include_personal_folders,
-            comparison_mode=comparison_mode,
-        )
         baseline_payload = _prepare_validator_payload(
             baseline_payload, labels, records_by_identifier, validation_scope="base",
             comparison_mode=comparison_mode,

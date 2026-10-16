@@ -6,7 +6,12 @@ from unittest.mock import Mock
 
 import pytest
 
-from omniflow.validators.content import ContentEvidenceError, extract_issues, run_content_validation
+from omniflow.validators.content import (
+    HISTORY_SCHEMA_VERSION,
+    ContentEvidenceError,
+    extract_issues,
+    run_content_validation,
+)
 
 
 def payload(*issues):
@@ -18,7 +23,11 @@ def payload(*issues):
 
 def validate(tmp_path, current, baseline, *, new_only=True):
     fetch = Mock(side_effect=lambda *args, branch_id=None, **kwargs: current if branch_id else baseline)
-    client = SimpleNamespace(validate_content=fetch, list_content=lambda **kwargs: [])
+    client = SimpleNamespace(
+        validate_content=fetch,
+        # Both document identities used by these tests are published catalog records.
+        list_content=lambda **kwargs: [{"identifier": "document-1"}, {"identifier": "other-document"}],
+    )
     result = run_content_validation(
         client=client, model_id="model", branch_id="branch", user_id=None,
         include_personal_folders=False, labels=[], fail_on_new_only=new_only,
@@ -224,7 +233,7 @@ def test_grouped_shape_rejects_missing_ambiguous_and_unknown_evidence(tmp_path, 
 
 
 @pytest.mark.parametrize("legacy_issue", ["Legacy broken filter", {"message": "Legacy broken filter"}])
-def test_legacy_unnamed_filter_fingerprint_and_retained_history_remain_compatible(tmp_path, legacy_issue):
+def test_old_physical_document_fingerprint_history_cannot_suppress_findings(tmp_path, legacy_issue):
     # Build the old stable fingerprint independently of the new normalizer.
     raw = {"document_id": "document-1", "document_identifier": "document-1",
            "issue_type": "dashboard_filter", "message": "Legacy broken filter"}
@@ -241,7 +250,14 @@ def test_legacy_unnamed_filter_fingerprint_and_retained_history_remain_compatibl
         include_personal_folders=False, labels=[], fail_on_new_only=True,
         history_in=history_path, history_out=history_path, report_out=tmp_path / "report.json",
     )
-    assert code == 0 and report["history_status"] == "accepted"
-    assert report["existing_issues"] == 1 and report["new_issues"] == 0
+    assert code == 4 and report["history_status"] == "invalidated_version"
+    assert report["existing_issues"] == 0 and report["new_issues"] == 1
+    assert report["regression_status"] == "unknown"
+    assert report["issues"][0]["blocking"] is True
+    # Ordinary documents retain physical identity; version invalidation still
+    # applies because schema 2 can also contain verified draft aliases.
     assert report["issues"][0]["id"] == fingerprint
     assert "filter_name" not in report["issues"][0]["raw"]
+    saved = json.loads(history_path.read_text())
+    assert saved["schema_version"] == HISTORY_SCHEMA_VERSION == 2
+    assert saved["issues"][0]["id"] == fingerprint

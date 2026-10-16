@@ -275,7 +275,12 @@ def test_grouped_filter_api_to_cli_keeps_all_shareable_outputs_minimal(
         )
         return response
 
-    client = SimpleNamespace(validate_content=validate, list_content=lambda **kwargs: [])
+    client = SimpleNamespace(
+        validate_content=validate,
+        # The base validator has no issues; the catalog still establishes this
+        # as a published document, rather than an unverified draft identity.
+        list_content=lambda **kwargs: [{"identifier": "synthetic-document"}],
+    )
     root_logger = logging.getLogger()
     previous_handlers, previous_level = root_logger.handlers[:], root_logger.level
     try:
@@ -317,7 +322,8 @@ def test_grouped_filter_api_to_cli_keeps_all_shareable_outputs_minimal(
     for path in (tmp_path / ".omniflow").rglob("*"):
         if path.is_file():
             shareable_text += path.read_text()
-    for marker in (SENSITIVE, "MRN-TEST", "000-12-3456", "4242424242424242", "CVV-123", "synthetic-filter", "filter_name"):
+    for marker in (SENSITIVE, "MRN-TEST", "000-12-3456", "4242424242424242", "CVV-123", "synthetic-filter",
+                   "synthetic-document", "filter_name"):
         assert marker not in shareable_text
     sarif = json.loads((public / "report.sarif").read_text())
     assert all(result["level"] == "error" for result in sarif["runs"][0]["results"])

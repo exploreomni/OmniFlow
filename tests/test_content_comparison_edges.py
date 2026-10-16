@@ -28,7 +28,8 @@ def query(key="query_presentation_id", value="query-1", *, count=1):
 def validate(tmp_path, current, base=None, **overrides):
     client = SimpleNamespace(
         validate_content=lambda *args, branch_id=None, **kwargs: current if branch_id or base is None else base,
-        list_content=lambda **kwargs: [],
+        # These fixtures represent published documents, not unknown draft IDs.
+        list_content=lambda **kwargs: [{"identifier": "document-1"}, {"identifier": "other-document"}],
     )
     kwargs = {
         "client": client, "model_id": "model", "branch_id": "branch", "user_id": None,

@@ -13,6 +13,7 @@ from typing import Any
 from uuid import uuid4
 
 from .exceptions import MissingPolicyError
+from .validators.content_identity import IDENTITY_MESSAGES
 
 _receipt: ContextVar[list | None] = ContextVar("omniflow_private_receipt", default=None)
 _run_reference: ContextVar[str | None] = ContextVar("omniflow_run_reference", default=None)
@@ -73,7 +74,7 @@ REASONS = frozenset({
     "unsupported_git_entry", "incomplete_git_snapshot", "ambiguous_yaml_key", "duplicate_yaml_key",
     "empty_yaml_document", "external_dependency_unverified", "invalid_or_unsupported_yaml",
     "unsupported_yaml_construct", "missing_policy_config",
-    "model_comparison_unavailable", "ambiguous_model_identity", "content_comparison_unavailable",
+    "model_comparison_unavailable", "ambiguous_model_identity", "content_comparison_unavailable", *IDENTITY_MESSAGES,
 })
 CANDIDATE_REASONS = frozenset({
     "api_snapshot_unavailable", "content_mismatch", "duplicate_git_path", "empty_git_snapshot",
@@ -181,6 +182,8 @@ def public_diagnostic(payload: dict[str, Any]) -> dict[str, Any]:
 
 def _finding_message(issue: dict[str, Any]) -> str:
     noun = "model" if issue.get("validator") == "model" else "content"
+    if isinstance(issue.get("reason_code"), str) and issue["reason_code"] in IDENTITY_MESSAGES:
+        return IDENTITY_MESSAGES[issue["reason_code"]]
     if issue.get("reason_code") == "missing_policy_config":
         return MissingPolicyError.MESSAGE
     if issue.get("reason_code") == "empty_api_response":

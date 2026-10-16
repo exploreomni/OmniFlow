@@ -7,6 +7,12 @@
 | Content validation / Dashboard filter or Query | Omni returned a readable validation issue. | Inspect that document/query in the same model and branch before changing a filter or field. |
 | Content validation / coverage unavailable | OmniFlow could not read the issue details. This is incomplete evidence, not proof of a particular content defect. | Keep the gate blocked; gather sanitized original evidence privately. |
 | `empty_api_response` / `invalid_json_response` | The API returned an empty body or bytes that could not be decoded as JSON. This is not a dashboard-filter finding. | Check the API/service response through authorized support, then rerun; do not infer a clean baseline. |
+| `document_identity_unavailable` | A branch document could not be established as a published document or an exact active draft of one. | Check Viewer-or-higher access to the published document and its draft metadata, then rerun. An absent lookup does not prove a new document. |
+| `ambiguous_document_identity` | Duplicate or conflicting document/draft identity evidence prevents safe comparison. | Resolve conflicting evidence in the same model and branch; do not match using names or messages. |
+| `stale_document_draft` | A mapped draft is out of date with its published document. | Update the draft in Omni and rerun. |
+| `document_identity_changed` | Validator evidence, selected labels, or draft version changed between observations. | Rerun after edits/publication finish; the interrupted comparison is not a new-defect conclusion. |
+| `document_identity_limit_exceeded` | Identity discovery hit its bounded lookup budget. | Investigate the scope privately. No unresolved documents are silently omitted or waived. |
+| `query_identity_unavailable` | A mapped draft lacks unique query tile/map keys. | Inspect the draft in Omni; query names or presentation IDs cannot safely substitute for missing tile identity. |
 | Downstream contracts / Coverage unavailable | Dependency analysis could not establish the affected consumers. | Verify the Action revision, relationship endpoints, model identity and reference-search access. |
 | Validation execution failed / incomplete | A check could not finish because of an API, context, or internal failure. | Retain completed findings, resolve the failed check, then rerun. Later checks marked “not run” are not successful. |
 | Advisory warning | The finding does not block under the recorded policy. | Review separately from blockers. Model warnings still block when `model_validation.fail_on_warnings` is enabled. |
@@ -127,7 +133,17 @@ For this explicitly selected history mode, persisted history has a versioned sch
 
 An upgrade or missing user scope can therefore invalidate a history comparison and leave it blocked until a usable baseline is established. Review the findings and confirm the intended validation user; do not substitute an arbitrary user ID merely to restore an old comparison. Branch validation with `fail_on_new_only` still compares against a freshly retrieved base-model result using the same client and does not depend on persisted history.
 
-Legacy string/message-object fingerprints remain unchanged. Schema-2 public diagnostics are not trusted history (`invalidated_public_diagnostic`); copying a shareable report into the history input cannot establish a clean or matching baseline.
+Comparison history uses schema version 2 because document fingerprints now prefer verified logical document identity over draft-specific physical IDs. Older private history is reported as `invalidated_version`; explicitly requested history-only regression checks remain incomplete until a new, same-scope baseline is established. Fresh live PR/base comparisons do not depend on old history. Legacy string/message-object issue shapes remain supported. Schema-2 public diagnostics are not trusted history (`invalidated_public_diagnostic`); copying a shareable report into the history input cannot establish a clean or matching baseline.
+
+### Branch-attached dashboard drafts
+
+Omni can return a draft's identifiers instead of its published dashboard's identifiers. The [List document drafts API](https://docs.omni.co/api/documents/list-document-drafts) supplies the explicit relationship, branch, active status, out-of-date flag and update timestamp. OmniFlow verifies this relationship privately before label selection or issue matching. Metadata lookup uses the same credential and authorized content scope; it does not fetch workbook bodies or execute queries. Known healthy base documents are included in identity discovery so their first branch error cannot be missed.
+
+Identity discovery is cached per published document, not per finding, and bounded to 200 lookups or 60 seconds before starting another lookup (an in-flight request still follows the API timeout/retry policy). Verified mappings are re-read around a second validator observation. These are consistency samples, not an atomic content lock. Unknown, stale, conflicting or changing evidence exits `4`; a verified new defect exits `1`; matched existing defects remain nonblocking only under new-only policy. Unresolved drafts are never discarded merely because selected labels do not contain their draft-specific IDs.
+
+Only verified draft/parent pairs replace physical document identity during comparison. Ordinary documents retain their physical and logical identifiers, so a reused identifier cannot waive a different document's errors. The raw relationship, timestamps and resource identifiers stay private. Public reports expose fixed reason codes, states and counts only. No new policy setting, secret, or write permission is required; the credential must have Viewer-or-higher access to the published documents used for draft lookup.
+
+Live testing also found that an unchanged or name-only edited draft can regenerate query presentation IDs while retaining `query_id_map_key`, the documented tile address. For verified draft/parent pairs, comparison uses unique tile keys scoped to the canonical document, plus exact messages and occurrence counts. Missing/duplicate tile keys are incomplete evidence. Different tiles or dashboards cannot match just because their error text is identical.
 
 The content check's JSON includes:
 

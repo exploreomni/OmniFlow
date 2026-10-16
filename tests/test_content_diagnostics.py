@@ -27,7 +27,7 @@ def payload(issue):
 def run_validation(tmp_path, current, base=None, **overrides):
     client = SimpleNamespace(
         validate_content=lambda *args, branch_id=None, **kwargs: current if branch_id else base,
-        list_content=lambda **kwargs: [],
+        list_content=lambda **kwargs: [{"identifier": "doc-short", "name": "Private dashboard"}],
     )
     return run_content_validation(
         client=client, model_id="model", branch_id="branch", user_id=None,
@@ -179,6 +179,56 @@ def test_api_to_cli_reports_incomplete_evidence_and_preserves_privacy(tmp_path, 
         assert "doc-short" not in text
         assert input_sha not in text
         assert action_sha not in text
+    assert not (tmp_path / ".omniflow/restricted").exists()
+
+
+def test_cli_unverified_draft_is_safe_operational_failure_not_new_content_defect(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("GITHUB_EVENT_NAME", raising=False)
+    monkeypatch.delenv("GITHUB_EVENT_PATH", raising=False)
+    config = _to_config({}, None)
+    config.content_validation.fail_on_new_only = True
+    config.reporting.formats = ["json", "markdown", "sarif", "junit"]
+    context = ModelContext(base_url="https://omni.example", model_id="model", model_path="model", branch_id="branch")
+    current = payload("Synthetic private field missing")
+    current["content"][0].update(identifier="synthetic-draft", document_id="synthetic-draft-physical")
+    client = SimpleNamespace(
+        validate_content=lambda *args, branch_id=None, **kwargs: (
+            current if branch_id else payload("Synthetic private field missing")
+        ),
+        list_content=lambda **kwargs: [{"identifier": "doc-short"}],
+        list_document_drafts=lambda parent: [{
+            "identifier": "synthetic-draft", "publishedIdentifier": "doc-short",
+            "branch": {"id": "wrong-private-branch"}, "status": "active", "draftOutOfDate": False,
+            "updatedAt": "2026-10-15T12:00:00.000Z",
+        }],
+    )
+    args = build_parser().parse_args(["run", "--auto"])
+    with mock.patch("omniflow.cli.load_config", return_value=config), \
+            mock.patch("omniflow.cli.discover_contexts", return_value=[context]), \
+            mock.patch("omniflow.cli._client_and_branch_for_context", return_value=(client, "branch")), \
+            mock.patch("omniflow.cli.run_model_validation") as model_validation:
+        assert cmd_run(args, changed_files=[]) == 4
+    model_validation.assert_not_called()
+    public = tmp_path / ".omniflow/public"
+    report = json.loads((public / "report.json").read_text())
+    assert report["exit_code"] == 4 and report["policy_decision"] == "fail"
+    assert report["diagnostic_schema_version"] == 2
+    finding = report["issues"][0]
+    assert finding["type"] == "content_evidence_unavailable"
+    assert finding["reason_code"] == "document_identity_unavailable"
+    assert finding["validation_scope"] == "branch"
+    assert finding["comparison_mode"] == "new_only"
+    assert finding["comparison_status"] == "unavailable"
+    assert finding["regression_status"] == "unknown"
+    assert finding["blocking"] is True
+    assert all(issue["type"] != "content_validation_issue" for issue in report["issues"])
+    assert report["model_reports"][0]["check_reports"][0]["coverage_complete"] is False
+    captured = capsys.readouterr()
+    rendered = captured.out + captured.err + "".join(path.read_text() for path in public.iterdir())
+    for private in ("synthetic-draft", "doc-short", "wrong-private-branch", "Synthetic private field missing",
+                    "Private dashboard", "private.example"):
+        assert private not in rendered
     assert not (tmp_path / ".omniflow/restricted").exists()
 
 
