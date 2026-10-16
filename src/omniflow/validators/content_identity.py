@@ -61,14 +61,36 @@ def _indexed(documents: list[dict]) -> dict[str, dict]:
     return result
 
 
+def _unordered_items(value: Any) -> Any:
+    """Compare validated collections without order, retaining types and duplicates."""
+    if not isinstance(value, list):
+        return value  # Missing evidence is not equivalent to an explicit empty list.
+    return sorted(value, key=lambda item: json.dumps(item, sort_keys=True))
+
+
+def _filter_evidence(value: Any) -> Any:
+    if not isinstance(value, list):
+        return value
+    return _unordered_items([
+        {**item, "issues": _unordered_items(item["issues"])}
+        if isinstance(item, dict) and set(item) == {"filter_name", "issues"} else item
+        for item in value
+    ])
+
+
 def evidence_signature(documents: list[dict]) -> list[str]:
-    """Keep identities and issues, not names, owners, URLs or response timestamps."""
+    """Keep identities and issue occurrences, ignoring only collection ordering.
+
+    The caller validates both responses first. Normalize comparison copies only;
+    do not change API payloads, issue fingerprints, or persisted history.
+    """
     return sorted(json.dumps({
         "identifier": doc.get("identifier"), "document_id": doc.get("document_id"),
-        "filters": doc.get("dashboard_filter_issues"),
-        "queries": sorted(json.dumps({key: query.get(key) for key in (
-            "query_id_map_key", "query_presentation_id", "query_id", "issues",
-        )}, sort_keys=True) for query in doc.get("queries_and_issues", [])),
+        "filters": _filter_evidence(doc.get("dashboard_filter_issues")),
+        "queries": sorted(json.dumps({
+            **{key: query.get(key) for key in ("query_id_map_key", "query_presentation_id", "query_id")},
+            "issues": _unordered_items(query.get("issues")),
+        }, sort_keys=True) for query in doc.get("queries_and_issues", [])),
     }, sort_keys=True) for doc in documents)
 
 

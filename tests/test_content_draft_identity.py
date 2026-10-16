@@ -198,6 +198,87 @@ def test_mapping_version_validation_or_label_changes_invalidate_comparison(tmp_p
     assert not (tmp_path / "private/history.json").exists()
 
 
+def recheck_documents(kind):
+    messages = [MESSAGE, MESSAGE, "Another synthetic issue"]
+    filters = [{"filter_name": FILTER, "issues": messages}]
+    queries = []
+    if kind == "filter_groups":
+        filters.append({"filter_name": "Another synthetic filter", "issues": [MESSAGE]})
+    elif kind == "legacy_filters":
+        filters = [MESSAGE, {"message": "Another synthetic issue"}, MESSAGE, *filters]
+    elif kind == "query_messages":
+        filters = []
+        queries = [{"query_id_map_key": "stable-tile", "query_presentation_id": "presentation",
+                    "issues": [MESSAGE, MESSAGE, {"message": "Another synthetic issue"}]}]
+    return document(DRAFT, filters=copy.deepcopy(filters), queries=copy.deepcopy(queries)), document(
+        PUBLISHED, filters=copy.deepcopy(filters), queries=copy.deepcopy(queries),
+    )
+
+
+def recheck_issue_list(doc, kind):
+    if kind == "query_messages":
+        return doc["queries_and_issues"][0]["issues"]
+    if kind in {"filter_groups", "legacy_filters"}:
+        return doc["dashboard_filter_issues"]
+    return doc["dashboard_filter_issues"][0]["issues"]
+
+
+@pytest.mark.parametrize("scope", ["branch", "base"])
+@pytest.mark.parametrize("kind,expected", [
+    ("filter_groups", 4), ("grouped_messages", 3), ("query_messages", 3), ("legacy_filters", 6),
+])
+def test_recheck_order_only_changes_preserve_existing_occurrences_and_payload(tmp_path, scope, kind, expected):
+    current, baseline = recheck_documents(kind)
+    rechecked = copy.deepcopy(current if scope == "branch" else baseline)
+    recheck_issue_list(rechecked, kind).reverse()
+    responses = [{"content": [item]} for item in (
+        current, baseline, rechecked if scope == "branch" else current,
+        rechecked if scope == "base" else baseline,
+    )]
+    original = copy.deepcopy(responses)
+    client = client_for()
+    client.validate_content.side_effect = responses
+
+    report, code = validate(tmp_path, client)
+
+    assert code == 0
+    assert report["comparison_status"] == "complete"
+    assert report["existing_issues"] == report["current_issues"] == report["baseline_issues"] == expected
+    assert report["new_issues"] == report["resolved_issues"] == 0
+    assert responses == original
+    assert [call.kwargs["branch_id"] for call in client.validate_content.call_args_list] == [BRANCH, None, BRANCH, None]
+
+
+@pytest.mark.parametrize("scope", ["branch", "base"])
+@pytest.mark.parametrize("kind", ["grouped_messages", "query_messages"])
+@pytest.mark.parametrize("change", ["changed_message", "additional_duplicate"])
+def test_recheck_normalization_does_not_hide_changed_messages_or_duplicate_counts(tmp_path, scope, kind, change):
+    current, baseline = recheck_documents(kind)
+    rechecked = copy.deepcopy(current if scope == "branch" else baseline)
+    issues = recheck_issue_list(rechecked, kind)
+    issues.reverse()
+    if change == "changed_message":
+        issues[-1] = "A different synthetic issue"
+    else:
+        issues.append(MESSAGE)
+    responses = [{"content": [item]} for item in (
+        current, baseline, rechecked if scope == "branch" else current,
+        rechecked if scope == "base" else baseline,
+    )]
+    original = copy.deepcopy(responses)
+    client = client_for()
+    client.validate_content.side_effect = responses
+
+    with pytest.raises(ContentEvidenceError) as caught:
+        validate(tmp_path, client)
+
+    assert caught.value.exit_code == 4
+    assert caught.value.reason_code == "document_identity_changed"
+    assert responses == original
+    assert not (tmp_path / "private/report.json").exists()
+    assert not (tmp_path / "private/history.json").exists()
+
+
 @pytest.mark.parametrize("scope", ["branch", "base"])
 def test_malformed_recheck_preserves_the_actual_failing_scope(tmp_path, scope):
     current, baseline = document(DRAFT), document(PUBLISHED)

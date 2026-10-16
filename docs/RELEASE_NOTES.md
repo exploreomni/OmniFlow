@@ -1,5 +1,11 @@
 # Release notes
 
+## Unreleased — order-independent content evidence rechecks
+
+- Dashboard-draft evidence rechecks now ignore ordering-only differences in dashboard-filter groups, filter messages, and query issue lists. Identical existing findings no longer produce a false `document_identity_changed` failure solely because the API returns them in a different order.
+- Document/query identities, exact messages, duplicate occurrence counts, draft versions, and malformed-evidence checks remain enforced. API responses, history fingerprints, policy defaults, and diagnostic privacy are unchanged.
+- Existing installations need the supporting Action commit pin; no policy change is required. Synthetic regression coverage does not establish how often a live tenant reorders API results or replace customer acceptance testing.
+
 ## Unreleased — repository-aware diagnostic default
 
 **Upgrade notice:** `reporting.diagnostics.mode` now defaults to `repository`. Eligible private same-repository GitHub.com `omniflow run` executions generate separate source-location diagnostics. Set `mode: minimal` in the trusted target-branch policy to opt out. This nested key requires the supporting revision; coordinate the Action pin, policy and workflow upload changes through review.
