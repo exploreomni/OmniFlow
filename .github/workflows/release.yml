@@ -73,6 +73,8 @@ jobs:
           path: .
           format: spdx-json
           output-file: dist/omniflow.spdx.json
+          # Only the protected publish job may create or replace release assets.
+          upload-release-assets: false
 
       - name: Generate checksums
         working-directory: dist
