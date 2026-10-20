@@ -109,7 +109,10 @@ ENUMS = {
     "status": {"completed", "failed", "not_run", "disabled", "skipped", "passed", "unknown",
                "verified", "unverified", "pending_recheck", "not_applicable", "success", "refused",
                "proposed", "rolled_back", "manual_review_required", "available", "unavailable", "committed",
-               "not_needed", "rollback_failed", "partial", "status_unknown", "timed_out", "running"},
+               "not_needed", "rollback_failed", "partial", "status_unknown", "timed_out", "running", "generated"},
+    # Uploaded status/URLs belong to the workflow's current-run receipt, never
+    # untrusted input reports or a CLI that runs before artifact publication.
+    "publication_status": {"unconfirmed"},
     "execution_status": {"completed", "skipped", "partial", "unavailable", "failed", "not_applicable"},
     "service": {"omni", "github", "git"},
     "api_operation": API_OPERATIONS,
@@ -246,6 +249,9 @@ def public_diagnostic(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _finding_message(issue: dict[str, Any]) -> str:
+    descriptor = diagnostic_descriptor(issue)
+    if descriptor["diagnostic_code"] == "OF-CANDIDATE-VIEW-METADATA":
+        return descriptor["title"] + " Validation is incomplete; this does not establish a model or content defect."
     noun = "model" if issue.get("validator") == "model" else "content"
     reason = (issue.get("reason_code") if issue.get("reason_code") in {"dbt_refresh_status_unknown", "ai_repair_timeout"}
               else issue.get("cause_code") or issue.get("reason_code"))

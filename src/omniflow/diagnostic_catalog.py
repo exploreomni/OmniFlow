@@ -20,6 +20,22 @@ LINT_MESSAGES = {
     ),
 }
 
+# Separate remediation from the title so recognized rules never receive the
+# unknown-rule fallback. Fixed text only: no API prose or customer values.
+LINT_ACTIONS = {
+    "require_field_descriptions": "Add a description to the affected field in model YAML, then rerun lint.",
+    "require_measure_descriptions": "Add a description to the affected measure in model YAML, then rerun lint.",
+    "require_primary_keys": "Verify the view's row grain and declare the correct primary key; do not mark a nonunique field as a key just to pass lint.",
+    "require_topic_labels": "Add a readable label to the affected topic, then rerun lint.",
+    "require_owner_metadata": "Add the documented owner metadata to the affected topic, then rerun lint.",
+    "forbid_many_to_many_without_comment": "Review join grain and fanout and record the governance review; do not invent an unsupported YAML comment property.",
+    "block_deleted_fields": "Review downstream references to the deleted field; restore it or migrate the affected consumers before accepting the removal.",
+    "warn_field_type_change": "Check dependent filters and calculations against the intended field type, then validate affected content.",
+    "warn_measure_aggregation_change": "Verify the intended aggregation and reconcile dependent metrics before accepting the change.",
+    "warn_relationship_cardinality_change": "Verify the relationship's join grain, cardinality and fanout against the data and dependent metrics.",
+    "forbid_personal_folder_validation_scope": "Review omni.include_personal_folders on the trusted target branch and select the intended governed scope; do not waive the scope restriction as existing debt.",
+}
+
 CHANGE_MESSAGES = {
     **{f"{kind}_{change}": f"A {kind} was {change}. Review the semantic diff and downstream dependencies."
        for kind in ("field", "view", "topic", "relationship") for change in ("added", "deleted", "modified")},

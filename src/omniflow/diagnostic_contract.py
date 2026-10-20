@@ -5,9 +5,9 @@ instructions. A reason is evidence of a category, not proof of its root cause.
 """
 from __future__ import annotations
 
-from .diagnostic_catalog import CHANGE_MESSAGES, CHECK_GUIDANCE, LINT_MESSAGES
+from .diagnostic_catalog import CHANGE_MESSAGES, CHECK_GUIDANCE, LINT_ACTIONS, LINT_MESSAGES
 
-CATALOG_VERSION = 1
+CATALOG_VERSION = 2
 # code, title, corrective/investigative action, category
 REASON_DETAILS: dict[str, tuple[str, str, str, str]] = {}
 
@@ -232,6 +232,18 @@ _add("ai_repair_validation_incomplete", "OF-REPAIR-VALIDATION-INCOMPLETE", "Post
 
 def diagnostic_descriptor(issue: dict) -> dict[str, str]:
     """Fixed human guidance for a projected finding; never copy input prose."""
+    if issue.get("metadata_stage") == "view_names" and issue.get("metadata_reason") in {
+        "unsupported_orientation", "duplicate_name", "duplicate_path", "invalid_identity",
+        "non_view_identity", "incomplete_identity",
+    } and not issue.get("cause_code"):
+        return {
+            "diagnostic_code": "OF-CANDIDATE-VIEW-METADATA",
+            "title": "The Omni view-identity metadata response is incomplete or ambiguous.",
+            "next_action": "Review the fixed metadata reason and scope with the OmniFlow maintainer. "
+                           "Verify the supported viewNames response contract; do not rename files or move "
+                           "folders to work around malformed API metadata. Do not share raw response bodies.",
+            "category": "incomplete_evidence",
+        }
     # A write with unknown outcome must retain reconciliation guidance even if
     # its underlying HTTP failure also has a useful catalog entry.
     reason = (issue.get("reason_code") if issue.get("reason_code") in {"dbt_refresh_status_unknown", "ai_repair_timeout"}
@@ -257,6 +269,8 @@ def diagnostic_descriptor(issue: dict) -> dict[str, str]:
         elif validator in {"semantic_diff", "contracts"} and issue.get("type") in CHANGE_MESSAGES:
             title = CHANGE_MESSAGES[issue["type"]]
         action = CHECK_GUIDANCE.get(validator, CHECK_GUIDANCE["execution"])
+        if validator == "semantic_lint" and rule in LINT_ACTIONS:
+            action = LINT_ACTIONS[rule]
         if validator in {"semantic_diff", "contracts"} and issue.get("type") == "topic_organization_changed":
             action = "Confirm the intended topic grouping in Omni; review any separate validation or synchronization findings."
     return {"diagnostic_code": code, "title": title, "next_action": action, "category": category}

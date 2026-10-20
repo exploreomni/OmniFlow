@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from ..security import redact, secure_write_text
+from .diagnostic_fields import DIAGNOSTIC_FACTS
 from .finding_groups import group_findings
 from .issue_policy import is_blocking
 
@@ -41,6 +42,12 @@ def _render_minimal_diagnostic(report: dict[str, Any]) -> str:
     if isinstance(availability, dict) and availability.get("status"):
         lines.extend(["", f"- Repository diagnostic detail: `{_safe_code(availability['status'])}` "
                       f"(`{_safe_code(availability.get('diagnostics_reason', 'unknown'))}`)."])
+        if availability["status"] in {"generated", "available"}:
+            # 'available' is the older runner-local status, not an upload receipt.
+            lines.append("- Generated on the runner; upload is **unconfirmed** in this report. "
+                         "Check the workflow's **Diagnostic publication** receipt for download status. "
+                         "If that section is absent, update the consumer workflow's guarded upload and receipt steps; "
+                         "updating only the Action pin does not add them.")
     if report.get("validation_complete") is True and any(
         check.get("comparison_mode") == "new_only" and check.get("comparison_status") == "complete"
         for context in report.get("model_reports", [report])
@@ -160,14 +167,7 @@ def _public_finding_lines(findings: list[dict[str, Any]], *, repository_detail: 
                     if key in finding:
                         lines.append(f"   - {key.replace('_', ' ')}: `{_safe_code(finding[key])}`")
                 lines.extend(_candidate_observation_lines(finding))
-            for key in ("context_reference", "validation_scope", "state", "reason_code", "candidate_reason",
-                        "cause_code", "service", "api_operation", "http_status", "attempt_count", "max_attempts",
-                        "operation_phase", "retryable", "config_key", "expected_type", "source_kind", "source_line",
-                        "source_column", "entry_index", "contents_comparison", "compared_file_count",
-                        "git_file_count", "omni_file_count", "git_only_count", "omni_only_count",
-                        "candidate_sample_count", "candidate_sample_omitted_count", "last_observed_status",
-                        "comparison_mode", "comparison_status", "content_health", "model_health",
-                        "regression_status", "requested_validation_depth", "active"):
+            for key in DIAGNOSTIC_FACTS:
                 if key in finding:
                     value = str(finding[key]).lower() if type(finding[key]) is bool else finding[key]
                     lines.append(f"   - {key.replace('_', ' ')}: `{_safe_code(value)}`")

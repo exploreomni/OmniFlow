@@ -416,7 +416,9 @@ def write_repository_reports(report: dict, safe_report: dict, *, output_dir: str
             mapped = sum("file" in item for item in projected.get("issues", []))
             status.update(mode="repository", reason="repository_verified", mapped_findings=mapped)
             projected["repository_diagnostics"] = {
-                **status, "unmapped_findings": len(projected.get("issues", [])) - mapped,
+                **status, "status": "generated", "diagnostics_reason": "repository_verified",
+                "publication_status": "unconfirmed",
+                "unmapped_findings": len(projected.get("issues", [])) - mapped,
                 "contexts_unavailable": state.contexts_unavailable,
                 "unavailable_reasons": dict(state.unavailable_reasons),
             }
@@ -439,18 +441,20 @@ def write_repository_reports(report: dict, safe_report: dict, *, output_dir: str
 
 
 def repository_diagnostic_availability() -> dict:
-    """Safe availability metadata; absence of detail must itself be explained."""
+    """Runner-local generation only. The caller workflow owns upload receipts."""
     state = _session.get()
     if state is None:
-        return {"status": "unavailable", "diagnostics_reason": "no_trusted_run_context"}
+        return {"status": "unavailable", "diagnostics_reason": "no_trusted_run_context",
+                "publication_status": "unconfirmed"}
     if state.output_ready:
-        return {"status": "available", "diagnostics_reason": "repository_verified"}
+        return {"status": "generated", "diagnostics_reason": "repository_verified",
+                "publication_status": "unconfirmed"}
     reason = state.policy.reason
     if state.policy.enabled:
         reason = "repository_report_unavailable" if state.report_failed else "snapshot_evidence_unavailable"
     if reason not in POLICY_REASONS | {"repository_report_unavailable", "snapshot_evidence_unavailable"}:
         reason = "no_trusted_run_context"
-    return {"status": "unavailable", "diagnostics_reason": reason}
+    return {"status": "unavailable", "diagnostics_reason": reason, "publication_status": "unconfirmed"}
 
 
 def publish_repository_output() -> None:
@@ -463,10 +467,15 @@ def publish_repository_output() -> None:
             with open(path, "a", encoding="utf-8") as stream:
                 stream.write(f"repository_diagnostics_ready={'true' if ready else 'false'}\n")
         except OSError:
-            print("Could not mark repository diagnostics ready; do not upload repository-detail artifacts.")
+            print("Repository diagnostic readiness could not be handed to the workflow; "
+                  "do not upload repository-detail artifacts. Check runner output permissions. "
+                  "This is a reporting handoff failure, not a model defect.")
+            return
     reason = repository_diagnostic_availability()["diagnostics_reason"]
     if ready:
-        print("Repository diagnostics are available in the separate repository artifact. "
+        print("Repository diagnostics were generated on the runner; upload is not yet confirmed. "
+              "Check the workflow's Diagnostic publication receipt for download status. "
+              "Older workflows need the guarded repository-diagnostics upload step from the current example. "
               "PR comments and logs remain minimal.")
     else:
         print(f"Repository diagnostics unavailable ({reason}). Public report contains safe codes and recovery steps; "

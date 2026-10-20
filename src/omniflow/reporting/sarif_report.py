@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from ..security import secure_write_text
+from .diagnostic_fields import DIAGNOSTIC_FACTS
 from .issue_policy import is_blocking
 
 
@@ -29,8 +30,7 @@ def to_sarif(report: dict[str, Any]) -> dict[str, Any]:
                 "kind": "fail" if is_blocking(issue) else "informational",
                 "properties": {
                     "policy_blocking": is_blocking(issue),
-                    **{key: issue[key] for key in ("diagnostic_code", "reason_code", "cause_code", "api_operation",
-                                                  "validation_scope", "next_action") if key in issue},
+                    **{key: issue[key] for key in ("diagnostic_code", "next_action", *DIAGNOSTIC_FACTS) if key in issue},
                 },
                 "message": {"text": issue.get("message") or issue.get("summary") or "OmniFlow issue"},
                 **({"locations": [{"physicalLocation": location}]} if location else {}),

@@ -6,7 +6,7 @@ from collections import Counter, defaultdict, deque
 from pathlib import Path
 from typing import Any, Iterable
 
-from ..exceptions import OmniAPIError, OmniResponseError
+from ..exceptions import OmniAPIError, OmniFlowError
 from ..omni_client import OmniClient
 from ..security import redact, secure_write_text
 from ..timestamps import utc_now_iso
@@ -575,11 +575,26 @@ def _fetch_validator_payload(
             **({"force_full_validation": True} if force_full_validation else {}),
             **({"find_type": selector[0], "find": selector[1]} if selector else {}),
         )
-    except OmniResponseError as exc:
-        exc.validation_scope = "branch" if branch_id else "base"
-        exc.comparison_mode = comparison_mode
-        exc.requested_validation_depth = "full" if force_full_validation else "api_default"
+    except OmniFlowError as exc:
+        _attach_content_scope(
+            exc, validation_scope="branch" if branch_id else "base", comparison_mode=comparison_mode,
+            requested_validation_depth="full" if force_full_validation else "api_default",
+        )
         raise
+
+
+def _attach_content_scope(
+    exc: OmniFlowError, *, validation_scope: str | None, comparison_mode: str,
+    requested_validation_depth: str,
+) -> None:
+    """Preserve the failing request scope without changing its cause or policy."""
+    exc.validation_scope = validation_scope
+    exc.comparison_mode = comparison_mode if comparison_mode in {"all_issues", "new_only"} else "unknown"
+    exc.requested_validation_depth = requested_validation_depth
+    exc.diagnostic_context.update(
+        validation_scope=exc.validation_scope, comparison_mode=exc.comparison_mode,
+        requested_validation_depth=exc.requested_validation_depth,
+    )
 
 
 class _TargetedScopeIncomplete(Exception):
@@ -915,10 +930,11 @@ def _prepare_validator_payload(
 ) -> Any:
     try:
         extract_issues(payload)
-    except ContentEvidenceError as exc:
-        exc.validation_scope = validation_scope
-        exc.comparison_mode = comparison_mode if comparison_mode in {"all_issues", "new_only"} else "unknown"
-        exc.requested_validation_depth = requested_validation_depth
+    except OmniFlowError as exc:
+        _attach_content_scope(
+            exc, validation_scope=validation_scope, comparison_mode=comparison_mode,
+            requested_validation_depth=requested_validation_depth,
+        )
         raise
     if not isinstance(payload, dict) or not isinstance(payload.get("content"), list):
         return payload

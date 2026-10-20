@@ -16,7 +16,9 @@ from omniflow.repository_diagnostics import (
     _load_snapshot,
     clear_repository_reports,
     finish_repository_context,
+    publish_repository_output,
     record_candidate_diagnostics,
+    repository_diagnostic_availability,
     repository_reporting,
     start_repository_context,
 )
@@ -123,7 +125,8 @@ def test_mismatch_samples_are_private_observations_without_successful_candidate_
     assert private["validation_complete"] is safe["validation_complete"] is False
     assert "candidate_samples" not in safe["issues"][0]
     assert "orders.view" not in json.dumps(safe)
-    assert safe["repository_diagnostics"]["status"] == "available"
+    assert safe["repository_diagnostics"]["status"] == "generated"
+    assert safe["repository_diagnostics"]["publication_status"] == "unconfirmed"
 
 
 @pytest.mark.parametrize("binding", ["candidate_git_sha", "candidate_model_id", "candidate_branch_id"])
@@ -573,3 +576,33 @@ def test_workflow_templates_never_upload_detail_based_only_on_disk_presence():
         for step in steps:
             if step["name"] in {"Comment on PR", "Upload SARIF"}:
                 assert ".omniflow/repository/" not in json.dumps(step)
+
+
+def test_generation_receipt_never_claims_successful_publication(repository, monkeypatch, capsys):
+    context, client, _ = repository
+    monkeypatch.setenv("GITHUB_OUTPUT", str(Path("action-outputs").resolve()))
+    with repository_reporting(object(), output_dir=Path(".omniflow")):
+        execute(context, client, findings())
+        safe = write(report(findings()))
+        assert repository_diagnostic_availability()["status"] == "generated"
+        publish_repository_output()
+    assert Path("action-outputs").read_text() == "repository_diagnostics_ready=true\n"
+    assert safe["repository_diagnostics"]["publication_status"] == "unconfirmed"
+    output = capsys.readouterr().out
+    assert "generated on the runner" in output
+    assert "upload is not yet confirmed" in output
+    assert "are available in the separate repository artifact" not in output
+
+
+def test_failed_readiness_handoff_does_not_advertise_an_upload(repository, monkeypatch, capsys):
+    context, client, _ = repository
+    # A directory cannot serve as the output file. No retry or alternate path.
+    monkeypatch.setenv("GITHUB_OUTPUT", str(Path.cwd()))
+    with repository_reporting(object(), output_dir=Path(".omniflow")):
+        execute(context, client, findings())
+        write(report(findings()))
+        publish_repository_output()
+    output = capsys.readouterr().out
+    assert "readiness could not be handed to the workflow" in output
+    assert "not a model defect" in output
+    assert "are available" not in output

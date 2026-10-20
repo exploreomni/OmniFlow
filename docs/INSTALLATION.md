@@ -77,6 +77,10 @@ The example workflow uses `pull_request_target` so it can read policy from the t
 
 ## Step 4: Add Ownership And Protect The Base Branch
 
+For existing installations, follow the [report-delivery upgrade checklist](VALIDATION_DIAGNOSTICS.md#upgrade-report-delivery-in-an-existing-workflow).
+An Action-pin update alone cannot add missing upload/receipt steps. After generation, the updated workflow's
+**Diagnostic publication** section confirms successful uploads separately from the validation decision.
+
 **New private-repository reporting default:** after upgrading to a supporting revision, eligible private GitHub.com runs generate repository-only diagnostics with verified source identifiers and locations. The updated validation workflow uploads these separately as `omniflow-repository-diagnostics` with seven-day retention; PR comments, logs and annotations stay minimal. Repository readers can download the detailed artifact. To opt out, merge the following into the required root policy on the trusted base before adopting the new pin:
 
 ```yaml

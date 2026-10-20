@@ -61,6 +61,27 @@ def test_public_report_explains_repository_detail_unavailability_without_names()
     assert "Repository diagnostic detail: `unavailable` (`repository_not_private`)" in markdown
 
 
+def test_generated_or_legacy_available_detail_does_not_claim_downloadable_artifact():
+    for status in ("generated", "available"):
+        markdown = render_markdown_report(report(repository_diagnostics={
+            "status": status, "diagnostics_reason": "repository_verified",
+            "publication_status": "unconfirmed",
+        }))
+        assert "upload is **unconfirmed**" in markdown
+        assert "updating only the Action pin does not add them" in markdown
+        assert "Diagnostic publication" in markdown
+
+
+def test_public_projection_cannot_forge_upload_confirmation_or_download_link():
+    from omniflow.diagnostics import public_diagnostic
+
+    safe = public_diagnostic(report(repository_diagnostics={
+        "status": "generated", "publication_status": "uploaded",
+        "artifact_url": "https://private.invalid/secret", "artifact_id": 123,
+    }))
+    assert safe["repository_diagnostics"] == {"status": "generated"}
+
+
 def test_private_candidate_examples_are_bounded_and_do_not_claim_correspondence():
     issue = report()["issues"][0] | {
         "candidate_evidence_kind": "observations_not_correspondence", "source_revision": "head",

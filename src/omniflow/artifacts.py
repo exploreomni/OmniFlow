@@ -143,6 +143,8 @@ def write_artifact_manifest(
         categories[category] = categories.get(category, 0) + 1
     manifest = {
         "version": 2,
+        "inventory_scope": "runner_local_files",
+        "publication_status": "unconfirmed",
         "inventory_observed_at": utc_now_iso(),
         "public_dir": PUBLIC_DIR,
         "restricted_dir": RESTRICTED_DIR,
@@ -154,6 +156,7 @@ def write_artifact_manifest(
         "unrecognized_public_file_count": sum(path.as_posix() not in PUBLIC_REPORT_NAMES for path in public_files),
         "repository_diagnostics": {
             "audience": "repository_readers",
+            "publication_status": "unconfirmed",
             "artifacts": [f"repository/{path.as_posix()}" for path in repository_files
                           if path.as_posix() in {"report.json", "report.md", "report.sarif", "junit.xml", "status.json"}],
             "shareable": False,

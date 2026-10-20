@@ -206,6 +206,9 @@ def test_manifest_inventories_outputs_without_disclosing_restricted_paths(tmp_pa
     write_artifact_manifest(output_dir=tmp_path, restricted_artifacts_enabled=False, redaction_level="strict")
     manifest_text = (tmp_path / "artifact-manifest.json").read_text()
     manifest = json.loads(manifest_text)
+    assert manifest["inventory_scope"] == "runner_local_files"
+    assert manifest["publication_status"] == "unconfirmed"
+    assert manifest["repository_diagnostics"]["publication_status"] == "unconfirmed"
     assert "public/dbt-impact.json" in manifest["public_artifacts"]
     assert manifest["restricted_inventory"]["file_count"] == 3
     assert manifest["restricted_cleanup"]["status"] == "pending"

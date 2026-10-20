@@ -2,7 +2,7 @@
 
 ## Read the cause before changing the model
 
-Start with **Primary blocker** and **Next action** in `report.md`. Each finding has a stable `diagnostic_code`, fixed explanation and next action. Structured facts can include the check/phase, base or branch scope, API operation, HTTP status, retry attempts, built-in configuration key, expected type and parser line/column. Unknown API prose is never used as an explanation. The catalog is versioned separately as `diagnostic_catalog_version: 1`; public schema version remains `2`.
+Start with **Primary blocker** and **Next action** in `report.md`. Each finding has a stable `diagnostic_code`, fixed explanation and next action. Structured facts can include the check/phase, base or branch scope, API operation, HTTP status, retry attempts, built-in configuration key, expected type and parser line/column. Unknown API prose is never used as an explanation. The catalog is versioned separately as `diagnostic_catalog_version: 2`; public schema version remains `2`.
 
 | Example | Meaning | What to do |
 | --- | --- | --- |
@@ -13,7 +13,7 @@ Start with **Primary blocker** and **Next action** in `report.md`. Each finding 
 
 These are synthetic illustrations, not diagnoses of a particular customer run. Check execution now records elapsed time and why later stages were blocked. `partial`, `unavailable`, `skipped` and `not_run` are not completed validation. Optional policy may permit a zero exit despite incomplete coverage; `validation_complete: false` remains explicit, including in JUnit. AI repair will not commit when its post-repair validation explicitly reports incomplete coverage.
 
-Public artifacts retain safe causes but no customer paths. Their `repository_diagnostics` status explains whether richer detail is available, or why it was withheld. In a verified private repository, download `omniflow-repository-diagnostics`; otherwise follow the public code's recovery steps and obtain source evidence through an approved private channel. A report-publication failure is not a model defect. A bootstrap/install failure happens before validators start and may have no report; the failed Action step carries a fixed `OF-BOOTSTRAP-*` explanation.
+Public artifacts retain safe causes but no customer paths. Their `repository_diagnostics.status` is `generated` when richer detail was written on the runner, or `unavailable` with a fixed reason when withheld. `publication_status: unconfirmed` is intentional: the CLI cannot know whether a later workflow upload succeeds. Older reports' `available` also meant runner-local generation, not upload confirmation. Only the updated workflow's **Diagnostic publication** receipt supplies confirmed download links. A report-publication failure is not a model defect. A bootstrap/install failure happens before validators start and may have no report; the failed Action step carries a fixed `OF-BOOTSTRAP-*` explanation.
 
 ## First distinguish the failure
 
@@ -86,11 +86,48 @@ No PII/PHI/PCI-bearing messages, field values, SQL, names, or resource IDs are e
 
 Eligible private same-repository GitHub.com validation runs now default to a separate **repository diagnostics** artifact. It can identify the exact authored field/view/topic, source file and source-key line, alongside the fixed explanation and corrective guidance. The JSON contains all findings; Markdown prioritizes blockers and explicitly counts any omitted findings. A location labeled `base` refers to the old snapshot (for example, a deleted field), not the current PR file. No line number is invented when only a file is known.
 
-The ordinary PR comment stays minimal. Download `omniflow-repository-diagnostics` from the run to inspect its `report.md` and `report.json`. If absent, check the safe console fallback reason and local `repository/status.json`: unknown repository eligibility, unavailable trusted policy, mismatched authored snapshots, or unavailable report generation will withhold detailed output without changing validation policy. Existing workflows need the separately guarded upload step from the updated workflow example. Do not upload the whole `.omniflow` directory.
+The ordinary PR comment stays minimal. When **Diagnostic publication** confirms upload, download `omniflow-repository-diagnostics` from that run to inspect its `report.md` and `report.json`. If generation is unavailable, check the safe console fallback reason and local `repository/status.json`: unknown repository eligibility, unavailable trusted policy, mismatched authored snapshots, or unavailable report generation can withhold detail. If generation succeeded but publication did not, inspect the upload step rather than changing model code. Existing workflows need the separately guarded upload and receipt steps from the updated workflow example. Do not upload the whole `.omniflow` directory.
 
 Content-only dashboard/filter identities that are not authored in the repository still require inspection in Omni. Unrecognized API messages are not copied into the report, and a source location alone does not establish the precise root cause.
 
 To opt out, merge `reporting.diagnostics.mode: minimal` into the root `.omniflow.yml` on the trusted target branch. `repository` is the omitted default; both modes retain minimal public reports, logs, annotations and PR comments. See [Diagnostic Privacy](DIAGNOSTIC_PRIVACY.md).
+
+### Upgrade report delivery in an existing workflow
+
+Use the complete [validation workflow example](../.github/workflow-examples/omniflow.yml), or the
+[environment-aware example](../.github/workflow-examples/omniflow-environments.yml) when already using environments.
+Review and merge these changes on the trusted target branch; a PR-only workflow change does not update the privileged caller.
+
+1. Update both OmniFlow `uses:` entries to the same reviewed full commit SHA. Preserve existing model policy, secrets,
+   environment bindings and custom branch triggers; no validation gate needs to be disabled.
+2. Include **Prepare fresh diagnostic output** before setup/install. It removes only the fixed generated public files
+   after path checks. Keep its readiness guards on consumers so a failed bootstrap cannot publish old reports.
+3. Keep `id: omniflow` on the validation step and the example's `public_upload` and `repository_upload` IDs.
+   The repository upload requires both the fresh `repository-diagnostics-ready` output and private-repository context;
+   disk presence alone never authorizes it. Keep explicit file paths, hidden-file inclusion and seven-day private retention.
+4. Put **Show public diagnostic summary** after the uploads. Copy its environment bindings and receipt script together;
+   they distinguish upload success, failure, skipping and missing confirmation. It accepts a download link only from
+   a successful upload with the current repository/run URL and artifact ID.
+5. In the standard workflow, retain the `publication` step ID and the PR comment's `PUBLICATION_RECEIPT` binding.
+   Comments consume only the public report and current-run receipt, never repository report contents.
+   The environment-aware example remains read-only and publishes its receipt to the job summary, not a new PR comment.
+6. Run a fresh test and check **Diagnostic publication** in the job summary. Verify the downloaded report belongs to
+   that run and inspect both generation and publication states. If using custom `output_dir`, update every relevant
+   cleanup, upload and read path together.
+
+| Observed state | Meaning and next step |
+| --- | --- |
+| Generated, publication unconfirmed in report JSON | Normal before workflow publication. Check the post-upload receipt; the JSON and manifest are not upload receipts. |
+| Uploaded with a current-run link | GitHub returned a successful upload receipt. Repository authorization still governs access; artifacts can later expire or be deleted. |
+| Failed | Inspect the failed upload step. This does not change OmniFlow's validation counts/decision, although the workflow job can fail because delivery failed. |
+| Skipped | No upload was confirmed. Check eligibility/readiness and configured steps; do not enable private uploads merely because files exist. |
+| No publication section in an older workflow | Install the guarded upload and receipt steps; an Action-pin update alone cannot add them. |
+
+The manifest explicitly inventories **runner-local files**. It is not proof that those files reached GitHub.
+Known lint rules carry rule-specific next actions; only unknown rules use unknown-rule guidance. JUnit retains
+nonblocking findings as `system-out`, not failures. Safe configuration coordinates, API status/retries, comparison
+scope and view-metadata reasons remain available across report formats. View-metadata response failures are not
+instructions to rename files or rearrange folders. Raw API prose, data values and credentials remain excluded.
 
 ## Upgrading from 0.4.0: relationship-coverage errors
 

@@ -7,6 +7,7 @@ from typing import Any
 from xml.etree import ElementTree  # nosec B405
 
 from ..security import secure_write_text
+from .diagnostic_fields import DIAGNOSTIC_FACTS
 from .issue_policy import is_blocking
 
 
@@ -33,14 +34,19 @@ def to_junit(report: dict[str, Any]) -> str:
         case = ElementTree.SubElement(
             suite, "testcase", {"name": issue.get("rule_id") or issue.get("type") or f"issue-{index}"}
         )
+        detail = "\n".join(f"{key}: {issue[key]}" for key in (
+            "diagnostic_code", "validator", *DIAGNOSTIC_FACTS,
+            "file", "line", "message", "next_action",
+        ) if key in issue)
         if _is_failure(issue):
             failure = ElementTree.SubElement(
                 case, "failure", {"message": issue.get("message") or issue.get("summary") or "OmniFlow issue"}
             )
-            failure.text = "\n".join(f"{key}: {issue[key]}" for key in (
-                "diagnostic_code", "validator", "reason_code", "cause_code", "validation_scope", "api_operation",
-                "http_status", "file", "line", "state", "message", "next_action",
-            ) if key in issue)
+            failure.text = detail
+        else:
+            # Existing debt and warnings keep their evidence without becoming
+            # JUnit failures or changing suite counts.
+            ElementTree.SubElement(case, "system-out").text = "Nonblocking under recorded policy.\n" + detail
     return ElementTree.tostring(suite, encoding="unicode")
 
 

@@ -7,9 +7,12 @@ import pytest
 
 from omniflow import cli
 from omniflow.artifacts import write_public_reports
-from omniflow.diagnostic_catalog import CHANGE_MESSAGES, CHECK_GUIDANCE, LINT_MESSAGES
+from omniflow.diagnostic_catalog import CHANGE_MESSAGES, CHECK_GUIDANCE, LINT_ACTIONS, LINT_MESSAGES
 from omniflow.diagnostics import public_diagnostic
-from omniflow.github.annotations import annotation_lines
+from omniflow.github.annotations import annotation_lines, public_annotation_lines
+from omniflow.reporting.junit_report import to_junit
+from omniflow.reporting.markdown_report import render_markdown_report
+from omniflow.reporting.sarif_report import to_sarif
 from omniflow.validators.yaml_lint import DEFAULT_RULES
 
 # Fabricated markers only: no real person, health record, card, or credential.
@@ -50,6 +53,7 @@ def sensitive_fields():
 def test_catalog_covers_configurable_lint_and_actual_semantic_change_vocabulary():
     assert len(DEFAULT_RULES) == 11
     assert set(DEFAULT_RULES) == set(LINT_MESSAGES)
+    assert set(DEFAULT_RULES) == set(LINT_ACTIONS)
     assert ACTUAL_CHANGE_TYPES <= set(CHANGE_MESSAGES)
 
 
@@ -62,9 +66,40 @@ def test_each_lint_rule_survives_with_fixed_actionable_guidance(rule_id):
     issue = safe["issues"][0]
     assert issue["rule_id"] == rule_id
     assert issue["message"] == LINT_MESSAGES[rule_id]
+    assert issue["next_action"] == LINT_ACTIONS[rule_id]
+    assert "no recognized lint rule code" not in json.dumps(issue)
     assert issue["severity"] == "warning" and issue["blocking"] is False
     assert "sensitive details are withheld" not in issue["message"]
     assert_no_private_markers(json.dumps(safe))
+
+
+@pytest.mark.parametrize("rule_id", sorted(DEFAULT_RULES))
+def test_lint_action_survives_all_report_formats_without_changing_gate(rule_id):
+    safe = public_diagnostic({"issues": [{
+        **sensitive_fields(), "validator": "semantic_lint", "rule_id": rule_id,
+        "severity": "error", "blocking": True, "active": True,
+    }]})
+    expected = LINT_ACTIONS[rule_id]
+    assert safe["issues"][0]["blocking"] is True
+    sarif = to_sarif(safe)["runs"][0]["results"][0]
+    assert sarif["properties"]["next_action"] == expected
+    junit = ElementTree.fromstring(to_junit(safe))
+    assert expected in junit.find("testcase/failure").text
+    assert expected in "\n".join(public_annotation_lines(safe["issues"], limit=20))
+    # Markdown escapes punctuation; inspect its structure as well as safe JSON.
+    markdown = render_markdown_report(safe)
+    assert "next action:" in markdown and "no recognized lint rule code" not in markdown
+    assert_no_private_markers(markdown + json.dumps(sarif) + to_junit(safe))
+
+
+def test_unknown_lint_rule_keeps_honest_fallback_without_echoing_input():
+    issue = public_diagnostic({"issues": [{
+        **sensitive_fields(), "validator": "semantic_lint", "rule_id": PRIVATE,
+        "severity": "warning", "blocking": False,
+    }]})["issues"][0]
+    assert "rule_id" not in issue
+    assert issue["next_action"] == CHECK_GUIDANCE["semantic_lint"]
+    assert_no_private_markers(json.dumps(issue))
 
 
 @pytest.mark.parametrize("change_type", sorted(ACTUAL_CHANGE_TYPES))

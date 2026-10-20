@@ -24,6 +24,58 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Prepare fresh diagnostic output
+        id: diagnostic_output
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os
+          import stat
+          import sys
+
+          descriptors = []
+          def open_directory(name, parent=None):
+              try:
+                  item = os.stat(name, dir_fd=parent, follow_symlinks=False)
+              except FileNotFoundError:
+                  return None
+              if not stat.S_ISDIR(item.st_mode):
+                  raise ValueError('unsafe diagnostic directory')
+              fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+              descriptors.append(fd)
+              return fd
+
+          try:
+              root = open_directory('.omniflow')
+              public = open_directory('public', root) if root is not None else None
+              targets = [(root, 'artifact-manifest.json')] if root is not None else []
+              if public is not None:
+                  targets.extend((public, name) for name in (
+                      'report.json', 'report.md', 'report.sarif', 'junit.xml', 'evidence.json'))
+              # Preflight every target before deleting any. Directory handles
+              # prevent following replacement symlinks during exact-file cleanup.
+              present = []
+              for fd, name in targets:
+                  try:
+                      item = os.stat(name, dir_fd=fd, follow_symlinks=False)
+                  except FileNotFoundError:
+                      continue
+                  if not stat.S_ISREG(item.st_mode):
+                      raise ValueError('unsafe diagnostic target')
+                  present.append((fd, name))
+              for fd, name in present:
+                  os.unlink(name, dir_fd=fd)
+              with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
+                  output.write('ready=true\n')
+          except (OSError, ValueError):
+              print('::error::Diagnostic output preparation failed. Unsafe or inaccessible paths were rejected; no fresh public report is authorized.')
+              sys.exit(1)
+          finally:
+              for fd in reversed(descriptors):
+                  os.close(fd)
+          PY
+
       - name: Set up Python
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
         with:
@@ -47,7 +99,8 @@ jobs:
           # Relevant fork changes fail closed; no automatic credentialed replay.
 
       - name: Upload public evidence
-        if: always()
+        id: public_upload
+        if: always() && steps.diagnostic_output.outputs.ready == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: omniflow-environment-public-summary
@@ -61,6 +114,7 @@ jobs:
           include-hidden-files: true
 
       - name: Upload repository diagnostics
+        id: repository_upload
         if: always() && steps.omniflow.outputs.repository-diagnostics-ready == 'true' && github.event.repository.private == true
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
@@ -74,3 +128,61 @@ jobs:
           retention-days: 7
           if-no-files-found: error
           include-hidden-files: true
+
+      - name: Show public diagnostic summary
+        id: publication
+        if: always()
+        shell: bash
+        env:
+          DIAGNOSTIC_OUTPUT_READY: ${{ steps.diagnostic_output.outputs.ready }}
+          PUBLIC_UPLOAD_OUTCOME: ${{ steps.public_upload.outcome }}
+          PUBLIC_ARTIFACT_ID: ${{ steps.public_upload.outputs.artifact-id }}
+          PUBLIC_ARTIFACT_URL: ${{ steps.public_upload.outputs.artifact-url }}
+          REPOSITORY_UPLOAD_OUTCOME: ${{ steps.repository_upload.outcome }}
+          REPOSITORY_ARTIFACT_ID: ${{ steps.repository_upload.outputs.artifact-id }}
+          REPOSITORY_ARTIFACT_URL: ${{ steps.repository_upload.outputs.artifact-url }}
+          REPOSITORY_READY: ${{ steps.omniflow.outputs.repository-diagnostics-ready }}
+          PRIVATE_REPOSITORY: ${{ github.event.repository.private }}
+        run: |
+          set -euo pipefail
+          # This receipt is created after uploads, outside checkout and upload paths.
+          # Never treat generated files or a stale receipt as proof of publication.
+          [[ "$GITHUB_RUN_ID" =~ ^[0-9]+$ && "$GITHUB_RUN_ATTEMPT" =~ ^[0-9]+$ ]]
+          RECEIPT="$(mktemp "${RUNNER_TEMP}/omniflow-publication-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.XXXXXX")"
+          publication_line() {
+            local label="$1" outcome="$2" artifact_id="$3" artifact_url="$4"
+            if [[ "$outcome" == success && "$artifact_id" =~ ^[1-9][0-9]*$ &&
+                  "$GITHUB_SERVER_URL" =~ ^https://[A-Za-z0-9][A-Za-z0-9.-]*$ &&
+                  "$GITHUB_REPOSITORY" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ &&
+                  "$artifact_url" == "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/artifacts/${artifact_id}" ]]; then
+              printf -- '- %s publication: **uploaded** — [Download artifact](%s).\n' "$label" "$artifact_url"
+            else
+              case "$outcome" in
+                failure|cancelled) printf -- '- %s publication: **failed**. Inspect the upload step; this is a delivery failure, not a model defect.\n' "$label" ;;
+                skipped|'') printf -- '- %s publication: **skipped**. No upload is confirmed for this run.\n' "$label" ;;
+                *) printf -- '- %s publication: **unconfirmed**. No valid current-run artifact receipt was returned.\n' "$label" ;;
+              esac
+            fi
+          }
+          {
+            printf '\n## Diagnostic publication\n\nPublication is separate from validation; an upload failure does not change the validation decision.\n\n'
+            if [[ "$DIAGNOSTIC_OUTPUT_READY" == true ]]; then
+              publication_line 'Public summary' "$PUBLIC_UPLOAD_OUTCOME" "$PUBLIC_ARTIFACT_ID" "$PUBLIC_ARTIFACT_URL"
+            else
+              printf -- '- Public summary publication: **skipped** (fresh diagnostic output preparation did not succeed).\n'
+            fi
+            if [[ "$REPOSITORY_READY" == true && "$PRIVATE_REPOSITORY" == true ]]; then
+              printf -- '- Repository diagnostics generation: **generated** for this trusted private run.\n'
+              publication_line 'Repository diagnostics' "$REPOSITORY_UPLOAD_OUTCOME" "$REPOSITORY_ARTIFACT_ID" "$REPOSITORY_ARTIFACT_URL"
+              printf -- '- Repository diagnostics are for repository readers, not shareable support attachments.\n'
+            else
+              printf -- '- Repository diagnostics generation: **unconfirmed** or disabled; see the public report for eligibility.\n- Repository diagnostics publication: **skipped** (no fresh eligible private-run receipt).\n'
+            fi
+          } > "$RECEIPT"
+          printf 'receipt_path=%s\n' "$RECEIPT" >> "$GITHUB_OUTPUT"
+          if [[ "$DIAGNOSTIC_OUTPUT_READY" == true && -f .omniflow/public/report.md ]]; then
+            cat .omniflow/public/report.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "No fresh OmniFlow validation report is available. Inspect the first failed preparation/setup/install/route step; absence of a report is not a pass." >> "$GITHUB_STEP_SUMMARY"
+          fi
+          cat "$RECEIPT" >> "$GITHUB_STEP_SUMMARY"

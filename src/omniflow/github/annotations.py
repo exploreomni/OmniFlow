@@ -11,9 +11,18 @@ def public_annotation_lines(issues: list[dict[str, Any]], *, limit: int) -> list
     groups = group_findings([issue for issue in issues if issue.get("active") is not False])
     selected = []
     for finding, count in groups[:limit]:
-        qualifiers = [finding.get(key) for key in ("diagnostic_code", "context_reference", "validator", "rule_id", "state")]
+        qualifiers = [finding.get(key) for key in (
+            "diagnostic_code", "context_reference", "validator", "rule_id", "validation_scope", "state",
+        )]
         context = " / ".join(str(value) for value in qualifiers if value)
         message = f"{context}: {count} occurrence{'s' if count != 1 else ''}. {finding.get('message', '')}"
+        facts = [f"{key}={finding[key]}" for key in (
+            "reason_code", "cause_code", "candidate_reason", "api_operation", "http_status",
+            "attempt_count", "max_attempts", "config_key", "expected_type", "source_kind",
+            "source_line", "source_column", "metadata_stage", "metadata_reason",
+        ) if key in finding]
+        if facts:
+            message += " Evidence: " + "; ".join(facts) + "."
         if finding.get("next_action"):
             message += f" Next: {finding['next_action']}"
         selected.append({**finding, "message": message})
