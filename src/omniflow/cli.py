@@ -929,6 +929,7 @@ def _run_context_steps(
                     base_graph, configured_rules=config.semantic_lint.rules,
                     include_personal_folders=config.omni.include_personal_folders,
                 ),
+                base_graph=base_graph, head_graph=head_graph,
             )
         lint_report = {
             "tool": "omniflow",

@@ -27,6 +27,7 @@ ACTUAL_CHANGE_TYPES = {
 } | {
     "field_renamed", "file_renamed", "field_type_changed", "field_kind_changed",
     "measure_aggregation_changed", "relationship_cardinality_changed", "governance_changed",
+    "topic_organization_changed",
 }
 FORMATS = ["json", "markdown", "sarif", "junit"]
 

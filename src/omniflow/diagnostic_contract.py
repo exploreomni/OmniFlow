@@ -257,4 +257,6 @@ def diagnostic_descriptor(issue: dict) -> dict[str, str]:
         elif validator in {"semantic_diff", "contracts"} and issue.get("type") in CHANGE_MESSAGES:
             title = CHANGE_MESSAGES[issue["type"]]
         action = CHECK_GUIDANCE.get(validator, CHECK_GUIDANCE["execution"])
+        if validator in {"semantic_diff", "contracts"} and issue.get("type") == "topic_organization_changed":
+            action = "Confirm the intended topic grouping in Omni; review any separate validation or synchronization findings."
     return {"diagnostic_code": code, "title": title, "next_action": action, "category": category}

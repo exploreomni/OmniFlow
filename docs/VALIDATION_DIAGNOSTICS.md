@@ -17,6 +17,34 @@ Public artifacts retain safe causes but no customer paths. Their `repository_dia
 
 ## First distinguish the failure
 
+### Topic folders and groups
+
+Within the registered model scope, a uniquely named topic can move between
+organizational directories without becoming a different topic. Folder-only moves
+are informational `file_renamed` changes. Git directory entries and unrelated
+files such as `.gitkeep` are not Omni artifacts.
+
+[Omni's `group_label`](https://docs.omni.co/modeling/topics/parameters/group-label)
+controls topic grouping in navigation. Adding, renaming, or removing that property
+alone produces informational `topic_organization_changed`, even if the file also
+moves directories or the topic has downstream references. For example, changing
+only `group_label: Sales` to `group_label: Finance` is organizational, not a
+query-logic change. Public messages do not include the group names.
+
+When both semantic snapshots establish the same unique standalone topic with no
+other definition changes, existing owner/label and unchanged topic-contained
+relationship lint findings remain existing after a folder move. Their current
+source locations stay visible in authorized diagnostics. This is a per-topic
+comparison, not a blanket exemption for everything in the moved folder.
+
+This classification does not skip model/content validation or relax snapshot
+verification. A stale Omni branch, a duplicate topic name, or a simultaneous
+change to query logic or access rules retains its existing checks. An invalid
+grouping value is not classified as organizational. Moving a file outside the
+registered `model_path` is not an in-scope organizational move.
+
+### Failure categories
+
 | Report finding | Meaning | Safe next step |
 | --- | --- | --- |
 | Content validation / Dashboard filter or Query | Omni returned a readable validation issue. | Inspect that document/query in the same model and branch before changing a filter or field. |

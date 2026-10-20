@@ -28,6 +28,7 @@ def evaluate_contracts(
         referenced_content = _content_for_change(change, references)
         impact_level = _impact_level(change, referenced_content)
         should_fail = settings.enabled and _should_fail(change, impact_level, settings)
+        organization_only = change.get("type") == "topic_organization_changed" and change.get("risk") == "info"
         impacts.append(
             {
                 **change,
@@ -37,7 +38,8 @@ def evaluate_contracts(
                 "referenced_content": referenced_content,
                 "severity": "error"
                 if should_fail
-                else ("warning" if impact_level != "unreferenced" or change.get("risk") == "breaking" else "info"),
+                else ("info" if organization_only else
+                      "warning" if impact_level != "unreferenced" or change.get("risk") == "breaking" else "info"),
             }
         )
     coverage_issues = _coverage_issues(dependencies, settings)

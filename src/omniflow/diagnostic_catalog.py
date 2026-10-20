@@ -25,6 +25,10 @@ CHANGE_MESSAGES = {
        for kind in ("field", "view", "topic", "relationship") for change in ("added", "deleted", "modified")},
     "field_renamed": "A field may have been renamed. Review old references and update dependent content as needed.",
     "file_renamed": "A semantic file was renamed. Verify repository paths and model synchronization.",
+    "topic_organization_changed": (
+        "Only the topic group_label changed; this reorganizes topic navigation without changing query logic. "
+        "This change is informational; model, content, and synchronization checks still apply."
+    ),
     "field_type_changed": "A field type changed. Check dependent filters, calculations, and content for compatibility.",
     "field_kind_changed": "A field changed between semantic kinds. Review dimension/measure usage in dependent content.",
     "measure_aggregation_changed": "A measure aggregation changed. Verify intended calculations and dependent metrics.",

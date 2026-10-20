@@ -41,6 +41,15 @@ def _diff_named(kind: str, base_items: dict[str, Any], head_items: dict[str, Any
         changes.append(change)
     for name in sorted(set(base_items) & set(head_items)):
         if _normalized(base_items[name]) != _normalized(head_items[name]):
+            if kind == "topic" and _topic_organization_only(base_items[name], head_items[name]):
+                change = _change(
+                    "topic_organization_changed", head_items[name], name, "info",
+                    "Only the topic group_label changed; this reorganizes topic navigation without changing query logic.",
+                )
+                if base_items[name].get("file") != head_items[name].get("file"):
+                    change["previous_file"] = base_items[name].get("file")
+                changes.append(change)
+                continue
             change = _change(f"{kind}_modified", head_items[name], name, "warning", f"Modified {kind} {name}.")
             if kind == "relationship":
                 change["affected_views"] = _relationship_views(base_items[name], head_items[name])
@@ -49,6 +58,21 @@ def _diff_named(kind: str, base_items: dict[str, Any], head_items: dict[str, Any
                 )
             changes.append(change)
     return changes
+
+
+def _topic_organization_only(base: dict[str, Any], head: dict[str, Any]) -> bool:
+    # A directory move is source location, not identity. Only the documented
+    # topic grouping property is advisory; do not hide other edits or invalid
+    # values behind an organizational classification. Validators still run.
+    for item in (base, head):
+        if "group_label" in item and (
+            not isinstance(item["group_label"], str) or not item["group_label"].strip()
+        ):
+            return False
+    return (
+        {key: value for key, value in _normalized(base).items() if key != "group_label"}
+        == {key: value for key, value in _normalized(head).items() if key != "group_label"}
+    )
 
 
 def _field_property_changes(base_fields: dict[str, Any], head_fields: dict[str, Any]) -> list[dict[str, Any]]:

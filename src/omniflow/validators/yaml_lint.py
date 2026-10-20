@@ -5,6 +5,7 @@ from typing import Any
 
 from ..diff.semantic_graph import SemanticGraph
 from ..exceptions import ConfigError
+from ..semantic_files import infer_file_kind
 
 SEVERITIES = {"off": 0, "info": 1, "warn": 2, "error": 3}
 DEFAULT_RULES = {
@@ -95,16 +96,32 @@ def has_error(issues: list[dict[str, Any]]) -> bool:
     return any(issue["severity"] == "error" and issue.get("blocking", True) for issue in issues)
 
 
-def compare_lint_findings(current: list[dict], baseline: list[dict]) -> list[dict]:
+def compare_lint_findings(
+    current: list[dict], baseline: list[dict], *,
+    base_graph: SemanticGraph | None = None, head_graph: SemanticGraph | None = None,
+) -> list[dict]:
     """Apply PR regression policy to lint debt, not security-scope controls."""
-    def identity(issue: dict) -> tuple:
-        return tuple(issue.get(key) for key in
-                     ("rule_id", "file", "field", "view", "topic", "relationship", "severity"))
+    relocations = _topic_lint_relocations(base_graph, head_graph)
 
-    remaining = Counter(identity(issue) for issue in baseline)
+    def identity(issue: dict, side: int) -> tuple:
+        values = [issue.get(key) for key in
+                  ("rule_id", "file", "field", "view", "topic", "relationship", "severity")]
+        kind = (
+            "topic" if issue.get("rule_id") in {"require_topic_labels", "require_owner_metadata"}
+            else "relationship" if issue.get("rule_id") == "forbid_many_to_many_without_comment" else None
+        )
+        name = issue.get(kind) if kind else None
+        if (issue.get("validator") == "semantic_lint" and isinstance(name, str)
+                and not any(issue.get(key) is not None for key in {"field", "view", "topic", "relationship"} - {kind})):
+            paths = relocations.get((kind, name))
+            if paths and issue.get("file") == paths[side]:
+                values[1] = ("verified_topic_relocation", kind, name, *paths)
+        return tuple(values)
+
+    remaining = Counter(identity(issue, 0) for issue in baseline)
     result = []
     for issue in current:
-        key = identity(issue)
+        key = identity(issue, 1)
         # This is an execution-scope security policy, never grandfathered debt.
         protected = issue.get("rule_id") == "forbid_personal_folder_validation_scope"
         existing = not protected and remaining[key] > 0
@@ -113,6 +130,66 @@ def compare_lint_findings(current: list[dict], baseline: list[dict]) -> list[dic
         result.append(dict(issue, state="existing" if existing else "new",
                            blocking=issue["severity"] == "error" and not existing))
     return result
+
+
+def _topic_lint_relocations(
+    base: SemanticGraph | None, head: SemanticGraph | None,
+) -> dict[tuple[str, str], tuple[str, str]]:
+    """Authorize only per-entity debt matches for an unchanged topic relocation.
+
+    Graphs must identify the same standalone topic on both sides. A model file
+    containing inline topics is never treated as a file-wide relocation, and
+    other semantic edits keep the original conservative path-based comparison.
+    """
+    if not isinstance(base, SemanticGraph) or not isinstance(head, SemanticGraph):
+        return {}
+    if any(not isinstance(item, dict) or not isinstance(item.get("file"), str)
+           for graph in (base, head) for item in graph.topics.values()):
+        return {}
+    locations = {}
+    topic_file_counts = [Counter(item.get("file") for item in graph.topics.values()) for graph in (base, head)]
+    for name in base.topics.keys() & head.topics.keys():
+        before, after = base.topics[name], head.topics[name]
+        paths = before.get("file"), after.get("file")
+        if paths[0] == paths[1] or not isinstance(name, str) or not name:
+            continue
+        valid = True
+        for side, (graph, item, path) in enumerate(zip((base, head), (before, after), paths, strict=True)):
+            if (not isinstance(path, str) or not path or path not in graph.files
+                    or topic_file_counts[side][path] != 1
+                    or infer_file_kind(path, graph.files[path]) != "topic"
+                    or item.get("name", name) != name
+                    or ("group_label" in item and
+                        (not isinstance(item["group_label"], str) or not item["group_label"].strip()))):
+                valid = False
+                break
+        if not valid or _without(before, "file", "group_label") != _without(after, "file", "group_label"):
+            continue
+        locations[("topic", name)] = paths
+
+    relationship_counts = [Counter((item["scope"], item["name"])
+                                   for item in graph.relationships.values()
+                                   if isinstance(item, dict) and isinstance(item.get("scope"), str)
+                                   and isinstance(item.get("name"), str)) for graph in (base, head)]
+    for identity in base.relationships.keys() & head.relationships.keys():
+        before, after = base.relationships[identity], head.relationships[identity]
+        if not isinstance(before, dict) or not isinstance(after, dict):
+            continue
+        scope, name = before.get("scope"), before.get("name")
+        if (not isinstance(scope, str) or not scope.startswith("topic:")
+                or not isinstance(name, str) or not name or name.startswith("unnamed:")
+                or identity != f"{scope}:{name}"
+                or any(counts[(scope, name)] != 1 for counts in relationship_counts)
+                or _without(before, "file") != _without(after, "file")):
+            continue
+        paths = locations.get(("topic", scope.removeprefix("topic:")))
+        if paths and (before.get("file"), after.get("file")) == paths:
+            locations[("relationship", identity)] = paths
+    return locations
+
+
+def _without(item: dict[str, Any], *keys: str) -> dict[str, Any]:
+    return {key: value for key, value in item.items() if key not in keys}
 
 
 def _is_measure(field: dict[str, Any]) -> bool:

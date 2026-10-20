@@ -114,6 +114,29 @@ def test_stale_missing_and_deleted_candidate_files_fail_closed(snapshot, change,
     assert "SCHEMA" not in str(caught.value)
 
 
+@pytest.mark.parametrize("synchronized", [True, False])
+def test_nested_topic_group_move_requires_synchronized_yaml_not_matching_directories(snapshot, synchronized):
+    original = Path("omni/sales.topic")
+    destination = Path("omni/Topics/Finance/North America/sales.topic.yaml")
+    destination.parent.mkdir(parents=True)
+    original.rename(destination)
+    text = snapshot.files["sales.topic"] + "group_label: Finance\n"
+    destination.write_text(text)
+    Path("omni/Topics/.gitkeep").write_text("")
+    git("add", "omni")
+    git("commit", "-m", "Synthetic topic organization change")
+    snapshot.event["pull_request"]["head"]["sha"] = git("rev-parse", "HEAD")
+    Path("event.json").write_text(json.dumps(snapshot.event))
+    if synchronized:
+        snapshot.client.get_model_yaml.return_value["files"]["sales.topic"] = text
+        proof = verify_candidate(snapshot.client, snapshot.context)
+        assert proof["status"] == "verified" and proof["file_count"] == len(snapshot.files)
+    else:
+        with pytest.raises(CandidateVerificationError) as caught:
+            verify_candidate(snapshot.client, snapshot.context)
+        assert caught.value.candidate_reason == "content_mismatch"
+
+
 @pytest.mark.parametrize("field,value,reason", [
     ("branch_id", None, "missing_candidate_branch"), ("model_path", "../omni", "unsafe_snapshot_path"),
 ])

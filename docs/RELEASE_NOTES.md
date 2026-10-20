@@ -1,5 +1,19 @@
 # Release notes
 
+## Unreleased — topic organization diagnostics
+
+- Adding, renaming, or removing a topic's valid `group_label`, with no other
+  definition changes, is reported as `topic_organization_changed` at informational
+  severity, including when the topic moves between folders or has downstream
+  references. Public reports explain the change without exposing group names.
+- Folder-only moves remain informational file renames. Mixed edits to grouping
+  and query/access logic keep their existing risk classification. Invalid grouping
+  values are not downgraded; model/content validation, candidate synchronization,
+  and independent policy blockers remain unchanged.
+- Existing topic owner/label and unchanged topic-contained relationship lint debt
+  remains existing after a verified standalone-topic relocation. Original source
+  locations are retained; new/worsened findings and ambiguous moves are not waived.
+
 ## Unreleased — certificate trust-store security refresh
 
 - Requires Certifi 2026.10.19 or newer and updates the hash-locked Action/release
