@@ -115,6 +115,36 @@ def test_unchanged_improved_and_worsened_null_debt(before, after, code, new, exi
     assert (actual, report["new_issue_count"], report["existing_issue_count"]) == (code, new, existing)
 
 
+@pytest.mark.parametrize("kind,lower,upper,before,after,new,existing", [
+    ("group_count", 3, 3, 2, 4, 1, 0),
+    ("group_count", 3, 3, 4, 2, 1, 0),
+    ("aggregate_range", 100, 200, 90, 210, 1, 0),
+    ("aggregate_range", 100, 200, 80, 201, 1, 0),
+    ("aggregate_range", 100, 200, 201, 80, 1, 0),
+    ("aggregate_range", 100, 200, 90, 90, 0, 1),
+    ("aggregate_range", 100, 200, 90, 95, 0, 1),
+    ("aggregate_range", 100, 200, 90, 80, 1, 0),
+    ("aggregate_range", 100, 200, 90, 100, 0, 0),
+    ("aggregate_range", 100, 200, 210, 200, 0, 0),
+])
+@pytest.mark.parametrize("mode", ["report", "enforce"])
+def test_range_debt_only_matches_the_same_bound(kind, lower, upper, before, after, new, existing, mode):
+    value = policy(mode=mode)
+    value["contracts"][0]["assertions"] = [
+        {"type": kind, "field": "dim.groups", "minimum": lower, "maximum": upper},
+    ]
+    report, code, _ = validate(
+        [row(**{"dim.groups": before}), row(**{"dim.groups": after}), row(**{"dim.groups": before})],
+        settings=parse_query_validation(value),
+    )
+    assert (code, report["new_issue_count"], report["existing_issue_count"]) == (
+        int(bool(new) and mode == "enforce"), new, existing,
+    )
+    if report["issues"]:
+        assert report["issues"][0]["query_assertion_number"] == 1
+        assert report["issues"][0]["query_assertion_type"] == kind
+
+
 @pytest.mark.parametrize("bad,reason", [
     ([], "query_population_insufficient"),
     (row(**{"fact.population": 0}), "query_population_insufficient"),

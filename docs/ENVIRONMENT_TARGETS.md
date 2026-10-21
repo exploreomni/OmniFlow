@@ -58,9 +58,13 @@ reviewed bootstrap PRs before enabling version 2 validation:
   identifies exactly one environment and host. Wildcard routing is not supported.
 - Within a target, IDs are unique and model folders cannot overlap. Distinct affected
   folders can still route to multiple models. Folders can repeat across target branches.
-  Prefer a dedicated model directory: every YAML file under it participates in candidate
-  comparison, including when `model_path` is `.`. Unrelated YAML in that scope blocks
-  exact inventory equivalence; move to a dedicated registered directory before adoption.
+  Prefer a dedicated model directory for clarity, but ordinary YAML and non-Omni files
+  are ignored by default, including when `model_path` is `.`. Recognized sources include
+  `model`, `relationships`, `*.view` (including query views), `*.topic`, and supported
+  `*.composite_topic` / typed `*.relationships` files, with one optional `.yaml` or `.yml`
+  wrapper. `.omni/flow.json`, policy and workflows are repository controls, not model YAML.
+  API-confirmed custom YAML remains part of correspondence once that model is selected;
+  an exclusion cannot hide a source returned by Omni. Do not move folders just to obtain a pass.
 - `base_branch`, `web_url` and boolean `git_follower` are required in version 2;
   `git_provider`, if supplied, must be `github`.
 - PR markers are hints within the selected target. A development marker copied to a
@@ -131,7 +135,7 @@ for the controlled PR live gate below.
 3. Read the candidate's authored YAML using the documented
    [model YAML endpoint](https://docs.omni.co/api/models/get-model-yaml), with
    `mode=combined`, the resolved `branchId` and `fullyResolved=false`.
-4. Compare the complete authored semantic-file inventory and exact UTF-8 contents with
+4. Compare the complete authored semantic-file inventory and authored contents with
    the PR head's Git snapshot. Git data is read at an immutable commit, never checked out
    or executed. Local Git objects or bounded, read-only GitHub tree/blob requests supply
    evidence. Missing, additional, deleted, unsafe or different files block validation.
@@ -140,10 +144,15 @@ for the controlled PR live gate below.
 6. Compare the candidate again after checks. Publish environment, target branch,
    candidate branch, immutable head, file count, digest and verification status.
 
-This is deliberately **exact authored-content comparison**, not a Git-commit claim
-from an undocumented Omni field. Formatting or path representation differences also
-block verification; do not disable the safeguard to force a green check. Diagnose the
-sanitized difference and confirm the exporter/Git representation with the model owner.
+This proves authored correspondence, not a Git-commit claim from an undocumented
+Omni field. Supported serialization wrappers and unambiguous typed identities can
+match across organizational directories. View identities retain database/schema and
+canonical Omni distinctions; two views over the same physical table are not automatically
+the same semantic view. Topics remain unique within the model even when organized into
+folders. Comment/formatting-only differences may be equivalent under the bounded
+semantic comparison; substantive source differences, ambiguous identities and unsafe or
+unreadable evidence still block. Diagnose the safe reason and authorized observations;
+do not blindly rename files or disable safeguards to force a green check.
 Sampled equality before and after checks is not an atomic snapshot lock: keep candidate
 editing controlled during validation, require up-to-date PR checks, and rerun after changes.
 Inherited schema/runtime equivalence and warehouse readiness require separate acceptance.

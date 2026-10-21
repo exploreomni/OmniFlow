@@ -18,6 +18,22 @@ class EvalFailure(OmniAPIError):
         super().__init__(f"AI eval could not establish a complete comparison: {reason}", reason_code=reason)
 
 
+def prepare_ai_eval_prompt_sets(
+    client: OmniClient, model_id: str, prompt_sets: list[dict[str, str]],
+) -> list[tuple[dict[str, str], dict[str, str]]]:
+    """Read-only applicability/preflight, reusable before PR source verification."""
+    selected = []
+    for configured in prompt_sets:
+        if configured.get("model_id") not in (None, model_id):
+            continue
+        prompt_set = client.get_ai_eval_prompt_set(configured["id"])
+        if configured.get("model_id") and prompt_set["model_id"] != model_id:
+            raise EvalFailure("prompt_set_model_mismatch")
+        if prompt_set["model_id"] == model_id:
+            selected.append((configured, _expected_prompts(prompt_set)))
+    return selected
+
+
 def run_ai_eval_validation(
     *,
     client: OmniClient,
@@ -32,6 +48,7 @@ def run_ai_eval_validation(
     record_runs: Callable[[dict[str, Any]], None] | None = None,
     sleep: Callable[[float], None] = time.sleep,
     monotonic: Callable[[], float] = time.monotonic,
+    prepared_prompt_sets: list[tuple[dict[str, str], dict[str, str]]] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any], int]:
     """Compare complete binary-scored runs, retaining customer content only in detail.
 
@@ -73,15 +90,9 @@ def run_ai_eval_validation(
             report["note"] = "No Omni branch is available; AI eval comparison was skipped."
             report["skipped_reason"] = "no_branch"
         else:
-            selected = []
-            for configured in prompt_sets:
-                if configured.get("model_id") not in (None, model_id):
-                    continue
-                prompt_set = client.get_ai_eval_prompt_set(configured["id"])
-                if configured.get("model_id") and prompt_set["model_id"] != model_id:
-                    raise EvalFailure("prompt_set_model_mismatch")
-                if prompt_set["model_id"] == model_id:
-                    selected.append((configured, _expected_prompts(prompt_set)))
+            selected = prepared_prompt_sets if prepared_prompt_sets is not None else prepare_ai_eval_prompt_sets(
+                client, model_id, prompt_sets,
+            )
             if not selected:
                 report["note"] = "No configured AI eval prompt set belongs to this model; comparison was skipped."
                 report["skipped_reason"] = "no_matching_prompt_set"

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import time
 from collections.abc import Mapping
 from typing import Any
+from uuid import UUID
 
 import requests
 
@@ -51,6 +53,67 @@ class OmniClient:
                 "User-Agent": f"omniflow/{__version__}",
             }
         )
+        # Identity only, never content or permission evidence. Bind this run-local
+        # cache to the instance and actual credential, not the requested actor.
+        self._content_identity_cache: tuple[tuple[str, str], tuple[str, str, str]] | None = None
+
+    def _personal_content_membership_id(self, user_id: str | None) -> str:
+        """Resolve only a provable acting-user -> organization-membership pair.
+
+        whoami describes the credential owner, not an impersonated user. The
+        documented user API has no membership mapping, so another actor must
+        remain unsupported rather than inheriting the credential owner's scope.
+        """
+        authorization = self.session.headers.get("Authorization", "")
+        binding = (self.base_url, hashlib.sha256(str(authorization).encode()).hexdigest())
+        cached = self._content_identity_cache
+        if cached is not None and cached[0] == binding:
+            key_scope, caller_id, membership_id = cached[1]
+        else:
+            self._content_identity_cache = None
+            payload = self._request("GET", "/api/v1/whoami")
+            try:
+                key_scope = payload["keyScope"]
+                caller_id = str(UUID(payload["user"]["id"]))
+                membership_id = str(UUID(payload["user"]["membershipId"]))
+                if key_scope not in {"user", "organization"}:
+                    raise ValueError("unsupported credential scope")
+            except (KeyError, TypeError, ValueError, AttributeError):
+                raise OmniAPIError(
+                    "Personal-folder scope could not be established from Omni identity metadata. "
+                    "Verify the credential's user and organization membership before rerunning.",
+                    reason_code="content_identity_invalid",
+                    diagnostic_context={"service": "omni", "api_operation": "identity_lookup"},
+                ) from None
+            self._content_identity_cache = (binding, (key_scope, caller_id, membership_id))
+        context = {"service": "omni", "api_operation": "identity_lookup"}
+        if key_scope == "user":
+            if user_id is not None:
+                raise ConfigError(
+                    "Personal-folder validation with a PAT must omit omni.user_id, OMNI_USER_ID, "
+                    "and --user-id. OmniFlow uses the authenticated user's verified membership.",
+                    reason_code="content_pat_impersonation_unsupported", diagnostic_context=context,
+                )
+            return membership_id
+        if not user_id:
+            raise ConfigError(
+                "Personal-folder validation with an organization key requires an explicit omni.user_id. "
+                "Use the credential owner's user ID, not their membership ID; other actors cannot yet "
+                "be mapped safely by the documented API.",
+                reason_code="content_personal_user_required", diagnostic_context=context,
+            )
+        try:
+            intended_user_id = str(UUID(user_id))
+        except (TypeError, ValueError, AttributeError):
+            intended_user_id = None
+        if intended_user_id != caller_id:
+            raise ConfigError(
+                "The selected personal-folder actor cannot be mapped to a verified organization membership. "
+                "Use that user's PAT without user_id, or explicitly select the organization credential's "
+                "owner. OmniFlow will not substitute the credential owner's personal scope.",
+                reason_code="content_personal_actor_unresolved", diagnostic_context=context,
+            )
+        return membership_id
 
     def get_model_yaml(
         self,
@@ -89,6 +152,10 @@ class OmniClient:
         model_id = validate_path_segment(model_id, name="model_id")
         if type(force_full_validation) is not bool:
             raise ConfigError("force_full_validation must be a boolean")
+        if include_personal_folders:
+            # Reject an unverifiable actor before validating a broader/different
+            # scope. The validator still receives a user UUID, never membership.
+            self._personal_content_membership_id(user_id)
         params: dict[str, Any] = {}
         if force_full_validation:
             params["force_full_validation"] = "true"
@@ -265,15 +332,14 @@ class OmniClient:
     ) -> list[dict[str, Any]]:
         # Content metadata is not branch-scoped in the documented API.
         del branch_id
-        if include_personal_folders and labels and not user_id:
-            raise ConfigError("OMNI_USER_ID is required to apply label filtering to personal-folder content safely")
+        membership_id = self._personal_content_membership_id(user_id) if include_personal_folders else None
         params: dict[str, Any] = {"include": "labels", "scope": "organization"}
         if labels:
             params["labels"] = ",".join(labels)
         records = self._paginate("/api/v1/content", params=params)
-        if include_personal_folders and user_id:
+        if membership_id is not None:
             restricted_params = dict(params)
-            restricted_params.update({"scope": "restricted", "creatorId": user_id})
+            restricted_params.update({"scope": "restricted", "creatorId": membership_id})
             records.extend(self._paginate("/api/v1/content", params=restricted_params))
         return records
 
@@ -680,6 +746,8 @@ def _api_operation(path: str) -> str:
             return "git_commit"
     if parts == ["api", "v1", "content"]:
         return "content_list"
+    if parts == ["api", "v1", "whoami"]:
+        return "identity_lookup"
     if parts[:3] == ["api", "v1", "documents"] and len(parts) == 5 and parts[4] == "drafts":
         return "document_drafts"
     if parts[:3] == ["api", "v1", "jobs"] and len(parts) == 5 and parts[4] == "status":

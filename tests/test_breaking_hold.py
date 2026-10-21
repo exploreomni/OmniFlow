@@ -246,17 +246,17 @@ class GitLookupTests(unittest.TestCase):
         ):
             self.assertIsNone(_git_changed_files_since("abc1234"))
 
-    def test_traversal_paths_are_discarded(self):
+    def test_unsafe_inventory_is_unavailable_not_silently_incomplete(self):
         from omniflow.breaking_hold import _git_changed_files_since
 
-        completed = mock.Mock(stdout="models/a.sql\n../escape.sql\n/etc/passwd\nmodels/a.sql\n")
+        completed = mock.Mock(stdout=b"models/a.sql\0../escape.sql\0/etc/passwd\0models/a.sql\0")
         with mock.patch("omniflow.breaking_hold.subprocess.run", return_value=completed):
-            self.assertEqual(_git_changed_files_since("abc1234"), ["models/a.sql"])
+            self.assertIsNone(_git_changed_files_since("abc1234"))
 
     def test_git_is_invoked_without_a_shell(self):
         from omniflow.breaking_hold import _git_changed_files_since
 
-        completed = mock.Mock(stdout="")
+        completed = mock.Mock(stdout=b"")
         with mock.patch("omniflow.breaking_hold.subprocess.run", return_value=completed) as run:
             _git_changed_files_since("abc1234")
         args, kwargs = run.call_args

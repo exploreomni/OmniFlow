@@ -1,5 +1,10 @@
 name: OmniFlow
 
+# Keep this trusted path identical to reporting.output_dir in .omniflow.yml.
+# Spaces are supported; do not use absolute paths, traversal or upload globs.
+env:
+  OMNIFLOW_REPORT_DIR: .omniflow
+
 on: # zizmor: ignore[dangerous-triggers] trusted-base workflow never executes PR-head code
   pull_request_target:
   push:
@@ -36,6 +41,7 @@ jobs:
           set -euo pipefail
           python3 - <<'PY'
           import os
+          from pathlib import PurePosixPath
           import stat
           import sys
 
@@ -52,12 +58,29 @@ jobs:
               return fd
 
           try:
-              root = open_directory('.omniflow')
+              value = os.environ.get('OMNIFLOW_REPORT_DIR', '.omniflow')
+              parts = PurePosixPath(value)
+              if (not value or len(value) > 512 or value != value.strip() or value.startswith('~') or
+                  any(ord(char) < 32 or char in '\\\\*?[]{}!()' for char in value) or
+                  parts.is_absolute() or parts.as_posix() != value or not parts.parts or
+                  '..' in parts.parts or parts.parts[0] in {'.git', '.github', '.omni'}):
+                  raise ValueError('unsafe report directory')
+              root = None
+              for part in parts.parts:
+                  root = open_directory(part, root)
+                  if root is None:
+                      break
               public = open_directory('public', root) if root is not None else None
+              private = open_directory('repository', root) if root is not None else None
               targets = [(root, 'artifact-manifest.json')] if root is not None else []
-              if public is not None:
-                  targets.extend((public, name) for name in (
-                      'report.json', 'report.md', 'report.sarif', 'junit.xml', 'evidence.json'))
+              names = ('report.json', 'report.md', 'report.sarif', 'junit.xml', 'evidence.json',
+                       'dbt-sync.json', 'dbt-impact.json', 'repair.json', 'repair.md')
+              for directory in (root, public):
+                  if directory is not None:
+                      targets.extend((directory, name) for name in names)
+              if private is not None:
+                  targets.extend((private, name) for name in
+                                 ('report.json', 'report.md', 'report.sarif', 'junit.xml', 'status.json'))
               # Preflight every target before deleting any. Directory handles
               # prevent following replacement symlinks during exact-file cleanup.
               present = []
@@ -110,12 +133,12 @@ jobs:
         with:
           name: omniflow-public-summary
           path: |
-            .omniflow/public/report.json
-            .omniflow/public/report.md
-            .omniflow/public/report.sarif
-            .omniflow/public/junit.xml
-            .omniflow/public/evidence.json
-            .omniflow/artifact-manifest.json
+            ${{ env.OMNIFLOW_REPORT_DIR }}/public/report.json
+            ${{ env.OMNIFLOW_REPORT_DIR }}/public/report.md
+            ${{ env.OMNIFLOW_REPORT_DIR }}/public/report.sarif
+            ${{ env.OMNIFLOW_REPORT_DIR }}/public/junit.xml
+            ${{ env.OMNIFLOW_REPORT_DIR }}/public/evidence.json
+            ${{ env.OMNIFLOW_REPORT_DIR }}/artifact-manifest.json
           if-no-files-found: ignore
           include-hidden-files: true
 
@@ -123,11 +146,11 @@ jobs:
         # This publishing step is separate from the OmniFlow validation result.
         # Enable only when GitHub Code Security is available by setting the
         # repository variable OMNIFLOW_UPLOAD_SARIF to true.
-        if: always() && steps.diagnostic_output.outputs.ready == 'true' && vars.OMNIFLOW_UPLOAD_SARIF == 'true' && hashFiles('.omniflow/public/report.sarif') != ''
+        if: always() && steps.diagnostic_output.outputs.ready == 'true' && vars.OMNIFLOW_UPLOAD_SARIF == 'true' && hashFiles(format('{0}/public/report.sarif', env.OMNIFLOW_REPORT_DIR)) != ''
         continue-on-error: true
         uses: github/codeql-action/upload-sarif@dc73d59c2d7bd4f8194098a91219eeee6d8a1719
         with:
-          sarif_file: .omniflow/public/report.sarif
+          sarif_file: ${{ env.OMNIFLOW_REPORT_DIR }}/public/report.sarif
 
       # Repository-only metadata, NOT a shareable support artifact. Repository
       # readers can download it. PR comments and Code Security keep public output.
@@ -138,11 +161,11 @@ jobs:
         with:
           name: omniflow-repository-diagnostics
           path: |
-            .omniflow/repository/report.json
-            .omniflow/repository/report.md
-            .omniflow/repository/report.sarif
-            .omniflow/repository/junit.xml
-            .omniflow/repository/status.json
+            ${{ env.OMNIFLOW_REPORT_DIR }}/repository/report.json
+            ${{ env.OMNIFLOW_REPORT_DIR }}/repository/report.md
+            ${{ env.OMNIFLOW_REPORT_DIR }}/repository/report.sarif
+            ${{ env.OMNIFLOW_REPORT_DIR }}/repository/junit.xml
+            ${{ env.OMNIFLOW_REPORT_DIR }}/repository/status.json
           retention-days: 7
           if-no-files-found: error
           include-hidden-files: true
@@ -201,8 +224,8 @@ jobs:
           SUMMARY="$(mktemp "${RUNNER_TEMP}/omniflow-summary-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.XXXXXX")"
           # Run only the installed trusted Action package, never checkout code.
           # The post-upload summary contains one authoritative delivery status.
-          if [[ "$DIAGNOSTIC_OUTPUT_READY" == true && -f .omniflow/public/report.json ]] &&
-             python -I -m omniflow.github.report_publisher --summary > "$SUMMARY"; then
+          if [[ "$DIAGNOSTIC_OUTPUT_READY" == true && -f "$OMNIFLOW_REPORT_DIR/public/report.json" ]] &&
+             python -I -m omniflow.github.report_publisher --summary --report-dir "$OMNIFLOW_REPORT_DIR" > "$SUMMARY"; then
             cat "$SUMMARY" >> "$GITHUB_STEP_SUMMARY"
           else
             echo "No fresh OmniFlow validation report could be displayed. Inspect the first failed preparation/setup/install/route/summary step; absence of a report is not a pass." >> "$GITHUB_STEP_SUMMARY"
@@ -210,7 +233,7 @@ jobs:
           fi
 
       - name: Comment on PR
-        if: always() && steps.diagnostic_output.outputs.ready == 'true' && github.event_name == 'pull_request_target' && hashFiles('.omniflow/public/report.json') != ''
+        if: always() && steps.diagnostic_output.outputs.ready == 'true' && github.event_name == 'pull_request_target' && hashFiles(format('{0}/public/report.json', env.OMNIFLOW_REPORT_DIR)) != ''
         env:
           GH_TOKEN: ${{ github.token }}
           DIAGNOSTIC_OUTPUT_READY: ${{ steps.diagnostic_output.outputs.ready }}
@@ -227,7 +250,7 @@ jobs:
           # Freshness, pagination, retry reconciliation and failure/recovery
           # transition deduplication live in the reviewed installed Action.
           # A posted comment is not proof that GitHub delivered an email.
-          python -I -m omniflow.github.report_publisher
+          python -I -m omniflow.github.report_publisher --report-dir "$OMNIFLOW_REPORT_DIR"
 
       # Applies the hold label. Only explicit current-head revalidation can release it.
       # The label is informational; the required readiness check enforces the gate.

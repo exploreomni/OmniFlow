@@ -100,7 +100,8 @@ class RepositoryHardeningTests(unittest.TestCase):
         publisher = (ROOT / "src/omniflow/github/report_publisher.py").read_text(encoding="utf-8")
         self.assertIn('get("login") == "github-actions[bot]"', publisher)
         self.assertIn('get("type") == "Bot"', publisher)
-        self.assertIn(".omniflow/public/report.json", text)
+        self.assertIn("OMNIFLOW_REPORT_DIR: .omniflow", text)
+        self.assertIn("${{ env.OMNIFLOW_REPORT_DIR }}/public/report.json", text)
         self.assertIn("vars.OMNIFLOW_UPLOAD_SARIF == 'true'", text)
         self.assertIn("continue-on-error: true", text)
         self.assertNotIn(".omniflow/restricted/", text)
@@ -270,7 +271,8 @@ class RepositoryHardeningTests(unittest.TestCase):
         self.assertIn("models/**", text)
         self.assertNotIn("omni/**", text)
         self.assertIn("persist-credentials: false", text)
-        self.assertIn(".omniflow/public/dbt-sync.json", text)
+        self.assertIn("OMNIFLOW_REPORT_DIR: .omniflow", text)
+        self.assertIn("${{ env.OMNIFLOW_REPORT_DIR }}/public/dbt-sync.json", text)
         self.assertNotIn(".omniflow/restricted/", text)
 
     def test_action_and_release_locks_pin_every_requirement_with_sha256(self):

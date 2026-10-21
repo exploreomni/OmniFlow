@@ -46,7 +46,10 @@ def write_public_reports(
         safe_report["repository_diagnostics"] = repository_diagnostic_availability()
         # A changed format preference must not leave a previous, possibly
         # identity-rich report available for the workflow to upload.
-        current_formats = set(formats)
+        # The privacy-safe decision JSON is a machine interface, not an optional
+        # presentation format. Summaries and publishers must never parse Markdown
+        # or reuse an older JSON file when Markdown/SARIF-only output is selected.
+        current_formats = {"json", *formats}
         for directory in (Path(output_dir), public_dir(output_dir)):
             for name, output_format in STANDARD_REPORT_FORMATS.items():
                 path = directory / name

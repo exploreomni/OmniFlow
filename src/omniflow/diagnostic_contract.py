@@ -231,6 +231,22 @@ for _reason in ("invalid_api_snapshot", "empty_git_snapshot", "duplicate_git_pat
          "Inspect the candidate reason and selected scope. Resolve duplicate/unsafe/incomplete source evidence or "
          "the documented snapshot limit before rerunning; do not omit evidence to obtain a pass.")
 
+for _reason, _title, _action, _category in (
+    ("content_identity_invalid", "Personal-folder identity evidence is unavailable.",
+     "Verify that whoami returns the credential scope, user UUID and organization membership UUID. "
+     "Do not substitute one identity for the other or treat missing metadata as empty content.", "incomplete_evidence"),
+    ("content_personal_user_required", "Organization-key personal validation requires an explicit actor.",
+     "Set omni.user_id to the credential owner's user UUID, not membership UUID. Other personal-folder "
+     "actors cannot yet be resolved safely by this client.", "configuration"),
+    ("content_personal_actor_unresolved", "The selected personal-folder actor has no verified membership mapping.",
+     "Use that user's PAT with user_id unset, or explicitly select the organization credential owner. "
+     "OmniFlow will not silently substitute the credential owner's personal content.", "configuration"),
+    ("content_pat_impersonation_unsupported", "A user-scoped credential cannot impersonate another user.",
+     "Unset omni.user_id, OMNI_USER_ID and --user-id with a PAT. The caller's verified membership "
+     "is used for personal-folder metadata.", "configuration"),
+):
+    _add(_reason, "OF-" + _reason.upper().replace("_", "-"), _title, _action, _category)
+
 for _reason in (
     "invalid_dbt_exposure_response", "invalid_model_validation_response", "invalid_content_history",
     "invalid_content_response_envelope", "invalid_content_document", "invalid_content_document_identity",
@@ -274,6 +290,14 @@ _add("cleanup_unconfirmed", "OF-AI-EVAL-CLEANUP", "Cleanup of an owned AI evalua
      "Reconcile the owned run journal through an authorized channel and confirm cleanup before starting another evaluation.")
 _add("accuracy_regression", "OF-AI-EVAL-REGRESSION", "AI evaluation detected a pass-to-fail regression.",
      "Review the affected evaluation prompts and branch-versus-base results in Omni.", "validation")
+_add("ai_eval_source_unverified", "OF-AI-EVAL-SOURCE-UNVERIFIED",
+     "AI observations cannot be attributed to this PR because source verification failed.",
+     "Synchronize the selected model and branch with the intended Git revisions, then rerun. "
+     "Observed scores are not verified PR regressions or recovery evidence.")
+_add("workflow_operation_incomplete", "OF-WORKFLOW-OPERATION-INCOMPLETE",
+     "The final workflow operation did not establish a complete result.",
+     "Inspect the final operation and its exit status. An installation, skipped step or intermediate "
+     "validation report is not deployment readiness or recovery evidence.")
 
 for _reason in ("breaking_change_sync_state_unavailable", "breaking_change_with_dbt_in_same_pull_request",
                 "breaking_change_with_pending_dbt_deployment"):

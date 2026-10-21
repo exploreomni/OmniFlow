@@ -36,6 +36,15 @@ inputs:
     required: false
     default: ""
 outputs:
+  dbt-sync-complete:
+    description: All requested connection refreshes reached confirmed completion; does not assert validation readiness.
+    value: ${{ steps.sync.outputs.dbt-sync-complete }}
+  dbt-sync-state-eligible:
+    description: All requested refreshes completed in shared scope; may record synchronized deployment state after successful dbt deployment.
+    value: ${{ steps.sync.outputs.dbt-sync-state-eligible }}
+  post-sync-validation-complete:
+    description: Enabled post-sync validation produced complete evidence; policy readiness remains a separate decision.
+    value: ${{ steps.sync.outputs.post-sync-validation-complete }}
   repository-diagnostics-ready:
     description: Fresh repository-only reports were generated for this trusted private run; this authorizes the guarded upload but does not confirm publication. Not shareable output.
     value: ${{ steps.validate.outputs.repository_diagnostics_ready }}
@@ -164,6 +173,7 @@ runs:
         omniflow repair ai --auto --config "$OMNIFLOW_INPUT_CONFIG"
 
     - name: Synchronize dbt metadata into Omni
+      id: sync
       if: inputs.mode == 'dbt-sync'
       shell: bash
       env:

@@ -317,23 +317,29 @@ class OmniClientTests(unittest.TestCase):
         )
 
     def test_personal_content_metadata_uses_restricted_scope(self):
+        user_id = "11111111-1111-4111-8111-111111111111"
+        membership_id = "22222222-2222-4222-8222-222222222222"
         session = FakeSession(
             [
+                FakeResponse({"keyScope": "organization", "user": {"id": user_id, "membershipId": membership_id}}),
                 FakeResponse({"records": [{"id": "org"}], "pageInfo": {}}),
                 FakeResponse({"records": [{"id": "personal"}], "pageInfo": {}}),
             ]
         )
         client = OmniClient(base_url="https://omni.example", api_key=FAKE_API_KEY, session=session)
-        records = client.list_content(include_personal_folders=True, user_id="user-1")
+        records = client.list_content(include_personal_folders=True, user_id=user_id)
         self.assertEqual([record["id"] for record in records], ["org", "personal"])
-        self.assertEqual(session.calls[1][2]["params"]["scope"], "restricted")
-        self.assertEqual(session.calls[1][2]["params"]["creatorId"], "user-1")
+        self.assertEqual(session.calls[2][2]["params"]["scope"], "restricted")
+        self.assertEqual(session.calls[2][2]["params"]["creatorId"], membership_id)
 
     def test_label_filtering_personal_content_requires_user_id(self):
         client = OmniClient(
             base_url="https://omni.example",
             api_key=FAKE_API_KEY,
-            session=FakeSession([]),
+            session=FakeSession([FakeResponse({"keyScope": "organization", "user": {
+                "id": "11111111-1111-4111-8111-111111111111",
+                "membershipId": "22222222-2222-4222-8222-222222222222",
+            }})]),
         )
         with self.assertRaises(ConfigError):
             client.list_content(labels=["Verified"], include_personal_folders=True)

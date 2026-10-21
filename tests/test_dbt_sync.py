@@ -189,7 +189,8 @@ class DbtSyncTests(unittest.TestCase):
                                         with mock.patch("omniflow.cli.pull_yaml") as snapshot:
                                             with mock.patch(
                                                 "omniflow.cli._run_context",
-                                                return_value=({"issues": [], "exit_code": 0}, 0),
+                                                return_value=({"issues": [], "exit_code": 0,
+                                                               "validation_complete": True, "policy_decision": "pass"}, 0),
                                             ) as validation:
                                                 exit_code = cmd_dbt_sync(args)
                 self.assertEqual(exit_code, 0)

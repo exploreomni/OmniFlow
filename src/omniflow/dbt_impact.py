@@ -1,14 +1,14 @@
 """Detect dbt schema changes that would orphan Omni model references.
 
 The breaking-change hold stops a breaking *Omni* change from merging ahead of its
-dbt deployment. This module covers the opposite direction: a dbt-only pull
+dbt deployment. This module covers the opposite direction: a dbt pull
 request that renames or drops a column, or deletes a model, while the committed
 Omni model YAML still references it. Without this check that pull request merges
 cleanly and the breakage only surfaces after deployment.
 
 Everything here is static analysis over files already in the repository. No Omni
 API call, no warehouse query, and no dbt invocation is required, so the check can
-run on pull requests that would otherwise be skipped for having no Omni changes.
+run on both dbt-only and mixed dbt/Omni pull requests without executing PR code.
 """
 
 from __future__ import annotations
@@ -18,13 +18,18 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .candidate import MAX_TREE_ENTRIES, _bounded_git, _GitUnavailable, _local_tree, _remote_tree
 from .config import DbtImpactSettings
 from .dbt_manifest import MAX_MANIFEST_BYTES, DbtModel, diff_manifests, parse_manifest
 from .dbt_sql_diff import MAX_SQL_BYTES, analyze_output_columns, model_name_from_path
-from .diff.yaml_loader import load_yaml_files
-from .exceptions import SecurityPolicyError
-from .revision_data import read_git_text, read_head_text
+from .diff.yaml_loader import load_yaml_files, parse_yaml_file_map
+from .exceptions import ConfigError, SecurityPolicyError
+from .model_paths import filename_identity, is_repo_control_file, is_semantic_file
+from .revision_data import FULL_SHA, pull_request_revision, read_git_text, read_github_text, read_head_text
+from .semantic_files import infer_file_kind
 from .timestamps import utc_now_iso
+from .trust import _safe_repo_path
+from .yaml_security import MAX_YAML_FILE_BYTES, MAX_YAML_FILES, MAX_YAML_TOTAL_BYTES
 
 VALIDATOR = "dbt_impact"
 ORPHANED_COLUMN_RULE = "dbt_column_removal_orphans_omni_field"
@@ -64,7 +69,7 @@ def evaluate_dbt_impact(
     base_ref: str | None,
     repo_root: Path | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    """Analyze a dbt-only change for Omni reference breakage.
+    """Analyze dbt changes against candidate Omni references, including mixed PRs.
 
     Returns the impact report and its issues. Incomplete coverage is an explicit
     issue and blocks by default; an empty finding list never hides missing evidence.
@@ -75,8 +80,15 @@ def evaluate_dbt_impact(
     if len(dbt_files) > MAX_DBT_FILES:
         raise SecurityPolicyError("dbt impact exceeds the 1,000-file safety limit")
 
-    graph_files = _load_omni_files(root, omni_yaml_paths)
+    head_revision = pull_request_revision("head")
+    base_revision = pull_request_revision("base")
+    graph_files, root_coverage = _load_omni_snapshot(root, omni_yaml_paths, revision=head_revision)
+    base_graph_files, base_coverage = (
+        _load_omni_snapshot(root, omni_yaml_paths, revision=base_revision)
+        if base_revision else ({}, [])
+    )
     field_refs, view_refs = _index_omni_references(graph_files)
+    base_fields, base_views = _index_omni_references(base_graph_files)
 
     removed_columns_by_model, removed_models, mode, notes = _resolve_dbt_changes(
         dbt_files=dbt_files,
@@ -96,8 +108,29 @@ def evaluate_dbt_impact(
         )
     )
 
+    for scope, coverage in (("candidate", root_coverage), ("base", base_coverage)):
+        for entry in coverage:
+            if entry["status"] != "available":
+                notes.append(f"Incomplete coverage: {scope} Omni root '{entry['path']}' is {entry['status']}.")
     if dbt_files and not graph_files:
         notes.append("Incomplete coverage: no committed Omni YAML was available to index.")
+    for entry in root_coverage:
+        selected = {path: value for path, value in graph_files.items() if _under_any(path, [entry["path"]])}
+        _, indexed = _index_omni_references(selected)
+        entry["views_indexed"] = len({ref.identity for bucket in indexed.values() for ref in bucket})
+        if entry["status"] == "available" and not indexed:
+            prior = {path: value for path, value in base_graph_files.items() if _under_any(path, [entry["path"]])}
+            _, prior_views = _index_omni_references(prior)
+            # Metadata alone cannot establish absence of schema-layer views.
+            # A non-destructive diff needs no dependency gate; an exact deletion
+            # of prior authored views can establish no remaining authored refs.
+            if _known_zero_view_model(selected) and (
+                (not removed_columns_by_model and not removed_models) or (base_revision and prior_views)
+            ):
+                entry.update(status="not_applicable", reason="no_candidate_references")
+            else:
+                entry["status"] = "unindexed"
+                notes.append(f"Incomplete coverage: Omni root '{entry['path']}' has no indexed view evidence.")
     gaps = [note for note in notes if note.startswith("Incomplete coverage:")]
     if gaps:
         issues.append({
@@ -124,6 +157,12 @@ def evaluate_dbt_impact(
         "analysis_mode": mode,
         "coverage_complete": not gaps,
         "execution_status": "partial" if gaps else "completed",
+        "validation_complete": not gaps,
+        "reference_scope": "candidate" if head_revision else "local",
+        "root_coverage": root_coverage,
+        "base_root_coverage": base_coverage,
+        "base_omni_views_indexed": len({ref.identity for bucket in base_views.values() for ref in bucket}),
+        "base_omni_fields_indexed": len(base_fields),
         "dbt_files_analyzed": sorted(dbt_files)[:MAX_SAMPLES],
         "dbt_file_count": len(dbt_files),
         "omni_views_indexed": len({reference.identity for bucket in view_refs.values() for reference in bucket}),
@@ -288,12 +327,114 @@ def _load_omni_files(root: Path, omni_yaml_paths: list[str]) -> dict[str, Any]:
     """
     merged: dict[str, Any] = {}
     for relative in omni_yaml_paths:
-        directory = root / relative
+        safe = _safe_repo_path(Path(relative))
+        directory = root
+        for part in Path(safe).parts:
+            directory /= part
+            if directory.is_symlink():
+                raise SecurityPolicyError("dbt impact Omni roots must not traverse symlinks")
+        if root.is_symlink() or not directory.resolve().is_relative_to(root.resolve()):
+            raise SecurityPolicyError("dbt impact Omni roots must remain inside the checkout without symlinks")
         if not directory.is_dir():
             continue
         for name, payload in load_yaml_files(directory).items():
-            merged[f"{relative}/{name}"] = payload
+            path = (Path(safe) / name).as_posix()
+            if not is_repo_control_file(path):
+                merged[path] = payload
     return merged
+
+
+def _load_omni_snapshot(root: Path, paths: list[str], *, revision: tuple[str, str] | None):
+    """Read bounded data, never check out or execute the candidate revision."""
+    if revision is None:
+        files = _load_omni_files(root, paths)
+        coverage = [{"path": path, "status": "available" if (root / path).is_dir() else "missing"}
+                    for path in paths]
+    else:
+        sha, repository = revision
+        try:
+            entries = _local_tree(sha, root=root)
+            local = True
+        except _GitUnavailable:
+            entries = _remote_tree(repository, sha)
+            local = False
+        if len(entries) > MAX_TREE_ENTRIES:
+            raise SecurityPolicyError("dbt impact Git tree exceeds the file inventory limit")
+        tree = {}
+        for entry in entries:
+            if not isinstance(entry, dict) or not isinstance(entry.get("path"), str):
+                raise ConfigError("dbt impact requires a complete Git inventory")
+            path = _safe_repo_path(Path(entry["path"]))
+            if path != entry["path"] or path in tree:
+                raise ConfigError("dbt impact Git inventory contains ambiguous paths")
+            tree[path] = entry
+        coverage = []
+        raw = {}
+        total_bytes = 0
+        for path in paths:
+            selected = {name: entry for name, entry in tree.items() if _under_any(name, [path])}
+            coverage.append({"path": path, "status": "available" if any(
+                entry.get("type") == "blob" for entry in selected.values()) else "missing"})
+            for name, entry in selected.items():
+                if name in raw or is_repo_control_file(name) or not is_semantic_file(name):
+                    continue
+                if entry.get("type") != "blob" or entry.get("mode") not in {"100644", "100755"}:
+                    raise SecurityPolicyError("dbt impact source must be a regular Git file")
+                size, blob = entry.get("size"), entry.get("sha")
+                if type(size) is not int or size < 0 or size > MAX_YAML_FILE_BYTES or not FULL_SHA.fullmatch(str(blob)):
+                    raise SecurityPolicyError("dbt impact source has invalid size or identity")
+                total_bytes += size
+                if len(raw) >= MAX_YAML_FILES or total_bytes > MAX_YAML_TOTAL_BYTES:
+                    raise SecurityPolicyError("dbt impact Omni source exceeds snapshot limits")
+                if local:
+                    value = _bounded_git(["cat-file", "blob", blob], root=root, limit=MAX_YAML_FILE_BYTES)
+                    if len(value) != size:
+                        raise ConfigError("dbt impact Git snapshot is incomplete")
+                    try:
+                        raw[name] = value.decode("utf-8")
+                    except UnicodeError as exc:
+                        raise ConfigError("dbt impact source must be UTF-8") from exc
+                else:
+                    raw[name] = read_github_text(repository, sha, name, max_bytes=MAX_YAML_FILE_BYTES)
+                    if raw[name] is None:
+                        raise ConfigError("dbt impact source disappeared from the immutable inventory")
+        files = parse_yaml_file_map(raw)
+    for entry in coverage:
+        selected = {name: payload for name, payload in files.items() if _under_any(name, [entry["path"]])}
+        if entry["status"] == "available" and not selected:
+            entry["status"] = "empty"
+        for name, payload in selected.items():
+            identity = filename_identity(name)
+            if identity.endswith(".view") and not isinstance(payload, dict):
+                entry["status"] = "unsupported"
+            if _external_dependencies(payload):
+                entry["status"] = "unsupported"
+    return files, coverage
+
+
+def _external_dependencies(value: Any) -> bool:
+    if isinstance(value, dict):
+        return any((key in {"extends", "include", "includes", "imports", "import", "base_model", "shared_model"}
+                    and bool(child)) or _external_dependencies(child) for key, child in value.items())
+    if isinstance(value, list):
+        return any(_external_dependencies(child) for child in value)
+    return False
+
+
+def _known_zero_view_model(files: dict[str, Any]) -> bool:
+    models = 0
+    for path, payload in files.items():
+        identity = filename_identity(path)
+        if identity == "model" and isinstance(payload, dict) and not payload.get("topics"):
+            models += 1
+        elif identity in {"relationships"} or identity.endswith(".relationships"):
+            if payload not in (None, [], {}):
+                return False
+        else:
+            return False
+        if _external_dependencies(payload):
+            return False
+    return models == 1
 
 
 def _index_omni_references(
@@ -339,16 +480,10 @@ def _index_omni_references(
 
 def _is_view_file(file_path: str, payload: dict[str, Any]) -> bool:
     """Identify authored view files, excluding topics, models, and relationships."""
-    lowered = file_path.lower()
-    basename = lowered.rsplit("/", 1)[-1]
-    stem = basename.rsplit(".", 1)[0]
-    if ".topic" in basename or ".composite_topic" in basename:
+    identity = filename_identity(file_path)
+    if infer_file_kind(file_path, payload) != "view":
         return False
-    if stem in {"model", "relationships"} or "relationship" in basename:
-        return False
-    if payload.get("type") in {"model", "topic"} or "base_view" in payload:
-        return False
-    return bool(_field_groups(payload)) or bool(
+    return identity.endswith(".view") or bool(_field_groups(payload)) or bool(
         payload.get("table_name") or payload.get("sql_table_name")
     )
 

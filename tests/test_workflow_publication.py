@@ -20,7 +20,7 @@ def workflow(name="omniflow.yml"):
 
 
 def steps(name="omniflow.yml"):
-    return workflow(name)["jobs"]["omniflow"]["steps"]
+    return next(iter(workflow(name)["jobs"].values()))["steps"]
 
 
 def receipt_step(name="omniflow.yml"):
@@ -58,6 +58,7 @@ def execute_receipt(tmp_path, *, name="omniflow.yml", overrides=None, report=Tru
         "REPOSITORY_UPLOAD_OUTCOME": "success", "REPOSITORY_ARTIFACT_ID": "17",
         "REPOSITORY_ARTIFACT_URL": URL, "REPOSITORY_READY": "true", "PRIVATE_REPOSITORY": "true",
         "DIAGNOSTIC_OUTPUT_READY": "true",
+        "OMNIFLOW_REPORT_DIR": workflow(name)["env"]["OMNIFLOW_REPORT_DIR"],
         "GITHUB_EVENT_PATH": str(event), "TEST_PYTHON": sys.executable, "TRUSTED_PACKAGE_SRC": str(ROOT / "src"),
     }
     env.update(overrides or {})
@@ -103,7 +104,7 @@ def test_receipt_runs_after_uploads_without_changing_privileges_or_failure_polic
     assert "github.event.repository.private == true" in private["if"]
     assert private["with"]["retention-days"] == 7
     assert private["with"]["if-no-files-found"] == "error"
-    assert private["with"]["path"].splitlines() == [
+    assert private["with"]["path"].replace("${{ env.OMNIFLOW_REPORT_DIR }}", ".omniflow").splitlines() == [
         ".omniflow/repository/report.json", ".omniflow/repository/report.md",
         ".omniflow/repository/report.sarif", ".omniflow/repository/junit.xml",
         ".omniflow/repository/status.json",
@@ -296,5 +297,5 @@ def test_pr_comment_uses_trusted_isolated_publisher_and_current_upload_outputs()
     assert "PUBLICATION_RECEIPT" not in comment_step["env"]  # Never read stale checkout/runner receipt text.
     assert comment_step["env"]["PUBLIC_UPLOAD_OUTCOME"] == "${{ steps.public_upload.outcome }}"
     assert comment_step["env"]["REPOSITORY_ARTIFACT_URL"] == "${{ steps.repository_upload.outputs.artifact-url }}"
-    assert "hashFiles('.omniflow/public/report.json')" in comment_step["if"]
+    assert "hashFiles(format('{0}/public/report.json', env.OMNIFLOW_REPORT_DIR))" in comment_step["if"]
     assert "github.event_name == 'pull_request_target'" in comment_step["if"]

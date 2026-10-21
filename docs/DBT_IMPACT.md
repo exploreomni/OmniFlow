@@ -1,6 +1,6 @@
 # dbt Impact Analysis
 
-OmniFlow's dbt impact analysis catches the case where a dbt-only pull request removes a warehouse column or model that the committed Omni model YAML still references. It is optional, disabled by default, and requires no Omni credential because it compares files that already exist in the repository.
+OmniFlow's dbt impact analysis catches a pull request that removes a warehouse column or model still referenced by the candidate Omni YAML. It runs for both dbt-only and mixed dbt/Omni changes. It is optional, disabled by default, and needs no Omni credential because it compares repository data.
 
 ## The Problem It Solves
 
@@ -29,10 +29,20 @@ The impact check moves that detection to pull-request time, so the dbt change is
 | dbt removes a column no Omni field references | Pass |
 | dbt adds a column | Pass |
 | dbt changes a model no Omni view references | Pass |
-| Pull request also changes Omni model YAML | Not evaluated here; normal validation and the breaking change hold apply |
+| Pull request also changes Omni model YAML | Evaluate once alongside normal validation and the breaking change hold |
 | Required manifest, columns, Omni YAML, or supported SQL evidence is missing | Incomplete coverage; fail by default |
 
-The check runs only on pull requests that OmniFlow would otherwise skip: those with dbt-path changes and no Omni model changes.
+The check runs whenever an enabled policy detects dbt-path changes, independently of whether Omni validators also run. An Omni comment or label cannot suppress dbt-impact analysis. A dbt-only action still receives no Omni credential.
+
+## Candidate References And Coverage
+
+In a PR, both Omni inventories are read as data at the immutable base/head commits. Candidate references determine whether the proposed warehouse removal leaves an orphan; base counts provide comparison evidence. Base-only references are not blindly unioned into the candidate set, so deliberately removing an obsolete dependency does not create an orphan finding by itself. Model/content checks, contract impact and the deployment hold still govern whether that coordinated change is safe for published content and deployment order.
+
+Every configured root must be available and readable. One missing root remains incomplete even if another root is valid. `fail_on_incomplete_coverage: false` changes the finding to a warning, not the evidence to complete; the run is advisory. Inheritance/imports that require unavailable external sources remain incomplete.
+
+A directory containing only metadata or arbitrary YAML does not prove absence of schema-layer dependencies. Zero authored views are non-applicable only with a fully parsed, known model shape plus either a non-destructive dbt diff or immutable evidence that all prior authored views were removed. This is not proof that the tenant has no schema-layer views or content; the other enabled gates remain necessary.
+
+Filename classification uses the shared semantic classifier. Names such as `customer_relationships.view.yaml` remain views; only actual relationship/topic/model sources are excluded from view indexing.
 
 ## Two Analysis Modes
 

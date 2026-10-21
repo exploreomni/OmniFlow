@@ -131,7 +131,7 @@ def _rate(row: dict[str, Decimal], numerator: str, denominator: str) -> Decimal:
     return count / total
 
 
-def _distance(assertion: QueryAssertion, row: dict[str, Decimal]) -> Decimal:
+def _distance(assertion: QueryAssertion, row: dict[str, Decimal]) -> tuple[str | None, Decimal]:
     if assertion.kind == "null_rate":
         value = _rate(row, assertion.numerator, assertion.denominator)
     elif assertion.kind == "unique_grain":
@@ -140,8 +140,13 @@ def _distance(assertion: QueryAssertion, row: dict[str, Decimal]) -> Decimal:
         value = row[assertion.field]
         if assertion.kind == "group_count":
             _count(value)
-    return max(Decimal(0), (Decimal(str(assertion.minimum)) - value) if assertion.minimum is not None else Decimal(0),
-               (value - Decimal(str(assertion.maximum))) if assertion.maximum is not None else Decimal(0))
+    # Opposite bounds are different defects even when their magnitudes match.
+    # Do not waive a newly excessive value because the baseline was too small.
+    if assertion.minimum is not None and value < Decimal(str(assertion.minimum)):
+        return "lower", Decimal(str(assertion.minimum)) - value
+    if assertion.maximum is not None and value > Decimal(str(assertion.maximum)):
+        return "upper", value - Decimal(str(assertion.maximum))
+    return None, Decimal(0)
 
 
 def _delta_failed(assertion: QueryAssertion, base: dict[str, Decimal], head: dict[str, Decimal]) -> bool:
@@ -173,9 +178,9 @@ def _observations(
             if _delta_failed(assertion, base, head):
                 observations.append((number, assertion.kind, "new"))
             continue
-        current = _distance(assertion, head)
-        previous = _distance(assertion, base) if base is not None else Decimal(0)
-        if current > previous:
+        current_bound, current = _distance(assertion, head)
+        previous_bound, previous = _distance(assertion, base) if base is not None else (None, Decimal(0))
+        if current > 0 and (current_bound != previous_bound or current > previous):
             observations.append((number, assertion.kind, "new"))
         elif current > 0:
             observations.append((number, assertion.kind, "existing"))

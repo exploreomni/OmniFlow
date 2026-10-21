@@ -25,6 +25,15 @@ Routine validation uses YAML and validation/metadata endpoints. AI eval starts a
 
 The prompt sets you list in policy must already exist in Omni. This check evaluates existing prompt sets; it does not create them.
 
+For an applicable PR comparison, OmniFlow verifies the immutable Git base and
+head against the selected Omni sources before creating evaluation jobs, and
+checks both again after validation. This applies even when model and content
+checks are disabled or use all-issues policy. Prompt sets are preflighted without
+creating runs; no matching set or no branch does not introduce an extra source
+gate. A failed final source check invalidates AI completeness and PR-attributed
+counts. Observations remain restricted evidence, not verified regressions or
+recovery. Operational and cleanup failures remain blocking.
+
 ## Enable The Policy
 
 ```yaml

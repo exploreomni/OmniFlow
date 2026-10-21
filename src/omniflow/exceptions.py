@@ -4,7 +4,7 @@ from typing import Any
 
 API_OPERATIONS = frozenset({
     "model_yaml", "model_validation", "content_validation", "git_configuration",
-    "model_list", "content_list", "document_drafts", "dbt_exposures", "schema_refresh",
+    "model_list", "content_list", "identity_lookup", "document_drafts", "dbt_exposures", "schema_refresh",
     "job_status", "ai_job", "ai_job_status", "ai_job_cancel", "ai_prompt_set",
     "ai_eval_run", "ai_eval_status", "ai_eval_cancel", "git_commit", "omni_request",
     "github_compare", "github_tree", "github_blob", "github_pull_request",

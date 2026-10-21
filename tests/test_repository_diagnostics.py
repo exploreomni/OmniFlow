@@ -572,10 +572,11 @@ def test_workflow_templates_never_upload_detail_based_only_on_disk_presence():
         assert "repository-diagnostics-ready == 'true'" in uploads[0]["if"]
         assert "github.event.repository.private == true" in uploads[0]["if"]
         assert uploads[0]["with"]["retention-days"] == 7
-        assert ".omniflow/repository/report.json" in uploads[0]["with"]["path"]
+        assert workflow["env"]["OMNIFLOW_REPORT_DIR"] == ".omniflow"
+        assert "${{ env.OMNIFLOW_REPORT_DIR }}/repository/report.json" in uploads[0]["with"]["path"]
         for step in steps:
             if step["name"] in {"Comment on PR", "Upload SARIF"}:
-                assert ".omniflow/repository/" not in json.dumps(step)
+                assert "/repository/" not in json.dumps(step)
 
 
 def test_generation_receipt_never_claims_successful_publication(repository, monkeypatch, capsys):

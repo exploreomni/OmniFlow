@@ -59,7 +59,8 @@ This file contains routing metadata, not credentials. Commit it to the protected
 3. Replace both occurrences of `<pinned-commit-sha>` with the same reviewed, full 40-character OmniFlow commit SHA.
 4. If the protected branch is not `main`, update `branches: [main]` in the workflow.
 5. Copy the canonical [`.omniflow.yml`](../.omniflow.yml) into the **customer repository root**. This required policy is separate from the workflow at `.github/workflows/omniflow.yml`. Review every changed gate with the model owners; optional integrations and label filters remain commented unless deliberately enabled.
-6. If GitHub Code Security is enabled for the repository, add a repository Actions variable named `OMNIFLOW_UPLOAD_SARIF` with the value `true`. Leave it unset otherwise; `report.sarif` is still included in the public evidence artifact.
+6. Keep workflow `env.OMNIFLOW_REPORT_DIR` identical to policy `reporting.output_dir` (default `.omniflow`). If using a custom repository-relative path, change both together; spaces are supported but symlinks, traversal and upload globs are rejected. Privacy-safe `public/report.json` is required even when only Markdown or SARIF presentation is selected.
+7. If GitHub Code Security is enabled for the repository, add a repository Actions variable named `OMNIFLOW_UPLOAD_SARIF` with the value `true`. Leave it unset otherwise; when SARIF presentation is enabled, `report.sarif` is still included in the public evidence artifact.
 
 The action reference should look like this:
 
@@ -144,7 +145,7 @@ Never put the token in `.omni/flow.json`, `.omniflow.yml`, a workflow file, a pu
 
 For environment-scoped targets, use the selected [GitHub environment's secret](ENVIRONMENT_TARGETS.md#2-bind-credentials-to-the-selected-environment) instead of one repository-wide credential. A GitHub organization-level secret is a storage location, not an Omni credential type. The standard validation workflow obtains GitHub's own `GITHUB_TOKEN` automatically; do not put a GitHub token in `OMNI_API_KEY`.
 
-The current client does not verify credential type or accept an `authentication`/`credential_type` policy block. With a PAT, leave `OMNI_USER_ID`, `omni.user_id`, and `--user-id` unset; Omni's Content Validator only permits impersonation with an Org key. Review [user-scope limitations](CONFIGURATION.md#credential-choice-and-user-scope) before including personal folders.
+The client does not accept an `authentication`/`credential_type` policy block. With a PAT, leave `OMNI_USER_ID`, `omni.user_id`, and `--user-id` unset; Omni's Content Validator only permits impersonation with an Org key. Personal-folder validation verifies the credential's user/membership pair using `whoami`. With an Org key, explicitly select the credential owner's **user UUID**; a different actor cannot yet be mapped safely to the catalog's membership UUID and is rejected. Shared-only validation does not need this identity lookup. Review [user-scope limitations](CONFIGURATION.md#credential-choice-and-user-scope) before including personal folders.
 
 An Org key does not expand trusted model routing or prove whole-instance coverage. Review labels, personal-folder scope, and the content returned in the first run using authorized private evidence. Both standard and strict settings use the same minimal public diagnostic schema; neither publishes raw content names or error text. Eligible private runs can separately produce repository-only diagnostics with verified authored identifiers and source locations. Set `reporting.diagnostics.mode: minimal` on the trusted base to disable that tier; strict redaction is not its opt-out. See [Diagnostic Privacy](DIAGNOSTIC_PRIVACY.md).
 

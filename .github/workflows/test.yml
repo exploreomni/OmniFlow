@@ -125,6 +125,9 @@ jobs:
           test -f .omniflow/public/report.json
           test -f .omniflow/artifact-manifest.json
           test ! -d .omniflow/restricted
+      - name: Prepare immutable AI eval consumer fixture
+        id: eval-fixture
+        run: python scripts/smoke_ai_eval_action.py prepare --parent "$RUNNER_TEMP"
       - name: Start loopback AI eval fixture
         run: |
           timeout 180s python scripts/smoke_ai_eval_action.py serve &
@@ -139,6 +142,7 @@ jobs:
       - name: Verify regression gating and public AI eval artifacts
         env:
           EVAL_OUTCOME: ${{ steps.eval-smoke.outcome }}
+          EVAL_WORKSPACE: ${{ steps.eval-fixture.outputs.workspace }}
         run: |
           test "$EVAL_OUTCOME" = failure
-          python scripts/smoke_ai_eval_action.py verify
+          python scripts/smoke_ai_eval_action.py verify --workspace "$EVAL_WORKSPACE"

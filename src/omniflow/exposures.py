@@ -156,20 +156,26 @@ def _exposure_records(payload: Any) -> list[Any]:
         if "exposure" in record:
             exposure = record["exposure"]
             if exposure is None:
+                if not _text(record.get("dashboard_identifier")):
+                    raise _malformed_exposures()
                 continue  # Documented unmapped dashboard, not malformed evidence.
             if not isinstance(exposure, dict) or not exposure:
                 raise _malformed_exposures()
         else:
             exposure = record  # Retain supported flat exposure records.
-        dependency_keys = [key for key in ("depends_on", "dependsOn", "dependencies") if key in exposure]
-        if len(dependency_keys) > 1:
+        identity = (record.get("dashboard_identifier"), *(exposure.get(key) for key in (
+            "id", "content_id", "dashboard_id", "name", "label", "dashboard_name", "content_name",
+        )))
+        if not any(_text(value) for value in identity):
             raise _malformed_exposures()
-        if dependency_keys:
-            dependencies = exposure[dependency_keys[0]]
-            if not isinstance(dependencies, list) or any(
-                not isinstance(item, (str, dict)) for item in dependencies
-            ):
-                raise _malformed_exposures()
+        dependency_keys = [key for key in ("depends_on", "dependsOn", "dependencies") if key in exposure]
+        if len(dependency_keys) != 1:
+            raise _malformed_exposures()
+        dependencies = exposure[dependency_keys[0]]
+        if not isinstance(dependencies, list) or len(dependencies) > 10_000 or any(
+            not _dependency_identity(item) for item in dependencies
+        ):
+            raise _malformed_exposures()
     return records
 
 
@@ -186,18 +192,18 @@ def _depends_on(record: dict[str, Any]) -> list[str]:
         return []
     depends_on = []
     for item in value:
-        if isinstance(item, str):
-            name = _text(item, maximum=1_024)
-            if name:
-                depends_on.append(name)
-        elif isinstance(item, dict):
-            name = item.get("name") or item.get("unique_id") or item.get("id")
-            normalized = _text(name, maximum=1_024)
-            if normalized:
-                depends_on.append(normalized)
-        if len(depends_on) >= 10_000:
-            break
+        name = _dependency_identity(item)
+        if name:
+            depends_on.append(name)
     return depends_on
+
+
+def _dependency_identity(value: Any) -> str | None:
+    if isinstance(value, dict):
+        value = value.get("name") or value.get("unique_id") or value.get("id")
+    if not isinstance(value, str) or len(value) > 1_024:
+        return None
+    return _text(value, maximum=1_024)
 
 
 def _owner(value: Any) -> dict[str, str] | None:

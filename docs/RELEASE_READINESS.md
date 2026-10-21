@@ -4,7 +4,7 @@
 
 OmniFlow remains controlled alpha. A merge, successful CI run, signed preflight, release publication, and adopter acceptance are different states. No checklist entry is satisfied merely by this document existing.
 
-This hardening branch prepares version `0.5.0a1`; no release tag, publication, or production acceptance is implied. Safer failure behavior, artifact manifest v2, and breaking public diagnostic schema 2 need adopter review before upgrading from `0.4.0` or another earlier reporting revision. Schema 2 removes direct identities, paths, customer text, prompt IDs, and Git/Action references from shareable reports under both standard and strict settings.
+No release tag, publication, or production acceptance is implied by this checklist. Safer failure behavior, artifact manifest v2, and breaking public diagnostic schema 2 need adopter review before upgrading from `0.4.0` or another earlier reporting revision. Schema 2 excludes customer resource identities, paths, raw messages and prompt IDs under both standard and strict settings. Fixed tool-version/Action-pin provenance and validated GitHub run/head links on notification surfaces are distinct from customer source detail.
 
 | Capability | Candidate policy | Acceptance needed before required production gating |
 | --- | --- | --- |
@@ -12,6 +12,9 @@ This hardening branch prepares version `0.5.0a1`; no release tag, publication, o
 | dbt impact | Optional, separately qualified | Real Action base/head acquisition, manifest relation changes, credential-free routing, explicit incomplete coverage |
 | dbt sync and holds | Optional, separately qualified | Approved non-production deployment/refresh, durable state, fresh current-head readiness check, failure recovery |
 | AI eval | Optional, separately qualified | Approved scoring policy, prompt-set/model identity, privacy, quota/run lifecycle, controlled live regression |
+| Query-result contracts | Optional, separately qualified | Approved query permissions and budgets, representative assertions, fresh baseline/candidate result regression and recovery; structural validators are not result correctness proof |
+| Local AI proposals | Optional local reviewed workflow | Explicit source and human approval, verified validation result and rollback; no autonomous promotion |
+| Failure/recovery notifications and artifact delivery | Required for adopted workflow examples | Same-head/run freshness, actual failure/recovery comments, current-run upload receipts, custom output path and non-default formats; email delivery separately verified if required |
 | AI repair | Unsupported development scaffold | Excluded from customer release scope |
 
 The official Action and release locks target Linux x86_64 / CPython 3.11. Unit CI covers Python 3.11–3.13; it does not establish that the Linux wheel lock works on other architectures. Pin a reviewed full 40-character Action SHA, never a floating branch.
@@ -48,6 +51,10 @@ Copy this record into the approved private evidence store for each capability an
 Core cases: valid and intentionally invalid models/content; correct discovery/branch mapping; representative semantic and downstream changes; malformed/unavailable evidence; withheld-secret/fork behavior; public JSON, Markdown, SARIF, JUnit and log inspection; blocked invalid/unreviewed merge; reviewed recovery.
 
 Diagnostic migration cases: verify both standard and strict produce only the minimum-data public schema; verify generated references do not replace trusted identity checks; inspect supported-file-only uploads and stale-file exclusion. Exercise synthetic PII/PHI/payment-like markers, unknown fields, names/paths, and exception text without real regulated test data. This evidence does not certify compliance or establish zero possible leakage. Prior artifacts require a separate retention/exposure review.
+
+Report-delivery cases: `public/report.json` must exist and remain privacy-safe for JSON-only, Markdown-only, SARIF-only and default formats. Match trusted `reporting.output_dir` with workflow `OMNIFLOW_REPORT_DIR`, including a spaced directory. A missing/malformed selected report cannot fall back to `.omniflow`. Exercise bootstrap failure, cancellation, partial writes and an intermediate held-readiness pass followed by a final source/state failure. All six examples must prevent stale publication; post-upload receipts, not downloaded pre-upload snapshots, establish publication. A completed shared dbt refresh can advance synchronized state despite incomplete optional validation, but never satisfies current-head readiness by itself.
+
+Query/local-AI cases: validate configured query assertions with known expected results and bounded budgets; failed, partial or unsupported evidence must not become a pass. Keep raw queries/results and proposal text out of public artifacts. Test source drift and explicit approval for local proposals. Hosted native query and optional-workflow acceptance remain pending until recorded for the exact release; AI repair remains excluded.
 
 Content-regression cases: explicitly approved new-only branch/base scope; existing readable issues remain visible without blocking, new/increased occurrences block, and incomplete evidence stays failed. Comment-only classification remains opt-in and never skips validation. Isolated live testing reproduced the grouped dashboard-filter response and justified a narrow adapter; retain evidence from the exact candidate's healthy/broken/restored replay. The actual customer response, API-owner contract agreement, and a successful live consumer pilot remain separate acceptance evidence—not satisfied by a synthetic replay or this documentation.
 

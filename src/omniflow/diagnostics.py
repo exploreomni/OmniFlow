@@ -134,7 +134,7 @@ ENUMS = {
     "query_validation_mode": {"off", "report", "enforce"},
     "assertion_type": {"null_rate", "unique_grain", "group_count", "aggregate_delta", "rate_delta", "aggregate_range"},
     "query_assertion_type": {"null_rate", "unique_grain", "group_count", "aggregate_delta", "rate_delta", "aggregate_range"},
-    "post_sync_validation_status": {"not_run", "failed", "passed"},
+    "post_sync_validation_status": {"not_run", "failed", "passed", "incomplete"},
     "coverage_status": {"available", "partial", "unavailable", "unknown"},
     "comparison_mode": {"all_issues", "new_only", "unknown"},
     "requested_validation_depth": {"api_default", "full"},

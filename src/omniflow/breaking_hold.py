@@ -30,6 +30,8 @@ PENDING_RULE = "breaking_change_with_pending_dbt_deployment"
 STATE_RULE = "breaking_change_sync_state_unavailable"
 SAFE_SHA_RE = re.compile(r"^[0-9a-fA-F]{7,64}$")
 MAX_SAMPLE_CHANGES = 10
+MAX_CHANGED_PATH_BYTES = 1024 * 1024
+MAX_CHANGED_PATHS = 10_000
 
 
 def evaluate_breaking_hold(
@@ -191,22 +193,29 @@ def _git_changed_files_since(sha: str) -> list[str] | None:
         )
         # Arguments are passed directly to Git, never through a shell.
         result = subprocess.run(  # nosec B603
-            [git_executable(), "diff", "--name-only", "--no-renames", f"{sha}..HEAD"],
+            [git_executable(), "diff", "--name-only", "--no-renames", "-z", f"{sha}..HEAD"],
             check=True,
             capture_output=True,
-            text=True,
             timeout=10,
         )
     except (OSError, subprocess.SubprocessError):
         return None
+    raw = result.stdout
+    if len(raw) > MAX_CHANGED_PATH_BYTES or (raw and not raw.endswith(b"\0")):
+        return None
+    try:
+        candidates = raw.decode("utf-8").split("\0")
+    except UnicodeError:
+        return None
+    if len(candidates) > MAX_CHANGED_PATHS + 1:
+        return None
     files: list[str] = []
-    for line in result.stdout.splitlines():
-        candidate = line.strip()
+    for candidate in candidates:
         if not candidate:
             continue
         path = Path(candidate)
-        if path.is_absolute() or ".." in path.parts:
-            continue
+        if path.is_absolute() or ".." in path.parts or path.as_posix() != candidate:
+            return None
         if candidate not in files:
             files.append(candidate)
     return files

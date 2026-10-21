@@ -16,6 +16,9 @@ the verified base, PR branch, and base again. A changed reread, insufficient
 population, unsupported response or missing provenance is **inconclusive**.
 Existing assertion violations are nonblocking when unchanged or improved;
 new/worsened violations block only in enforce mode.
+Lower- and upper-bound violations are distinct: changing from below a reviewed
+range to above it is a new finding, even if the distance from the range is equal
+or smaller. Unchanged or improved debt is matched only on the same bound.
 
 The first adapter supports **one-row numeric aggregate probes**, with a hard
 two-row result limit to detect accidental grouping/truncation. It supports:

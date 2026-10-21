@@ -1,5 +1,10 @@
 name: Deploy dbt and synchronize Omni
 
+# Keep this trusted path identical to reporting.output_dir in .omniflow.yml.
+# Spaces are supported; do not use absolute paths, traversal or upload globs.
+env:
+  OMNIFLOW_REPORT_DIR: .omniflow
+
 on:
   push:
     branches: [main]
@@ -40,6 +45,76 @@ jobs:
 
       # Replace this command with the repository's reviewed production dbt deployment.
       # OmniFlow must remain after this step so a failed dbt deployment prevents refresh.
+      - name: Prepare fresh diagnostic output
+        id: diagnostic_output
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os
+          from pathlib import PurePosixPath
+          import stat
+          import sys
+
+          descriptors = []
+          def open_directory(name, parent=None):
+              try:
+                  item = os.stat(name, dir_fd=parent, follow_symlinks=False)
+              except FileNotFoundError:
+                  return None
+              if not stat.S_ISDIR(item.st_mode):
+                  raise ValueError('unsafe diagnostic directory')
+              fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+              descriptors.append(fd)
+              return fd
+
+          try:
+              value = os.environ.get('OMNIFLOW_REPORT_DIR', '.omniflow')
+              parts = PurePosixPath(value)
+              if (not value or len(value) > 512 or value != value.strip() or value.startswith('~') or
+                  any(ord(char) < 32 or char in '\\\\*?[]{}!()' for char in value) or
+                  parts.is_absolute() or parts.as_posix() != value or not parts.parts or
+                  '..' in parts.parts or parts.parts[0] in {'.git', '.github', '.omni'}):
+                  raise ValueError('unsafe report directory')
+              root = None
+              for part in parts.parts:
+                  root = open_directory(part, root)
+                  if root is None:
+                      break
+              public = open_directory('public', root) if root is not None else None
+              private = open_directory('repository', root) if root is not None else None
+              targets = [(root, 'artifact-manifest.json')] if root is not None else []
+              names = ('report.json', 'report.md', 'report.sarif', 'junit.xml', 'evidence.json',
+                       'dbt-sync.json', 'dbt-impact.json', 'repair.json', 'repair.md')
+              for directory in (root, public):
+                  if directory is not None:
+                      targets.extend((directory, name) for name in names)
+              if private is not None:
+                  targets.extend((private, name) for name in
+                                 ('report.json', 'report.md', 'report.sarif', 'junit.xml', 'status.json'))
+              # Preflight every target before deleting any. Directory handles
+              # prevent following replacement symlinks during exact-file cleanup.
+              present = []
+              for fd, name in targets:
+                  try:
+                      item = os.stat(name, dir_fd=fd, follow_symlinks=False)
+                  except FileNotFoundError:
+                      continue
+                  if not stat.S_ISREG(item.st_mode):
+                      raise ValueError('unsafe diagnostic target')
+                  present.append((fd, name))
+              for fd, name in present:
+                  os.unlink(name, dir_fd=fd)
+              with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
+                  output.write('ready=true\n')
+          except (OSError, ValueError):
+              print('::error::Diagnostic output preparation failed. Unsafe or inaccessible paths were rejected; no fresh public report is authorized.')
+              sys.exit(1)
+          finally:
+              for fd in reversed(descriptors):
+                  os.close(fd)
+          PY
+
       - name: Deploy dbt to production
         run: ./scripts/deploy-dbt-production.sh
 
@@ -49,24 +124,98 @@ jobs:
           python-version: "3.11"
 
       - name: Synchronize dbt metadata into Omni
+        id: operation
         uses: exploreomni/OmniFlow@<pinned-commit-sha> # zizmor: ignore[unpinned-uses] customer must replace
         with:
           mode: dbt-sync
           config: .omniflow.yml
           sync-api-key: ${{ secrets.OMNIFLOW_SYNC_API_KEY }}
 
+      - name: Finalize current operation evidence
+        id: report_finalized
+        if: always() && steps.diagnostic_output.outputs.ready == 'true'
+        env:
+          OPERATION_STATUS: ${{ steps.operation.outcome }}
+        run: |
+          set -euo pipefail
+          python -I -m omniflow.reporting.output_lifecycle \
+            --report-dir "$OMNIFLOW_REPORT_DIR" --operation-status "$OPERATION_STATUS"
+
       - name: Upload synchronization evidence
-        if: always()
+        id: public_upload
+        if: always() && steps.report_finalized.outputs.ready == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: omniflow-dbt-sync-evidence
           path: |
-            .omniflow/public/report.json
-            .omniflow/public/report.md
-            .omniflow/public/report.sarif
-            .omniflow/public/junit.xml
-            .omniflow/public/evidence.json
-            .omniflow/public/dbt-sync.json
-            .omniflow/artifact-manifest.json
+            ${{ env.OMNIFLOW_REPORT_DIR }}/public/report.json
+            ${{ env.OMNIFLOW_REPORT_DIR }}/public/report.md
+            ${{ env.OMNIFLOW_REPORT_DIR }}/public/report.sarif
+            ${{ env.OMNIFLOW_REPORT_DIR }}/public/junit.xml
+            ${{ env.OMNIFLOW_REPORT_DIR }}/public/evidence.json
+            ${{ env.OMNIFLOW_REPORT_DIR }}/public/dbt-sync.json
+            ${{ env.OMNIFLOW_REPORT_DIR }}/artifact-manifest.json
           if-no-files-found: ignore
           include-hidden-files: true
+
+      - name: Show public diagnostic summary
+        id: publication
+        if: always()
+        shell: bash
+        env:
+          DIAGNOSTIC_OUTPUT_READY: ${{ steps.report_finalized.outputs.ready }}
+          PUBLIC_UPLOAD_OUTCOME: ${{ steps.public_upload.outcome }}
+          PUBLIC_ARTIFACT_ID: ${{ steps.public_upload.outputs.artifact-id }}
+          PUBLIC_ARTIFACT_URL: ${{ steps.public_upload.outputs.artifact-url }}
+          REPOSITORY_UPLOAD_OUTCOME: ""
+          REPOSITORY_ARTIFACT_ID: ""
+          REPOSITORY_ARTIFACT_URL: ""
+          REPOSITORY_READY: ""
+          PRIVATE_REPOSITORY: ${{ github.event.repository.private }}
+        run: |
+          set -euo pipefail
+          # This receipt is created after uploads, outside checkout and upload paths.
+          # Never treat generated files or a stale receipt as proof of publication.
+          [[ "$GITHUB_RUN_ID" =~ ^[0-9]+$ && "$GITHUB_RUN_ATTEMPT" =~ ^[0-9]+$ ]]
+          RECEIPT="$(mktemp "${RUNNER_TEMP}/omniflow-publication-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.XXXXXX")"
+          publication_line() {
+            local label="$1" outcome="$2" artifact_id="$3" artifact_url="$4"
+            if [[ "$outcome" == success && "$artifact_id" =~ ^[1-9][0-9]*$ &&
+                  "$GITHUB_SERVER_URL" =~ ^https://[A-Za-z0-9][A-Za-z0-9.-]*$ &&
+                  "$GITHUB_REPOSITORY" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ &&
+                  "$artifact_url" == "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/artifacts/${artifact_id}" ]]; then
+              printf -- '- %s publication: **uploaded** — [Download artifact](%s).\n' "$label" "$artifact_url"
+            else
+              case "$outcome" in
+                failure|cancelled) printf -- '- %s publication: **failed**. Inspect the upload step; this is a delivery failure, not a model defect.\n' "$label" ;;
+                skipped|'') printf -- '- %s publication: **skipped**. No upload is confirmed for this run.\n' "$label" ;;
+                *) printf -- '- %s publication: **unconfirmed**. No valid current-run artifact receipt was returned.\n' "$label" ;;
+              esac
+            fi
+          }
+          {
+            printf '\n## Diagnostic publication\n\nPublication is separate from validation; an upload failure does not change the validation decision.\n\n'
+            if [[ "$DIAGNOSTIC_OUTPUT_READY" == true ]]; then
+              publication_line 'Public summary' "$PUBLIC_UPLOAD_OUTCOME" "$PUBLIC_ARTIFACT_ID" "$PUBLIC_ARTIFACT_URL"
+            else
+              printf -- '- Public summary publication: **skipped** (fresh diagnostic output preparation did not succeed).\n'
+            fi
+            if [[ "$REPOSITORY_READY" == true && "$PRIVATE_REPOSITORY" == true ]]; then
+              printf -- '- Repository diagnostics generation: **generated** for this trusted private run.\n'
+              publication_line 'Repository diagnostics' "$REPOSITORY_UPLOAD_OUTCOME" "$REPOSITORY_ARTIFACT_ID" "$REPOSITORY_ARTIFACT_URL"
+              printf -- '- Repository diagnostics are for repository readers, not shareable support attachments.\n'
+            else
+              printf -- '- Repository diagnostics generation: **unconfirmed** or disabled; see the public report for eligibility.\n- Repository diagnostics publication: **skipped** (no fresh eligible private-run receipt).\n'
+            fi
+          } > "$RECEIPT"
+          printf 'receipt_path=%s\n' "$RECEIPT" >> "$GITHUB_OUTPUT"
+          SUMMARY="$(mktemp "${RUNNER_TEMP}/omniflow-summary-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.XXXXXX")"
+          # Run only the installed trusted Action package, never checkout code.
+          # The post-upload summary contains one authoritative delivery status.
+          if [[ "$DIAGNOSTIC_OUTPUT_READY" == true && -f "$OMNIFLOW_REPORT_DIR/public/report.json" ]] &&
+             python -I -m omniflow.github.report_publisher --summary --report-dir "$OMNIFLOW_REPORT_DIR" > "$SUMMARY"; then
+            cat "$SUMMARY" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "No fresh OmniFlow validation report could be displayed. Inspect the first failed preparation/setup/install/route/summary step; absence of a report is not a pass." >> "$GITHUB_STEP_SUMMARY"
+            cat "$RECEIPT" >> "$GITHUB_STEP_SUMMARY"
+          fi

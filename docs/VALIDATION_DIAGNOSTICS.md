@@ -100,7 +100,8 @@ Review and merge these changes on the trusted target branch; a PR-only workflow 
 
 1. Update both OmniFlow `uses:` entries to the same reviewed full commit SHA. Preserve existing model policy, secrets,
    environment bindings and custom branch triggers; no validation gate needs to be disabled.
-2. Include **Prepare fresh diagnostic output** before setup/install. It removes only the fixed generated public files
+2. Keep workflow `env.OMNIFLOW_REPORT_DIR` identical to trusted `reporting.output_dir` (default `.omniflow`).
+   Include **Prepare fresh diagnostic output** before setup/install. It removes only the fixed generated files
    after path checks. Keep its readiness guards on consumers so a failed bootstrap cannot publish old reports.
 3. Keep `id: omniflow` on the validation step and the example's `public_upload` and `repository_upload` IDs.
    The repository upload requires both the fresh `repository-diagnostics-ready` output and private-repository context;
@@ -108,12 +109,20 @@ Review and merge these changes on the trusted target branch; a PR-only workflow 
 4. Put **Show public diagnostic summary** after the uploads. Copy its environment bindings and receipt script together;
    they distinguish upload success, failure, skipping and missing confirmation. It accepts a download link only from
    a successful upload with the current repository/run URL and artifact ID.
-5. In the standard workflow, retain the `publication` step ID and the PR comment's `PUBLICATION_RECEIPT` binding.
-   Comments consume only the public report and current-run receipt, never repository report contents.
+5. In the standard workflow, retain the `publication` step ID and the installed
+   `python -I -m omniflow.github.report_publisher --report-dir "$OMNIFLOW_REPORT_DIR"` command.
+   Keep the current upload-outcome bindings. Comments consume only safe decision JSON and current-run upload
+   outputs, never checked-out receipt text or repository report contents.
    The environment-aware example remains read-only and publishes its receipt to the job summary, not a new PR comment.
 6. Run a fresh test and check **Diagnostic publication** in the job summary. Verify the downloaded report belongs to
-   that run and inspect both generation and publication states. If using custom `output_dir`, update every relevant
-   cleanup, upload and read path together.
+   that run and inspect both generation and publication states. Privacy-safe `public/report.json` is required
+   regardless of selected presentation formats; a missing or malformed decision record prevents publication.
+
+For optional dbt sync, dbt sync with state recording, held-PR revalidation and the unsupported AI-repair
+scaffold, copy the complete corresponding example. Each prepares outputs before installation and finalizes
+the actual operation before upload. Held revalidation also discards the installation-only skip report before
+running its real readiness check. A missing/failing final operation is not permission to upload an intermediate
+pass or an old report. AI repair remains unsupported; updated reporting does not qualify that feature.
 
 | Observed state | Meaning and next step |
 | --- | --- |

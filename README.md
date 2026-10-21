@@ -245,7 +245,7 @@ Choose either an **Organization API Key or Personal Access Token (PAT)**. The op
 | Organization API Key | Centrally managed governance across the registered models and content in an Omni instance. | Has Organization Admin permissions, including capabilities beyond validation. Protect it as an administrative credential. |
 | Personal Access Token (PAT) | Validation using a dedicated service user's assigned model and content access. | Inherits that user's permissions. A PAT from an admin user is also highly privileged. |
 
-Store the chosen credential in the GitHub Actions secret **`OMNI_API_KEY`** and pass it through the existing `omni-api-key` input. The secret name stays the same for both choices. OmniFlow sends the supplied credential as a bearer token; it does not currently detect its type, call `whoami`, or accept an `authentication`/`credential_type` configuration block. See [Omni API authentication](https://docs.omni.co/api/authentication) and [installation instructions for either choice](docs/INSTALLATION.md#step-6-choose-and-store-an-omni-credential).
+Store the chosen credential in the GitHub Actions secret **`OMNI_API_KEY`** and pass it through the existing `omni-api-key` input. The secret name stays the same for both choices. OmniFlow sends the supplied credential as a bearer token; no `authentication`/`credential_type` configuration block is needed or accepted. Personal-folder validation additionally uses `whoami` to verify the caller's user and membership IDs; shared-only validation does not require that preflight. See [Omni API authentication](https://docs.omni.co/api/authentication) and [installation instructions for either choice](docs/INSTALLATION.md#step-6-choose-and-store-an-omni-credential).
 
 Define a rotation schedule and revoke credentials after suspected exposure or relevant access changes. Omni's manually generated Org keys and PATs do not expire automatically. Use a dedicated credential for this integration and keep deployment credentials separate. Both standard and strict redaction settings use the same minimal public diagnostic schema. Separate repository-only diagnostics can include verified authored identifiers and source locations in eligible private repositories; set `reporting.diagnostics.mode: minimal` on the trusted base to disable that tier. Credential choice does not change these output boundaries. See [Diagnostic Privacy](docs/DIAGNOSTIC_PRIVACY.md).
 
@@ -411,7 +411,9 @@ The Content Validator validates content associated with the selected model serve
 
 ## Evidence And Privacy
 
-Each run writes root and minimal public summaries (diagnostic schema version 2):
+Each run writes root and minimal public summaries (diagnostic schema version 2).
+`public/report.json` is always generated as the machine decision record; the other
+presentation formats follow the selected `reporting.formats`:
 
 ```text
 .omniflow/
@@ -426,6 +428,13 @@ Each run writes root and minimal public summaries (diagnostic schema version 2):
   repository/           # eligible private validation runs; source metadata, not shareable
   restricted/<model_id>/
 ```
+
+Keep workflow `env.OMNIFLOW_REPORT_DIR` identical to trusted `reporting.output_dir`
+(default `.omniflow`). Both support a repository-relative directory with spaces.
+The complete workflow examples prepare fresh outputs, use that path throughout,
+and confirm uploads separately; changing only the Action pin does not install
+those workflow steps. Missing decision JSON never falls back to an older folder.
+See the [report-delivery upgrade checklist](docs/VALIDATION_DIAGNOSTICS.md#upgrade-report-delivery-in-an-existing-workflow).
 
 Public outputs are constructed from fixed diagnostic codes, statuses, bounded counts, booleans, anonymous context references and a random run reference. They do not copy customer messages, names, resource IDs, paths, URLs, Git identities, raw responses or runner details. Both legacy `standard` and `strict` settings use this minimal public schema; neither re-enables detailed public output. Automation consuming the old identity-rich schema must migrate. Deployment readiness uses private, in-memory evidence instead of public artifacts. See [Diagnostic Privacy](docs/DIAGNOSTIC_PRIVACY.md).
 

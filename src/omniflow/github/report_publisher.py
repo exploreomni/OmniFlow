@@ -20,6 +20,7 @@ from ..diagnostics import safe_exception_message
 from ..exceptions import OmniFlowError
 from ..json_evidence import reject_duplicate_keys
 from ..reporting.notification import notification_decision, render_notification
+from ..reporting.output_paths import report_directory
 from .revalidation import GitHubRepository
 
 MARKER = "<!-- omniflow-report -->"
@@ -56,7 +57,13 @@ def _read_json(path: Path, *, bound: int = 16 * 1024 * 1024) -> dict:
         data = stream.read(bound + 1)
     if len(data) > bound:
         raise PublicationUnavailable("Publication input exceeds its safe file bound.")
-    value = json.loads(data, object_pairs_hook=reject_duplicate_keys)
+    try:
+        value = json.loads(data, object_pairs_hook=reject_duplicate_keys)
+    except (ValueError, UnicodeError) as exc:
+        raise PublicationUnavailable(
+            "OF-REPORT-MALFORMED: Required JSON evidence is malformed or ambiguous. "
+            "Inspect report generation; no older report will be substituted."
+        ) from exc
     if not isinstance(value, dict):
         raise PublicationUnavailable("Publication input is not an object.")
     return value
@@ -269,12 +276,14 @@ def publish(api, report: dict, event: dict, env: dict[str, str]) -> dict:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--summary", action="store_true", help="Render post-upload summary without remote writes")
+    parser.add_argument("--report-dir", default=os.getenv("OMNIFLOW_REPORT_DIR", ".omniflow"),
+                        help="Explicit trusted output directory; never searches or falls back to another directory")
     args = parser.parse_args()
     env = dict(os.environ)
     try:
         if env.get("DIAGNOSTIC_OUTPUT_READY") != "true":
             raise PublicationUnavailable("No fresh report is authorized for publication.")
-        report = _read_json(Path(".omniflow/public/report.json"))
+        report = _read_json(report_directory(args.report_dir) / "public" / "report.json")
         event = _read_json(Path(env["GITHUB_EVENT_PATH"]))
         if args.summary:
             head = event.get("pull_request", {}).get("head", {}).get("sha", env.get("GITHUB_SHA", ""))
@@ -294,6 +303,18 @@ def main() -> int:
         return 1
     except OmniFlowError as exc:
         print("::error::OmniFlow notification publication failed. " + safe_exception_message(exc))
+        return 1
+    except FileNotFoundError:
+        print("::error::OF-REPORT-MISSING: Required current decision JSON was not found in the selected report directory. "
+              "Match OMNIFLOW_REPORT_DIR to trusted reporting.output_dir and inspect the operation step. No fallback was used.")
+        return 1
+    except PermissionError:
+        print("::error::OF-REPORT-ACCESS: Current decision evidence could not be read. Check runner output permissions; "
+              "do not substitute an older report.")
+        return 1
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        print("::error::OF-REPORT-MALFORMED: Current decision evidence is not valid JSON. "
+              "Inspect report generation and rerun; do not edit a result into a pass.")
         return 1
     except (OSError, ValueError, KeyError, TypeError, AttributeError):
         print("::error::OmniFlow notification publication could not be verified. Check this run's publication step; "

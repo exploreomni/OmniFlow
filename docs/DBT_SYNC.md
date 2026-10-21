@@ -98,7 +98,7 @@ Synchronization across multiple connections is not transactional. If one connect
 
 Exit behavior:
 
-- `0`: refresh and enabled post-sync checks passed.
+- `0`: no blocking operation or validation failure. Inspect `validation_complete` and `policy_decision`: incomplete nonblocking checks or disabled post-sync validation are advisory, not a completed validation pass.
 - `1`: refresh completed, but post-sync validation failed.
 - `2`: sync is disabled or trusted model/branch metadata is incomplete.
 - `3`: the sync token is unauthorized.
@@ -108,7 +108,15 @@ Exit behavior:
 
 ## Single-Branch Monorepos
 
-Repositories that keep dbt and Omni model YAML on the same protected branch can pair this stage with the [breaking change hold](BREAKING_CHANGE_HOLD.md). The hold blocks unsafe promotion when deployment evidence is pending or unavailable. [omniflow-dbt-sync-with-release.yml](../.github/workflow-examples/omniflow-dbt-sync-with-release.yml) records and rereads the synchronized commit after a successful refresh; missing credentials or failed persistence fail the workflow. It never releases a PR itself. Dispatch [omniflow-revalidate-held.yml](../.github/workflow-examples/omniflow-revalidate-held.yml) for fresh validation of the current PR head before a human merges. Adopt the required `OmniFlow deployment readiness` check and up-to-date branch protection explicitly.
+Repositories that keep dbt and Omni model YAML on the same protected branch can pair this stage with the [breaking change hold](BREAKING_CHANGE_HOLD.md). The hold blocks unsafe promotion when deployment evidence is pending or unavailable. [omniflow-dbt-sync-with-release.yml](../.github/workflow-examples/omniflow-dbt-sync-with-release.yml) records and rereads the synchronized commit only after the reviewed deployment and confirmed shared-scope refresh; missing credentials or failed persistence fail the workflow. It never releases a PR itself. Dispatch [omniflow-revalidate-held.yml](../.github/workflow-examples/omniflow-revalidate-held.yml) for fresh validation of the current PR head before a human merges. Adopt the required `OmniFlow deployment readiness` check and up-to-date branch protection explicitly.
+
+Synchronization and readiness are separate facts. The Action exposes fixed boolean outputs:
+
+- `dbt-sync-complete`: every requested connection refresh finished successfully.
+- `dbt-sync-state-eligible`: every refresh completed against shared scope, not an unpromoted branch. Only this result, together with a successful reviewed dbt deployment, can authorize recording `OMNIFLOW_LAST_SYNC_SHA`.
+- `post-sync-validation-complete`: enabled post-sync checks returned complete evidence for every model. Completeness alone does not establish a pass; inspect the decision and findings too.
+
+A refresh can finish while an optional check is unavailable. Its nested status is `incomplete`, not `passed`; the zero-exit aggregate is `advisory`. Disabled post-sync validation is `not_run`. Failed or unknown refresh state cannot advance synchronized state. Recording a verified synchronized commit does not waive incomplete validation, clear a hold label or authorize a merge. Branch-based refresh cannot establish shared-model synchronization without a separately reviewed promotion.
 
 For destructive changes, deploy an additive expansion first while retaining old warehouse names, synchronize, migrate Omni and other consumers, validate adoption, then remove obsolete names. Deploying a destructive dbt rename before updating consumers is not a safe sequence.
 

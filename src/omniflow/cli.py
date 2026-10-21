@@ -66,6 +66,7 @@ from .repair.orchestrator import run_ai_repair, validate_ai_repair_policy
 from .repair.reporting import write_repair_artifacts
 from .reporting.issue_policy import is_blocking
 from .reporting.json_report import write_json_report
+from .reporting.output_paths import require_matching_report_directory
 from .repository_diagnostics import (
     REPORT_NAMES as REPOSITORY_REPORT_NAMES,
 )
@@ -82,7 +83,7 @@ from .security import redact, validate_path_segment, validate_repo_output_path
 from .timestamps import utc_now_iso
 from .validation_run import SYNC_REASONS, mark_health_only, may_advise, verify_with_retry
 from .validation_scope import ValidationEvidence, plan_content_scope
-from .validators.ai_eval import run_ai_eval_validation
+from .validators.ai_eval import prepare_ai_eval_prompt_sets, run_ai_eval_validation
 from .validators.content import ContentEvidenceError, run_content_validation
 from .validators.model import run_model_validation
 from .validators.query_validation import run_query_validation
@@ -300,6 +301,14 @@ def _execute_run(args, *, config, output_dir: Path, changed_files: list[str] | N
     all_reports = []
     all_issues: list[dict[str, Any]] = []
     exit_code = 0
+    # dbt impact is independent of Omni context routing: a harmless model edit
+    # cannot hide a destructive warehouse change in the same immutable PR.
+    impact = _collect_dbt_impact_check(config=config, output_dir=output_dir, changed_files=changed_files)
+    if impact is not None:
+        impact_report, impact_exit = impact
+        all_reports.append(impact_report)
+        all_issues.extend(impact_report["issues"])
+        exit_code = max(exit_code, impact_exit)
     classification = classify_pr_change(contexts) if config.content_validation.classify_comment_only else None
     if changed_files is None:
         changed_files = get_changed_files() if config.breaking_change_hold.enabled else []
@@ -554,13 +563,8 @@ def _write_skipped_artifacts(
     )
 
 
-def _run_dbt_impact_check(*, config, output_dir: Path, changed_files: list[str] | None = None) -> int | None:
-    """Analyze a non-Omni pull request for dbt changes that orphan Omni references.
-
-    Returns an exit code when the check ran, or None when it was not applicable so
-    the caller falls through to the normal skip path. This runs without an Omni
-    credential because it only compares committed dbt and Omni files.
-    """
+def _collect_dbt_impact_check(*, config, output_dir: Path, changed_files: list[str] | None = None):
+    """Run static dbt evidence once, independently of credentialed validators."""
     if not config.dbt_impact.enabled:
         return None
     dbt_paths = config.breaking_change_hold.dbt_paths
@@ -585,6 +589,23 @@ def _run_dbt_impact_check(*, config, output_dir: Path, changed_files: list[str] 
         if any(issue.get("severity") == "error" for issue in issues)
         else ExitCodes.SUCCESS
     )
+    report.update(
+        exit_code=exit_code,
+        policy_decision="fail" if exit_code else "pass" if report["coverage_complete"] else "advisory",
+        check_states=[{"validator": "dbt_impact", "status": report["execution_status"], "exit_code": exit_code}],
+    )
+    for path in (output_dir / "dbt-impact.json", public_dir(output_dir) / "dbt-impact.json"):
+        write_public_json(path, report, redaction_level=config.security.redaction_level)
+    return report, exit_code
+
+
+def _run_dbt_impact_check(*, config, output_dir: Path, changed_files: list[str] | None = None) -> int | None:
+    """Publish a credential-free standalone dbt result when no Omni contexts run."""
+    result = _collect_dbt_impact_check(config=config, output_dir=output_dir, changed_files=changed_files)
+    if result is None:
+        return None
+    report, exit_code = result
+    issues = report["issues"]
     aggregate = {
         "tool": "omniflow",
         "tool_version": __version__,
@@ -601,7 +622,9 @@ def _run_dbt_impact_check(*, config, output_dir: Path, changed_files: list[str] 
         "issues": issues,
         "model_reports": [report],
         "raw_query_results_stored": False,
-        "policy_decision": "fail" if exit_code else "pass",
+        "validation_complete": report["coverage_complete"],
+        "decision_status": "complete" if report["coverage_complete"] else "incomplete",
+        "policy_decision": report["policy_decision"],
         "exit_code": exit_code,
         "exit_code_reason": _exit_code_reason(exit_code),
     }
@@ -609,14 +632,6 @@ def _run_dbt_impact_check(*, config, output_dir: Path, changed_files: list[str] 
         aggregate,
         output_dir=output_dir,
         formats=config.reporting.formats,
-        redaction_level=config.security.redaction_level,
-    )
-    write_public_json(
-        output_dir / "dbt-impact.json", report, redaction_level=config.security.redaction_level
-    )
-    write_public_json(
-        public_dir(output_dir) / "dbt-impact.json",
-        report,
         redaction_level=config.security.redaction_level,
     )
     evidence = {
@@ -631,7 +646,8 @@ def _run_dbt_impact_check(*, config, output_dir: Path, changed_files: list[str] 
         "runner": _runner_metadata(),
         "models": [],
         "analysis_mode": report["analysis_mode"],
-        "validation_status": "failed" if exit_code else "passed",
+        "validation_status": "incomplete" if not report["coverage_complete"] else "failed" if exit_code else "passed",
+        "validation_complete": report["coverage_complete"],
         "policy_decision": aggregate["policy_decision"],
         "raw_query_results_stored": False,
         "exit_code": exit_code,
@@ -673,6 +689,8 @@ def _flow_model_paths() -> list[str]:
     paths: list[str] = []
     for model in flow.get("models", []):
         if not isinstance(model, dict):
+            continue
+        if flow.get("version") == 2 and model.get("base_branch") != (os.getenv("GITHUB_BASE_REF") or current_branch()):
             continue
         candidate = model.get("model_path")
         if isinstance(candidate, str) and candidate.strip():
@@ -773,6 +791,14 @@ def _run_context(
                     for issue in check.get("issues", []):
                         issue.pop("state", None)
                         issue.update(health_only=True, blocking=False)
+                elif check.get("validator") == "ai_eval":
+                    mark_health_only(check)
+                    check.update(execution_status="partial", regressed_count=0, prompt_set_summaries=[])
+                    progress.states["ai_eval"]["status"] = "partial"
+                    for issue in check.get("issues", []):
+                        if issue.get("reason_code") == "accuracy_regression":
+                            issue.update(reason="ai_eval_source_unverified", reason_code="ai_eval_source_unverified",
+                                         message="AI observations cannot be attributed to this PR because source verification failed.")
         exc.omniflow_progress = progress
         raise
 
@@ -797,7 +823,17 @@ def _run_context_steps(
     evidence = ValidationEvidence()
     exit_code = 0
     query_comparison = not strict_health and is_pull_request_event() and config.query_validation.enabled
-    verify_provenance = bool(context.environment) or regression_pr or query_comparison
+    # Preflight without spend so an AI-only PR cannot bypass source proof, but
+    # a prompt set belonging to another model does not create a needless gate.
+    prepared_ai_sets = None
+    ai_comparison = False
+    if (not strict_health and is_pull_request_event() and branch_id
+            and config.ai_eval.enabled and config.ai_eval.prompt_sets):
+        progress.begin("ai_eval")
+        prepared_ai_sets = prepare_ai_eval_prompt_sets(client, context.model_id, config.ai_eval.prompt_sets)
+        ai_comparison = bool(prepared_ai_sets)
+        progress.states["ai_eval"]["status"] = "not_run"
+    verify_provenance = bool(context.environment) or regression_pr or query_comparison or ai_comparison
     baseline_proof = None
     if verify_provenance:
         from .candidate import CandidateVerificationError
@@ -809,7 +845,7 @@ def _run_context_steps(
             # Inspect both sides before considering advisory handling. A sync
             # mismatch on one side must not conceal an exclusion conflict on
             # the other side.
-            for side in (("base", "head") if regression_pr or query_comparison else ("head",)):
+            for side in (("base", "head") if regression_pr or query_comparison or ai_comparison else ("head",)):
                 try:
                     proofs[side] = verify_with_retry(
                         client, context, revision_side=side, non_omni_rules=config.files.non_omni,
@@ -898,6 +934,7 @@ def _run_context_steps(
             scoring_grace_seconds=config.ai_eval.scoring_grace_seconds,
             max_samples=config.security.max_report_samples,
             record_runs=lambda journal: write_json_report(output_dir / "ai-eval-runs.json", journal),
+            prepared_prompt_sets=prepared_ai_sets,
         )
         # Full per-prompt detail (cost breakdown, conversation IDs, timing) carries
         # customer prompt/answer content and stays restricted; only the bounded
@@ -1565,7 +1602,11 @@ def cmd_dbt_sync(args: argparse.Namespace) -> int:
                     else "failed"
                     if validation_exit
                     else "passed"
+                    if validation_report and validation_report.get("validation_complete") is True
+                    and validation_report.get("policy_decision") == "pass"
+                    else "incomplete"
                 ),
+                "validation_complete": bool(validation_report and validation_report.get("validation_complete") is True),
                 "issues": context_issues,
                 "exit_code": context_exit,
                 "exit_code_reason": _exit_code_reason(context_exit),
@@ -1586,6 +1627,16 @@ def cmd_dbt_sync(args: argparse.Namespace) -> int:
             "refreshes_failed": sum(1 for report in sync_reports if report.get("status") != "completed"),
         }
     )
+    sync_complete = bool(sync_reports) and len(refresh_outcomes) == len(connection_branches) and all(
+        code == 0 and result.get("status") == "completed" for result, code in refresh_outcomes.values()
+    )
+    validation_complete = config.dbt_sync.post_sync_validation and len(model_reports) == len(contexts) and all(
+        item["validation_complete"] for item in model_reports
+    )
+    validation_passed = validation_complete and all(
+        item["post_sync_validation_status"] == "passed" for item in model_reports
+    )
+    decision = "fail" if exit_code else "pass" if validation_passed else "advisory"
     report = {
         "tool": "omniflow",
         "tool_version": __version__,
@@ -1604,7 +1655,9 @@ def cmd_dbt_sync(args: argparse.Namespace) -> int:
         "summary": summary,
         "issues": all_issues,
         "model_reports": model_reports,
-        "policy_decision": "fail" if exit_code else "pass",
+        "validation_complete": validation_complete,
+        "decision_status": "complete" if validation_complete else "incomplete",
+        "policy_decision": decision,
         "exit_code": exit_code,
         "exit_code_reason": _exit_code_reason(exit_code),
     }
@@ -1621,6 +1674,8 @@ def cmd_dbt_sync(args: argparse.Namespace) -> int:
         "generated_at": utc_now_iso(),
         "models": sync_reports,
         "raw_query_results_stored": False,
+        "validation_complete": validation_complete,
+        "decision_status": "complete" if validation_complete else "incomplete",
         "policy_decision": report["policy_decision"],
         "exit_code": exit_code,
     }
@@ -1643,8 +1698,10 @@ def cmd_dbt_sync(args: argparse.Namespace) -> int:
         "models": [_context_dict(context) for context in contexts],
         "refresh_mode": refresh_mode,
         "refresh_statuses": [report.get("status") for report in sync_reports],
-        "validation_status": "failed" if exit_code else "passed",
-        "policy_decision": "fail" if exit_code else "pass",
+        "validation_status": "failed" if exit_code else "passed" if validation_passed else "incomplete",
+        "validation_complete": validation_complete,
+        "decision_status": "complete" if validation_complete else "incomplete",
+        "policy_decision": decision,
         "raw_query_results_stored": False,
         "exit_code": exit_code,
         "exit_code_reason": _exit_code_reason(exit_code),
@@ -1662,6 +1719,17 @@ def cmd_dbt_sync(args: argparse.Namespace) -> int:
         redaction_level=config.security.redaction_level,
     )
     _emit_github_annotations(public_report.get("issues", []), limit=config.security.max_report_samples)
+    output_path = os.getenv("GITHUB_OUTPUT")
+    if output_path:
+        # Fixed booleans only. Branch refresh completion never establishes that
+        # metadata has been promoted to the shared model used by deployment holds.
+        with open(output_path, "a", encoding="utf-8") as output:
+            for name, value in {
+                "dbt-sync-complete": sync_complete,
+                "dbt-sync-state-eligible": sync_complete and all(item["branch_id"] is None for item in prepared_contexts),
+                "post-sync-validation-complete": validation_complete,
+            }.items():
+                output.write(f"{name}={'true' if value else 'false'}\n")
     print(
         "OmniFlow dbt sync complete: "
         f"models={len(contexts)} refreshed={summary['refreshes_completed']} exit_code={exit_code}"
@@ -2137,6 +2205,7 @@ def _emit_hold_output(issues: list[dict[str, Any]], *, settings) -> None:
 
 
 def _validate_run_output_layout(output_dir: Path) -> None:
+    require_matching_report_directory(str(output_dir))
     report_names = (
         "report.json",
         "report.md",
