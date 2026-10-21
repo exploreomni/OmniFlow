@@ -137,6 +137,12 @@ class ExactRevisionTests(unittest.TestCase):
 
 
 class CoverageTests(unittest.TestCase):
+    def setUp(self):
+        # These fixtures test local coverage, not the CI runner's enclosing PR.
+        context = mock.patch.dict(os.environ, {"GITHUB_EVENT_NAME": ""})
+        context.start()
+        self.addCleanup(context.stop)
+
     def test_partial_projections_never_report_certain_removals(self):
         for sql in ("select o.*, id from orders o", "select sum(total), id from orders",
                     "select distinct id from orders", "select 'a,b' as label, id from orders",

@@ -232,6 +232,13 @@ class RunAiEvalValidationTests(unittest.TestCase):
 class AiEvalCliTests(unittest.TestCase):
     """Exercise the actual model orchestration and every final public artifact."""
 
+    def setUp(self):
+        # These local client fixtures are not the CI runner's enclosing PR.
+        # Immutable PR source verification is covered by test_ai_source_proof.
+        context = mock.patch.dict(os.environ, {"GITHUB_EVENT_NAME": ""})
+        context.start()
+        self.addCleanup(context.stop)
+
     def run_cli(self, client, *, max_samples=20, fail_on_regression=True, contexts=None, prompt_sets=None, retain=True):
         config = _to_config({}, None)
         for check in (config.content_validation, config.model_validation, config.semantic_lint, config.contracts):

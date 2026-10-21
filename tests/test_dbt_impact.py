@@ -516,6 +516,12 @@ class OmniViewConventionTests(unittest.TestCase):
     `catalog`/`schema`/`table_name` form rather than a single `sql_table_name`.
     """
 
+    def setUp(self):
+        # Local YAML fixtures do not represent the CI runner's enclosing PR.
+        context = mock.patch.dict(os.environ, {"GITHUB_EVENT_NAME": ""})
+        context.start()
+        self.addCleanup(context.stop)
+
     DBT_INTEGRATION_VIEW = """description: Product dimension derived from transaction data.
 
 catalog: coffee_training
@@ -633,6 +639,12 @@ measures:
 
 class CrossSchemaCollisionTests(unittest.TestCase):
     """A bare model name can match same-named tables in different schemas."""
+
+    def setUp(self):
+        # Local YAML fixtures do not represent the CI runner's enclosing PR.
+        context = mock.patch.dict(os.environ, {"GITHUB_EVENT_NAME": ""})
+        context.start()
+        self.addCleanup(context.stop)
 
     def _view(self, schema):
         return f"""catalog: coffee_training
