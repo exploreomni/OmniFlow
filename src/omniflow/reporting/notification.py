@@ -86,8 +86,11 @@ restricts their shape, preventing Markdown or identity injection by other caller
     blockers = [item for item in issues if is_blocking(item)]
     nonblocking = [item for item in issues if not is_blocking(item) and item.get("active", True)]
     lint_count = sum(item.get("validator") == "semantic_lint" for item in nonblocking)
+    # "pass" is a public decision enum; the title is not a password.
     title = {
-        "fail": "Action required", "pass": "Validation passed", "skipped": "Skipped — not validated",
+        "fail": "Action required",
+        "pass": "Validation passed",  # nosec B105
+        "skipped": "Skipped — not validated",
         "advisory": "Advisory — impact unverified", "incomplete": "Validation incomplete",
     }[decision]
     head = head_sha if re.fullmatch(r"[0-9a-f]{40}", head_sha) else "unavailable"
