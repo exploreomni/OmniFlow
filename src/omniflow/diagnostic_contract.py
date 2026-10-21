@@ -232,18 +232,29 @@ for _reason in ("invalid_api_snapshot", "empty_git_snapshot", "duplicate_git_pat
          "the documented snapshot limit before rerunning; do not omit evidence to obtain a pass.")
 
 for _reason, _title, _action, _category in (
-    ("content_identity_invalid", "Personal-folder identity evidence is unavailable.",
+    ("content_identity_invalid", "Content-validation identity evidence is unavailable.",
      "Verify that whoami returns the credential scope, user UUID and organization membership UUID. "
-     "Do not substitute one identity for the other or treat missing metadata as empty content.", "incomplete_evidence"),
+     "Keep omni.user_id in the documented user-ID namespace; OmniFlow resolves the API membership. "
+     "Do not guess an identifier or treat missing metadata as empty content.", "incomplete_evidence"),
     ("content_personal_user_required", "Organization-key personal validation requires an explicit actor.",
-     "Set omni.user_id to the credential owner's user UUID, not membership UUID. Other personal-folder "
-     "actors cannot yet be resolved safely by this client.", "configuration"),
+     "Set omni.user_id to the credential owner's user UUID, not membership UUID. OmniFlow verifies the pair "
+     "and sends the membership to Content Validator. Other actors cannot yet be resolved safely.", "configuration"),
+    ("content_actor_unresolved", "The selected content actor has no verified membership mapping.",
+     "Use that user's PAT with omni.user_id, OMNI_USER_ID and --user-id unset, or explicitly select "
+     "the organization credential owner's user UUID. OmniFlow will not substitute another actor or guess a membership.",
+     "configuration"),
     ("content_personal_actor_unresolved", "The selected personal-folder actor has no verified membership mapping.",
-     "Use that user's PAT with user_id unset, or explicitly select the organization credential owner. "
+     "Use that user's PAT with omni.user_id, OMNI_USER_ID and --user-id unset, or explicitly select "
+     "the organization credential owner's user UUID. "
      "OmniFlow will not silently substitute the credential owner's personal content.", "configuration"),
-    ("content_pat_impersonation_unsupported", "A user-scoped credential cannot impersonate another user.",
-     "Unset omni.user_id, OMNI_USER_ID and --user-id with a PAT. The caller's verified membership "
-     "is used for personal-folder metadata.", "configuration"),
+    ("content_pat_impersonation_unsupported", "A PAT must not supply an acting-user parameter.",
+     "Unset omni.user_id, OMNI_USER_ID and --user-id, even when they identify the PAT owner. "
+     "Content Validator uses the authenticated caller; personal-folder metadata uses that caller's verified membership.",
+     "configuration"),
+    ("validation_identity_changed", "The validation identity changed during this run.",
+     "Keep the Omni instance, credential and acting-user scope fixed for the entire comparison. "
+     "Start a fresh validation run after correcting the configuration; do not combine cached base evidence "
+     "from one identity with candidate evidence from another.", "incomplete_evidence"),
 ):
     _add(_reason, "OF-" + _reason.upper().replace("_", "-"), _title, _action, _category)
 

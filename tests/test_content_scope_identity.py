@@ -78,7 +78,7 @@ def test_known_labeled_personal_object_is_included_and_each_scope_paginates_inde
 
 
 @pytest.mark.parametrize("scope,user_id", [("organization", USER), ("user", None)])
-def test_validator_keeps_user_uuid_and_catalog_uses_membership_with_one_identity_read(scope, user_id):
+def test_validator_and_catalog_use_membership_with_one_identity_read(scope, user_id):
     client, session = client_for(identity(scope), {"content": []}, {"content": []}, page(), page())
     for branch in (None, "feature"):
         client.validate_content("model", branch_id=branch, user_id=user_id, include_personal_folders=True)
@@ -86,9 +86,86 @@ def test_validator_keeps_user_uuid_and_catalog_uses_membership_with_one_identity
     assert sum(url.endswith("/whoami") for _, url, _ in session.calls) == 1
     for _, _, call in session.calls[1:3]:
         assert call["params"]["include_personal_folders"] == "true"
-        assert call["params"].get("userId") == (USER if scope == "organization" else None)
-        assert MEMBER not in call["params"].values()
+        assert call["params"].get("userId") == (MEMBER if scope == "organization" else None)
+        assert USER not in call["params"].values()
     assert session.calls[-1][2]["params"]["creatorId"] == MEMBER
+
+
+def test_shared_explicit_actor_and_downstream_search_use_verified_membership():
+    client, session = client_for(identity(), {"content": []}, {"content": []})
+    client.validate_content("model", user_id=USER, force_full_validation=True)
+    client.search_content_references("model", branch_id="feature", user_id=USER, find="orders", find_type="VIEW")
+    assert len(session.calls) == 3
+    assert session.calls[1][2]["params"] == {"userId": MEMBER, "force_full_validation": "true"}
+    assert session.calls[2][2]["params"] == {
+        "userId": MEMBER, "branch_id": "feature", "find": "orders", "find_type": "VIEW",
+    }
+
+
+def test_default_shared_validator_does_not_add_actor_or_identity_request():
+    client, session = client_for({"content": []})
+    client.validate_content("model")
+    assert len(session.calls) == 1
+    assert session.calls[0][1].endswith("/content-validator")
+    assert session.calls[0][2]["params"] == {}
+
+
+@pytest.mark.parametrize("scope,user_id,reason", [
+    ("organization", OTHER_USER, "content_actor_unresolved"),
+    ("organization", MEMBER, "content_actor_unresolved"),
+    ("organization", "not-a-uuid", "content_actor_unresolved"),
+    ("user", USER, "content_pat_impersonation_unsupported"),
+])
+def test_shared_actor_must_also_be_verified(scope, user_id, reason):
+    client, session = client_for(identity(scope))
+    with pytest.raises(ConfigError) as caught:
+        client.validate_content("model", user_id=user_id)
+    assert caught.value.reason_code == reason
+    assert len(session.calls) == 1
+
+
+def test_identity_history_context_is_opaque_and_bound_to_credential_and_scope():
+    client, session = client_for(identity(), identity())
+    shared = client.content_identity_context(user_id=USER)
+    assert shared == client.content_identity_context(user_id=USER)
+    assert shared != client.content_identity_context(user_id=USER, include_personal_folders=True)
+    assert shared["identity_contract"] == "membership_v1"
+    assert len(shared["identity_fingerprint"]) == 64
+    assert not any(secret in json.dumps(shared) for secret in (USER, MEMBER, "fixture-token", PRIVATE))
+    session.headers["Authorization"] = "Bearer replacement-fixture"
+    assert shared != client.content_identity_context(user_id=USER)
+    assert len(session.calls) == 2
+
+
+def test_default_shared_history_context_does_not_lookup_identity():
+    client, session = client_for()
+    client.content_identity_context()
+    assert session.calls == []
+
+
+def test_identity_change_during_lookup_is_not_cached():
+    client, session = client_for(identity())
+    request = session.request
+
+    def changing_request(*args, **kwargs):
+        response = request(*args, **kwargs)
+        session.headers["Authorization"] = "Bearer replacement-fixture"
+        return response
+
+    session.request = changing_request
+    with pytest.raises(OmniAPIError) as caught:
+        client.validate_content("model", user_id=USER)
+    assert caught.value.reason_code == "validation_identity_changed"
+    assert client._content_identity_cache is None
+
+
+def test_validator_404_remains_transport_failure_not_assumed_identity_error():
+    client, _ = client_for(identity(), Response({}, status=404))
+    with pytest.raises(OmniAPIError) as caught:
+        client.validate_content("model", user_id=USER)
+    assert caught.value.reason_code == "omni_http_error"
+    assert caught.value.diagnostic_context["http_status"] == 404
+    assert caught.value.diagnostic_context["api_operation"] == "content_validation"
 
 
 @pytest.mark.parametrize("method", ["validator", "catalog"])

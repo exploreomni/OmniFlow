@@ -30,6 +30,8 @@ def validate(tmp_path, current, base=None, **overrides):
         validate_content=lambda *args, branch_id=None, **kwargs: current if branch_id or base is None else base,
         # These fixtures represent published documents, not unknown draft IDs.
         list_content=lambda **kwargs: [{"identifier": "document-1"}, {"identifier": "other-document"}],
+        validation_evidence_binding=lambda: ("https://omni.example", "a" * 64),
+        content_identity_context=lambda **kwargs: {"identity_contract": "membership_v1", "identity_fingerprint": "b" * 64},
     )
     kwargs = {
         "client": client, "model_id": "model", "branch_id": "branch", "user_id": None,
@@ -107,6 +109,7 @@ def history(current):
         "schema_version": HISTORY_SCHEMA_VERSION, "model_id": "model", "branch_id": None,
         "user_id": "user-1", "include_personal_folders": False, "labels": [],
         "requested_validation_depth": "api_default",
+        "identity_contract": "membership_v1", "identity_fingerprint": "b" * 64,
         "issues": normalize_issues(extract_issues(current)),
     }
 
@@ -178,7 +181,11 @@ def test_history_labels_are_order_independent_and_current_privacy_applies(tmp_pa
     previous = history(current)
     previous["labels"] = ["B", "A"]
     (tmp_path / "history.json").write_text(json.dumps(previous))
-    client = SimpleNamespace(validate_content=lambda *args, **kwargs: {"content": []}, list_content=lambda **kwargs: [])
+    client = SimpleNamespace(
+        validate_content=lambda *args, **kwargs: {"content": []}, list_content=lambda **kwargs: [],
+        validation_evidence_binding=lambda: ("https://omni.example", "a" * 64),
+        content_identity_context=lambda **kwargs: {"identity_contract": "membership_v1", "identity_fingerprint": "b" * 64},
+    )
     report, code = validate(
         tmp_path, {"content": []}, client=client, branch_id=None, user_id="user-1",
         labels=["A", "B"], redact_document_names=True,

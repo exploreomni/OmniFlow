@@ -259,5 +259,5 @@ def test_old_physical_document_fingerprint_history_cannot_suppress_findings(tmp_
     assert report["issues"][0]["id"] == fingerprint
     assert "filter_name" not in report["issues"][0]["raw"]
     saved = json.loads(history_path.read_text())
-    assert saved["schema_version"] == HISTORY_SCHEMA_VERSION == 3
+    assert saved["schema_version"] == HISTORY_SCHEMA_VERSION == 4
     assert saved["issues"][0]["id"] == fingerprint

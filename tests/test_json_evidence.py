@@ -51,7 +51,7 @@ def test_full_depth_is_explicit_and_does_not_change_visibility(full):
     assert session.request.call_args_list[0].args[1].endswith("/api/v1/whoami")
     params = session.request.call_args.kwargs["params"]
     assert params["branch_id"] == "branch"
-    assert params["userId"] == user_id and params["userId"] != membership_id
+    assert params["userId"] == membership_id and params["userId"] != user_id
     assert params["include_personal_folders"] == "true"
     assert params.get("force_full_validation") == ("true" if full else None)
 

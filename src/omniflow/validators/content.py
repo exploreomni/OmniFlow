@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections import Counter, defaultdict, deque
+from copy import deepcopy
+from inspect import getattr_static
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -20,7 +23,7 @@ from .content_identity import (
     resolve_documents,
 )
 
-HISTORY_SCHEMA_VERSION = 3
+HISTORY_SCHEMA_VERSION = 4
 QUERY_IDENTITY_KEYS = ("query_presentation_id", "query_id_map_key", "query_id")
 ISSUE_ENVELOPE_KEYS = ("content", "issues", "validation_issues", "errors", "documents", "items", "results")
 NESTED_ERROR_KEYS = frozenset({"issues", "validation_issues", "errors"})
@@ -517,15 +520,15 @@ def compare_history(
         return [], "invalidated_legacy"
     if type(payload["schema_version"]) is not int:
         raise OmniAPIError("Content validation history has an invalid schema version", reason_code="invalid_content_history")
-    if payload["schema_version"] == 2:
-        # Version 2 predates depth selection and used the API default. Read it
-        # only in that scope; new version-3 history cannot be reused by old code
-        # that has no depth check. Do not modify the caller's history object.
-        if payload.get("requested_validation_depth", "api_default") != "api_default":
-            return [], "invalidated_version"
-        payload = {**payload, "requested_validation_depth": "api_default"}
-    elif payload["schema_version"] != HISTORY_SCHEMA_VERSION:
+    if payload["schema_version"] != HISTORY_SCHEMA_VERSION:
+        # Older histories do not bind the origin, credential and acting identity.
+        # Neither a schema upgrade nor a clean issue list can prove that scope.
         return [], "invalidated_version"
+    for identity_context in (payload, context):
+        if (identity_context.get("identity_contract") != "membership_v1"
+                or not isinstance(identity_context.get("identity_fingerprint"), str)
+                or re.fullmatch(r"[0-9a-f]{64}", identity_context["identity_fingerprint"]) is None):
+            return [], "invalidated_identity"
     if any(key not in payload for key in context):
         raise OmniAPIError("Content validation history is missing comparison context", reason_code="invalid_content_history")
     if (
@@ -661,6 +664,24 @@ def _merge_targeted_payloads(payloads: list[Any]) -> dict:
     return merged
 
 
+def _content_identity_context(
+    client: Any, *, user_id: str | None, include_personal_folders: bool,
+) -> dict[str, Any]:
+    # Older adapters and lightweight test clients can still perform a live
+    # comparison, but cannot manufacture a reusable identity-bound history.
+    if (getattr_static(client, "content_identity_context", None) is None
+            or getattr_static(client, "validation_evidence_binding", None) is None):
+        return {"identity_contract": "membership_v1", "identity_fingerprint": None}
+    reader = client.content_identity_context
+    value = reader(user_id=user_id, include_personal_folders=include_personal_folders) if callable(reader) else None
+    if (not isinstance(value, dict) or value.get("identity_contract") != "membership_v1"
+            or not isinstance(value.get("identity_fingerprint"), str)
+            or re.fullmatch(r"[0-9a-f]{64}", value["identity_fingerprint"]) is None):
+        raise OmniAPIError("Content validation identity could not be verified for this run",
+                           reason_code="validation_identity_changed")
+    return deepcopy(value)
+
+
 def run_content_validation(
     *,
     client: OmniClient,
@@ -683,6 +704,38 @@ def run_content_validation(
     comparison_mode = "new_only" if fail_on_new_only else "all_issues"
     requested_depth = "full" if force_full_validation else "api_default"
     snapshots = evidence if evidence is not None else ValidationEvidence()
+    initial_labels = tuple(sorted(set(labels)))
+    initial_identity: dict[str, Any] | None = None
+
+    def check_identity(scope=branch_id):
+        nonlocal initial_identity
+        try:
+            snapshots.assert_client_binding(client)
+            current = _content_identity_context(
+                client, user_id=user_id, include_personal_folders=include_personal_folders,
+            )
+            snapshots.assert_client_binding(client)
+            if initial_identity is None:
+                initial_identity = current
+            if current != initial_identity or tuple(sorted(set(labels))) != initial_labels:
+                raise OmniAPIError("Content validation identity or scope changed during this run; rerun validation",
+                                   reason_code="validation_identity_changed")
+        except OmniFlowError as exc:
+            _attach_content_scope(
+                exc, validation_scope="branch" if scope else "base", comparison_mode=comparison_mode,
+                requested_validation_depth=requested_depth,
+            )
+            raise
+
+    check_identity()
+
+    def read_catalog(**params):
+        check_identity()
+        try:
+            return client.list_content(**params)
+        finally:
+            check_identity()
+
     plan = scope_plan if scope_plan is not None else ContentScopePlan()
     if plan.mode == "targeted" and not (branch_id and fail_on_new_only):
         plan = ContentScopePlan(reason="strict_health_scope")
@@ -696,6 +749,7 @@ def run_content_validation(
         plan = ContentScopePlan(reason="semantic_coverage_unverified")
 
     def read_scope(scope, *, refresh=False):
+        check_identity(scope)
         payloads = []
         for selector in plan.selectors if plan.mode == "targeted" else (None,):
             value = _fetch_validator_payload(
@@ -703,6 +757,7 @@ def run_content_validation(
                 include_personal_folders=include_personal_folders, comparison_mode=comparison_mode,
                 force_full_validation=force_full_validation, evidence=snapshots, refresh=refresh, selector=selector,
             )
+            check_identity(scope)
             payloads.append(_prepare_validator_payload(
                 value, [], {}, validation_scope="branch" if scope else "base", comparison_mode=comparison_mode,
                 requested_validation_depth=requested_depth,
@@ -729,7 +784,7 @@ def run_content_validation(
         # partially returned targeted documents into clean/resolved evidence.
         baseline_payload = read_scope(None, refresh=True) if baseline_needed else None
         payload = read_scope(branch_id, refresh=True)
-    records = client.list_content(
+    records = read_catalog(
         labels=labels,
         branch_id=branch_id,
         include_personal_folders=include_personal_folders,
@@ -752,14 +807,18 @@ def run_content_validation(
                 # Label-selected metadata alone cannot identify an unselected
                 # draft or prove that a previously healthy/new document is new.
                 if labels:
-                    identity_records = client.list_content(
+                    identity_records = read_catalog(
                         labels=[], branch_id=branch_id, include_personal_folders=include_personal_folders,
                         user_id=user_id,
                     )
-                current, base, proof = resolve_documents(
-                    client=client, branch_id=branch_id, current=current_docs, baseline=base_docs,
-                    records=identity_records,
-                )
+                check_identity()
+                try:
+                    current, base, proof = resolve_documents(
+                        client=client, branch_id=branch_id, current=current_docs, baseline=base_docs,
+                        records=identity_records,
+                    )
+                finally:
+                    check_identity()
                 if proof.mappings:
                     # Bracket the actual validator evidence with mapping/version
                     # reads. A changed draft must never reuse stale error waivers.
@@ -767,9 +826,12 @@ def run_content_validation(
                         after = read_scope(scope, refresh=True)
                         if evidence_signature(before) != evidence_signature(content_documents(after)):
                             raise DocumentIdentityError("document_identity_changed")
-                    proof.recheck()
+                    try:
+                        proof.recheck()
+                    finally:
+                        check_identity()
                     if labels:
-                        after_records = client.list_content(
+                        after_records = read_catalog(
                             labels=labels, branch_id=branch_id, include_personal_folders=include_personal_folders,
                             user_id=user_id,
                         )
@@ -806,6 +868,8 @@ def run_content_validation(
         "model_id": model_id, "branch_id": branch_id, "user_id": user_id,
         "include_personal_folders": include_personal_folders, "labels": sorted(set(labels)),
         "requested_validation_depth": requested_depth,
+        "identity_contract": initial_identity["identity_contract"],
+        "identity_fingerprint": initial_identity["identity_fingerprint"],
     }
     history_status = "not_used_live_base"
     if branch_id and fail_on_new_only:
@@ -903,9 +967,11 @@ def run_content_validation(
             "exhaustive coverage. Validation complete means available evidence was processed."
         ),
     }
+    check_identity()
     write_json(report_out, redact(report))
     if plan.mode != "targeted":
         # A partial model scope must never become a reusable whole-model history.
+        check_identity()
         write_json(
             history_out,
             {

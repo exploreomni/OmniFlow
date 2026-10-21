@@ -92,7 +92,9 @@ class DocumentationTests(unittest.TestCase):
         config = (ROOT / "docs/CONFIGURATION.md").read_text(encoding="utf-8")
         for required_text in (
             "no `authentication` or `credential_type` configuration",
-            "Leave them unset with a PAT",
+            "Leave all three actor settings unset with a PAT",
+            "whoami.user.id",
+            "whoami.user.membershipId",
             "creatorId",
             "force_full_validation",
             "TESTING.md#credential-and-content-scope-acceptance",

@@ -192,6 +192,50 @@ def test_failed_requests_are_never_reused_as_empty_evidence():
     assert client.validate_model.call_count == 2
 
 
+@pytest.mark.parametrize("changed", [("https://other.example", "a" * 64), ("https://omni.example", "b" * 64)])
+def test_cached_evidence_rejects_changed_origin_or_credential_and_cannot_be_revived(changed):
+    original = ("https://omni.example", "a" * 64)
+    client = SimpleNamespace(binding=original, validate_model=Mock(return_value=[]))
+    client.validation_evidence_binding = lambda: client.binding
+    snapshots = ValidationEvidence()
+    assert snapshots.fetch(client, "validate_model", "model") == []
+    client.binding = changed
+    with pytest.raises(OmniAPIError) as caught:
+        snapshots.fetch(client, "validate_model", "model")
+    assert caught.value.reason_code == "validation_identity_changed"
+    client.binding = original
+    with pytest.raises(OmniAPIError):
+        snapshots.fetch(client, "validate_model", "model", refresh=True)
+    assert client.validate_model.call_count == 1
+    assert "a" * 64 not in str(caught.value) and "https://" not in str(caught.value)
+
+
+@pytest.mark.parametrize("request_fails", [False, True])
+def test_identity_change_during_fetch_never_caches_response(request_fails):
+    client = SimpleNamespace(binding=("https://omni.example", "a" * 64))
+    client.validation_evidence_binding = lambda: client.binding
+    def fetch(*args, **kwargs):
+        client.binding = ("https://omni.example", "b" * 64)
+        if request_fails:
+            raise OmniAPIError("Unrelated transport failure")
+        return []
+    client.validate_model = fetch
+    snapshots = ValidationEvidence()
+    with pytest.raises(OmniAPIError) as caught:
+        snapshots.fetch(client, "validate_model", "model")
+    assert caught.value.reason_code == "validation_identity_changed"
+    assert not snapshots._snapshots
+
+
+@pytest.mark.parametrize("binding", [None, ("https://omni.example", "not-a-digest"), ("", "a" * 64)])
+def test_present_but_invalid_binding_contract_is_not_treated_as_legacy_client(binding):
+    client = SimpleNamespace(validation_evidence_binding=lambda: binding, validate_model=Mock(return_value=[]))
+    with pytest.raises(OmniAPIError) as caught:
+        ValidationEvidence().fetch(client, "validate_model", "model")
+    assert caught.value.reason_code == "validation_identity_changed"
+    client.validate_model.assert_not_called()
+
+
 def test_model_and_content_reuse_same_run_evidence_without_sharing_between_runs(tmp_path):
     snapshots = ValidationEvidence()
     client = client_for()

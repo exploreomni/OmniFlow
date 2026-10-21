@@ -1,9 +1,13 @@
 """Explicit per-run evidence and conservative experimental content request scopes."""
 from __future__ import annotations
 
+import re
 from copy import deepcopy
 from dataclasses import dataclass, field
+from inspect import getattr_static
 from typing import Any
+
+from .exceptions import OmniAPIError
 
 MAX_TARGETED_SELECTORS = 8
 _FIELD_CHANGES = frozenset({
@@ -100,12 +104,52 @@ class ValidationEvidence:
     """
     _snapshots: dict[tuple, Any] = field(default_factory=dict, repr=False)
     _clients: dict[int, Any] = field(default_factory=dict, repr=False)
+    _bindings: dict[int, tuple[str, str] | None] = field(default_factory=dict, repr=False)
+    _invalidated_clients: set[int] = field(default_factory=set, repr=False)
+
+    def assert_client_binding(self, client: Any) -> None:
+        """Freeze transport identity, including before serving cached evidence.
+
+        Real clients expose a no-IO credential/origin binding. Older lightweight
+        test clients without the method remain compatible, but gaining or losing
+        the method mid-run is also a change. Dynamic mock attributes are not an
+        implementation of this contract. Never put binding values in diagnostics.
+        """
+        identity = id(client)
+        self._clients[identity] = client
+        if identity in self._invalidated_clients:
+            raise OmniAPIError("Validation identity changed during this run; start a fresh validation run",
+                               reason_code="validation_identity_changed")
+        binding = None
+        if getattr_static(client, "validation_evidence_binding", None) is not None:
+            reader = client.validation_evidence_binding
+            binding = reader() if callable(reader) else None
+            if (not isinstance(binding, tuple) or len(binding) != 2
+                    or not isinstance(binding[0], str) or not binding[0].strip()
+                    or not isinstance(binding[1], str) or re.fullmatch(r"[0-9a-f]{64}", binding[1]) is None):
+                self._invalidated_clients.add(identity)
+                raise OmniAPIError("Validation identity could not be verified for this run",
+                                   reason_code="validation_identity_changed")
+        if identity not in self._bindings:
+            self._bindings[identity] = binding
+        elif self._bindings[identity] != binding:
+            self._invalidated_clients.add(identity)
+            raise OmniAPIError("Validation identity changed during this run; start a fresh validation run",
+                               reason_code="validation_identity_changed")
 
     def fetch(self, client: Any, method: str, model_id: str, *, refresh: bool = False, **params: Any) -> Any:
         if method not in {"validate_model", "validate_content"}:
             raise ValueError("Unsupported validation evidence method")
-        self._clients[id(client)] = client  # Retain identity while snapshots exist.
+        self.assert_client_binding(client)
         key = (id(client), method, model_id, tuple(sorted(params.items())))
         if refresh or key not in self._snapshots:
-            self._snapshots[key] = deepcopy(getattr(client, method)(model_id, **params))
-        return deepcopy(self._snapshots[key])
+            try:
+                payload = deepcopy(getattr(client, method)(model_id, **params))
+            finally:
+                # Also reject identity drift during a failed request. Never
+                # persist a response acquired across a changed binding.
+                self.assert_client_binding(client)
+            self._snapshots[key] = payload
+        result = deepcopy(self._snapshots[key])
+        self.assert_client_binding(client)
+        return result

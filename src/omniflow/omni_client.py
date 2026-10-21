@@ -57,15 +57,14 @@ class OmniClient:
         # cache to the instance and actual credential, not the requested actor.
         self._content_identity_cache: tuple[tuple[str, str], tuple[str, str, str]] | None = None
 
-    def _personal_content_membership_id(self, user_id: str | None) -> str:
-        """Resolve only a provable acting-user -> organization-membership pair.
-
-        whoami describes the credential owner, not an impersonated user. The
-        documented user API has no membership mapping, so another actor must
-        remain unsupported rather than inheriting the credential owner's scope.
-        """
+    def validation_evidence_binding(self) -> tuple[str, str]:
+        """Private run-local binding; never expose credential hashes in reports."""
         authorization = self.session.headers.get("Authorization", "")
-        binding = (self.base_url, hashlib.sha256(str(authorization).encode()).hexdigest())
+        return (self.base_url, hashlib.sha256(str(authorization).encode()).hexdigest())
+
+    def _content_identity(self) -> tuple[str, str, str]:
+        """Read the credential owner's identity, not an arbitrary acting user."""
+        binding = self.validation_evidence_binding()
         cached = self._content_identity_cache
         if cached is not None and cached[0] == binding:
             key_scope, caller_id, membership_id = cached[1]
@@ -80,22 +79,43 @@ class OmniClient:
                     raise ValueError("unsupported credential scope")
             except (KeyError, TypeError, ValueError, AttributeError):
                 raise OmniAPIError(
-                    "Personal-folder scope could not be established from Omni identity metadata. "
+                    "Content validation scope could not be established from Omni identity metadata. "
                     "Verify the credential's user and organization membership before rerunning.",
                     reason_code="content_identity_invalid",
                     diagnostic_context={"service": "omni", "api_operation": "identity_lookup"},
                 ) from None
+            if self.validation_evidence_binding() != binding:
+                raise OmniAPIError(
+                    "The Omni instance or credential changed during identity lookup. "
+                    "Rerun validation with one unchanged identity and scope.",
+                    reason_code="validation_identity_changed",
+                    diagnostic_context={"service": "omni", "api_operation": "identity_lookup"},
+                )
             self._content_identity_cache = (binding, (key_scope, caller_id, membership_id))
+        return key_scope, caller_id, membership_id
+
+    def _resolve_content_actor(
+        self, user_id: str | None, *, include_personal_folders: bool,
+    ) -> tuple[str, str, str] | None:
+        """Map an explicitly selected owner to membership without guessing scope.
+
+        Configuration retains the global user ID. Content Validator's userId
+        and the restricted catalog's creatorId both require membership IDs.
+        Default shared-only validation needs no identity lookup or actor.
+        """
+        if user_id is None and not include_personal_folders:
+            return None
+        key_scope, caller_id, membership_id = self._content_identity()
         context = {"service": "omni", "api_operation": "identity_lookup"}
         if key_scope == "user":
             if user_id is not None:
                 raise ConfigError(
-                    "Personal-folder validation with a PAT must omit omni.user_id, OMNI_USER_ID, "
-                    "and --user-id. OmniFlow uses the authenticated user's verified membership.",
+                    "Content validation with a PAT must omit omni.user_id, OMNI_USER_ID, "
+                    "and --user-id. OmniFlow uses the authenticated user's scope without impersonation.",
                     reason_code="content_pat_impersonation_unsupported", diagnostic_context=context,
                 )
-            return membership_id
-        if not user_id:
+            return key_scope, caller_id, membership_id
+        if not user_id and include_personal_folders:
             raise ConfigError(
                 "Personal-folder validation with an organization key requires an explicit omni.user_id. "
                 "Use the credential owner's user ID, not their membership ID; other actors cannot yet "
@@ -108,12 +128,31 @@ class OmniClient:
             intended_user_id = None
         if intended_user_id != caller_id:
             raise ConfigError(
-                "The selected personal-folder actor cannot be mapped to a verified organization membership. "
+                "The selected content-validation actor cannot be mapped to a verified organization membership. "
                 "Use that user's PAT without user_id, or explicitly select the organization credential's "
-                "owner. OmniFlow will not substitute the credential owner's personal scope.",
-                reason_code="content_personal_actor_unresolved", diagnostic_context=context,
+                "owner using their global user ID. OmniFlow will not substitute another account's scope.",
+                reason_code=("content_personal_actor_unresolved" if include_personal_folders
+                             else "content_actor_unresolved"), diagnostic_context=context,
             )
-        return membership_id
+        return key_scope, caller_id, membership_id
+
+    def _personal_content_membership_id(self, user_id: str | None) -> str:
+        actor = self._resolve_content_actor(user_id, include_personal_folders=True)
+        if actor is None:
+            raise OmniAPIError("Personal-folder identity could not be verified.",
+                               reason_code="content_identity_invalid")
+        return actor[2]
+
+    def content_identity_context(
+        self, *, user_id: str | None = None, include_personal_folders: bool = False,
+    ) -> dict[str, str]:
+        """Opaque private-history scope binding, not permission/coverage proof."""
+        actor = self._resolve_content_actor(user_id, include_personal_folders=include_personal_folders)
+        encoded = json.dumps(
+            ["membership_v1", self.validation_evidence_binding(), actor, include_personal_folders],
+            separators=(",", ":"),
+        ).encode()
+        return {"identity_contract": "membership_v1", "identity_fingerprint": hashlib.sha256(encoded).hexdigest()}
 
     def get_model_yaml(
         self,
@@ -152,15 +191,12 @@ class OmniClient:
         model_id = validate_path_segment(model_id, name="model_id")
         if type(force_full_validation) is not bool:
             raise ConfigError("force_full_validation must be a boolean")
-        if include_personal_folders:
-            # Reject an unverifiable actor before validating a broader/different
-            # scope. The validator still receives a user UUID, never membership.
-            self._personal_content_membership_id(user_id)
+        actor = self._resolve_content_actor(user_id, include_personal_folders=include_personal_folders)
         params: dict[str, Any] = {}
         if force_full_validation:
             params["force_full_validation"] = "true"
-        if user_id:
-            params["userId"] = user_id
+        if actor is not None and actor[0] == "organization":
+            params["userId"] = actor[2]
         if branch_id:
             params["branch_id"] = branch_id
         if include_personal_folders:

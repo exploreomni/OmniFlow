@@ -27,6 +27,8 @@ def client_for(payload=None):
     return SimpleNamespace(
         validate_content=Mock(return_value={"content": []} if payload is None else payload),
         list_content=lambda **kw: [],
+        validation_evidence_binding=lambda: ("https://omni.example", "a" * 64),
+        content_identity_context=lambda **kw: {"identity_contract": "membership_v1", "identity_fingerprint": "b" * 64},
     )
 
 
@@ -92,22 +94,24 @@ def test_verified_draft_evidence_rereads_preserve_depth(tmp_path, full):
 def test_history_is_invalidated_when_requested_depth_changes(tmp_path, before, after, accepted):
     validate(tmp_path, client_for(), full=before, branch=None)
     saved = json.loads((tmp_path / "history.json").read_text())
-    assert saved["schema_version"] == HISTORY_SCHEMA_VERSION == 3
+    assert saved["schema_version"] == HISTORY_SCHEMA_VERSION == 4
     report, code = validate(tmp_path, client_for(), full=after, branch=None)
     assert report["history_status"] == ("accepted" if accepted else "invalidated_context")
     assert code == (0 if accepted else 4)
 
 
 @pytest.mark.parametrize("full", [False, True])
-def test_legacy_schema2_history_is_only_default_depth(tmp_path, full):
+@pytest.mark.parametrize("version", [2, 3])
+def test_legacy_history_without_verified_identity_binding_is_never_reused(tmp_path, full, version):
     validate(tmp_path, client_for(), branch=None)
     history = json.loads((tmp_path / "history.json").read_text())
-    history["schema_version"] = 2
-    history.pop("requested_validation_depth")
+    history["schema_version"] = version
+    if version == 2:
+        history.pop("requested_validation_depth")
     (tmp_path / "history.json").write_text(json.dumps(history))
     report, code = validate(tmp_path, client_for(), full=full, branch=None)
-    assert report["history_status"] == ("invalidated_context" if full else "accepted")
-    assert code == (4 if full else 0)
+    assert report["history_status"] == "invalidated_version"
+    assert code == 4 and report["validation_complete"] is False
 
 
 @pytest.mark.parametrize("invalid", [None, {}, "unknown"])

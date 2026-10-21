@@ -151,7 +151,7 @@ ENUMS = {
                         "non_view_identity", "incomplete_identity"},
     "history_status": {"not_used_live_base", "not_found", "missing", "accepted", "invalidated_context",
                        "invalidated_version", "invalidated_legacy", "invalidated_unscoped_user",
-                       "invalidated_public_diagnostic"},
+                       "invalidated_public_diagnostic", "invalidated_identity"},
 }
 COUNTS = frozenset({
     "exit_code", "total_issues", "errors", "warnings", "new_issues", "existing_issues", "resolved_issues",
