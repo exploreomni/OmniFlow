@@ -1,5 +1,28 @@
 # Release notes
 
+## Unreleased — verified relocation, source locations and result-quality probes
+
+- Legitimate numeric/date repository paths no longer lose all private source
+  locations. Unsafe or sensitive-looking path values remain withheld; original
+  mapping failure categories are preserved.
+- An unchanged topic/global relationship relocation is informational only when
+  every explicit topic join can be proven equivalent. Changed or unresolved
+  definitions remain findings; automatic/inherited/ambiguous join semantics are
+  not guessed.
+- Short current-head/run summaries prioritize blockers and next actions, collapse
+  lint detail, and distinguish query-result checks from model/content validity.
+  Downloaded reports identify themselves as pre-upload snapshots. Current-run
+  upload receipts remain the delivery authority.
+- The updated workflow maintains a stable PR summary and deduplicated failure/
+  recovery comments, with freshness and bounded-pagination checks. Update the
+  workflow as well as the Action pin. GitHub controls email preferences/delivery;
+  a successful comment write is not evidence that an email arrived.
+- Experimental [query-result contracts](QUERY_VALIDATION.md) are disabled by
+  default. Reviewed scalar aggregate probes can compare base/head results for
+  grouping, uniqueness, NULLs and aggregate changes. AI proposals are private,
+  local and nonexecuting; enforcement requires separate native qualification and
+  stable-data evidence. Incomplete results never establish a clean comparison.
+
 ## Unreleased — diagnostic clarity and confirmed artifact publication
 
 - All 11 built-in lint rules now retain rule-specific next actions. Only unknown rules receive unknown-rule guidance.

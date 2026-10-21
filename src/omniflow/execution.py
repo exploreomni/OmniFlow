@@ -17,6 +17,7 @@ class ValidationProgress:
             "content": config.content_validation.enabled,
             "model": config.model_validation.enabled,
             "ai_eval": config.ai_eval.enabled and bool(config.ai_eval.prompt_sets),
+            "query_validation": config.query_validation.enabled,
             "semantic_diff": config.semantic_lint.enabled or config.contracts.enabled or hold,
             "semantic_lint": config.semantic_lint.enabled,
             "downstream": config.contracts.enabled,

@@ -2,24 +2,80 @@ from __future__ import annotations
 
 from typing import Any
 
-from .semantic_graph import SemanticGraph
+from .semantic_graph import SemanticGraph, effective_topic_relationships, relationship_definition
 
 
 def diff_graphs(base: SemanticGraph, head: SemanticGraph) -> dict[str, Any]:
+    relocations, coverage_gaps = _relationship_relocations(base, head)
+    moved_base = {before for before, _ in relocations}
+    moved_head = {after for _, after in relocations}
+    base_relationships = {key: value for key, value in base.relationships.items() if key not in moved_base}
+    head_relationships = {key: value for key, value in head.relationships.items() if key not in moved_head}
     changes = []
     changes.extend(_diff_named("view", base.views, head.views))
-    changes.extend(_diff_named("topic", base.topics, head.topics))
-    changes.extend(_diff_named("relationship", base.relationships, head.relationships))
+    topic_changes = _diff_named("topic", base.topics, head.topics)
+    relocated_topics = {r["scope"][len("topic:"):] for graph, keys in ((base, moved_base), (head, moved_head))
+                        for key in keys for r in [graph.relationships[key]] if r["scope"].startswith("topic:")}
+    for change in topic_changes:
+        name = change.get("name")
+        if (change["type"] == "topic_modified" and name in relocated_topics
+                and _topic_without_relocated_relationships(base.topics[name], moved_base, base)
+                == _topic_without_relocated_relationships(head.topics[name], moved_head, head)):
+            continue
+        changes.append(change)
+    changes.extend(_diff_named("relationship", base_relationships, head_relationships))
     changes.extend(_diff_named("field", base.fields, head.fields))
     changes.extend(_field_renames(base.fields, head.fields))
     changes.extend(_field_property_changes(base.fields, head.fields))
-    changes.extend(_relationship_property_changes(base.relationships, head.relationships))
+    changes.extend(_relationship_property_changes(base_relationships, head_relationships))
+    for before, after in relocations:
+        previous, current = base.relationships[before], head.relationships[after]
+        change = _change("relationship_relocated", current, after, "info",
+                         "Equivalent relationship definition relocated; explicitly declared topic joins are unchanged.")
+        change.update(previous_file=previous.get("file"), affected_views=_relationship_views(previous, current),
+                      relationship_endpoints_complete=True)
+        changes.append(change)
     changes.extend(_governance_property_changes("view", base.views, head.views))
     changes.extend(_governance_property_changes("topic", base.topics, head.topics))
     changes.extend(_model_governance_changes(base.model, head.model))
     changes.extend(_file_renames(base, head))
     risk_level = _max_risk(changes)
-    return {"risk_level": risk_level, "changes": changes}
+    return {"risk_level": risk_level, "changes": changes, "relationship_coverage_gaps": coverage_gaps}
+
+
+def _relationship_relocations(base: SemanticGraph, head: SemanticGraph) -> tuple[list[tuple[str, str]], list[dict]]:
+    deleted = {key: value for key, value in base.relationships.items() if key not in head.relationships}
+    added = {key: value for key, value in head.relationships.items() if key not in base.relationships}
+    candidates = []
+    for before, previous in deleted.items():
+        for after, current in added.items():
+            scopes = (previous.get("scope", ""), current.get("scope", ""))
+            if ("global" in scopes and any(scope.startswith("topic:") for scope in scopes)
+                    and relationship_definition(previous) == relationship_definition(current)):
+                candidates.append((before, after))
+    if not candidates:
+        return [], []
+    unique = (len({before for before, _ in candidates}) == len(candidates)
+              and len({after for _, after in candidates}) == len(candidates))
+    base_effective, head_effective = effective_topic_relationships(base), effective_topic_relationships(head)
+    if not unique or base_effective is None or head_effective is None:
+        return [], [{"reason_code": "relationship_scope_unresolved",
+                     "message": "Relationship relocation equivalence could not be verified across explicit topic joins. "
+                                "Resolve ambiguous, automatic or unsupported join definitions before treating this as a safe move."}]
+    if base_effective != head_effective:
+        return [], []  # A changed/wider topic effect remains an ordinary delete/add.
+    return candidates, []
+
+
+def _topic_without_relocated_relationships(topic: dict, moved: set[str], graph: SemanticGraph) -> dict:
+    # Suppress a topic-modified duplicate only when its sole edit is the proved
+    # relocation; all other topic settings and remaining relationships survive.
+    result = {key: value for key, value in _normalized(topic).items() if key != "relationships"}
+    scope = f"topic:{topic.get('name') or next((name for name, item in graph.topics.items() if item is topic), '')}"
+    remaining = [relationship_definition(value) for key, value in graph.relationships.items()
+                 if value.get("scope") == scope and key not in moved]
+    result["relationships"] = remaining
+    return result
 
 
 def _diff_named(kind: str, base_items: dict[str, Any], head_items: dict[str, Any]) -> list[dict[str, Any]]:

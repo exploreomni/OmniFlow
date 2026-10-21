@@ -201,6 +201,19 @@ The installation is ready for controlled alpha use when all of these are true:
 
 For setup failures, continue with [Troubleshooting](TROUBLESHOOTING.md). For safe diagnostic sharing, see [Support](../SUPPORT.md).
 
+## Optional reviewed query-result checks
+
+Core model/content validation does not prove result correctness. The experimental
+[query-contract guide](QUERY_VALIDATION.md) adds opt-in, reviewed aggregate checks
+for join effects, uniqueness, grouping and NULLs. Leave it off until qualified in
+your tenant. AI proposals are local preparation only, not an automatic CI action.
+
+When upgrading report delivery, copy the current workflow example as well as
+updating the Action pin. Its short PR summary reports current-head blockers and
+links to post-upload receipts; failure/recovery transitions create deduplicated
+comments. GitHub notification preferences still control email delivery. A report
+inside a downloaded artifact is a pre-upload snapshot, not an upload receipt.
+
 ## Step 10: Optionally Add Post-Deployment dbt Sync
 
 Skip this step when the repository does not deploy dbt. Core OmniFlow validation and downstream dependency checks remain fully functional.

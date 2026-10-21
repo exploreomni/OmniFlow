@@ -30,10 +30,15 @@ MAX_EVENTS = 25_000
 _IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,63}(?:\.[A-Za-z_][A-Za-z0-9_]{0,63}){0,3}\Z")
 _SEGMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_.-]{0,127}\Z")
 _SENSITIVE = re.compile(
-    r"(?:^|[.])(?:gh[opusr]_|github_pat_|sk[-_]|xox[baprs]-)[A-Za-z0-9_-]{16,}|"
-    r"(?:^|[_.-])(?:ssn|mrn|cvv|cvc|pan)[_-](?=[A-Za-z0-9_-]*\d)[A-Za-z0-9_-]+",
+    r"(?:^|[./ _-])(?:gh[opusr]_|github_pat_|sk[-_]|xox[baprs]-)[A-Za-z0-9_-]{16,}|"
+    r"(?:^|[./ _-])(?:ssn|mrn|cvv|cvc|pan)[_-](?=[A-Za-z0-9_-]*\d)[A-Za-z0-9_-]+",
     re.IGNORECASE,
 )
+# Paths can legitimately contain dates and multiple version numbers. Reject
+# long numeric values (including common SSN/phone/card separators), not the
+# sum of digits across unrelated directory names. This is a conservative
+# metadata screen, not a promise to recognize every sensitive value.
+_LONG_NUMBER = re.compile(r"(?<!\d)\d(?:[ _-]?\d){8,}(?!\d)")
 _FIELD_GROUPS = frozenset({"fields", "dimensions", "measures", "filters"})
 _SCALARS = frozenset(f"tag:yaml.org,2002:{kind}" for kind in ("str", "int", "float", "bool", "null"))
 _MISSING_FIELD = re.compile(r"Field ([A-Za-z_][A-Za-z0-9_.]*) was not found\Z")
@@ -60,9 +65,10 @@ DIAGNOSTIC_MESSAGES = {
 _LINT_CODES = frozenset(LINT_MESSAGES)
 
 
-def _safe_text(value: Any) -> bool:
+def _safe_text(value: Any, *, path_metadata: bool = False) -> bool:
     return (isinstance(value, str) and len(value) <= 512 and redact(value) == value
-            and not _SENSITIVE.search(value) and sum(char.isdigit() for char in value) < 8)
+            and not _SENSITIVE.search(value)
+            and (not _LONG_NUMBER.search(value) if path_metadata else sum(char.isdigit() for char in value) < 8))
 
 
 def _identifier(value: Any) -> bool:
@@ -73,7 +79,7 @@ def _path(value: Any) -> bool:
     # Paths are metadata in an independently authorized repository artifact,
     # not public output. Spaces/Unicode are legitimate; control characters,
     # traversal and URL/shell-like delimiters are not acceptable display paths.
-    return (_safe_text(value) and len(value) <= 512
+    return (_safe_text(value, path_metadata=True) and len(value) <= 512
             and all(char.isalnum() or unicodedata.category(char)[0] == "M" or char in " /._-" for char in value)
             and all(unicodedata.category(char)[0] != "C" for char in value)
             and all(part not in {"", ".", ".."} and part == part.strip() for part in value.split("/")))
@@ -184,19 +190,21 @@ class SnapshotIndex:
         self._pending: dict[str, str] = {}
         self._parsed: set[str] = set()
         self._parse_success: set[str] = set()
+        self._parse_failures: dict[str, str] = {}
         self._parsed_bytes = 0
         self._identity_complete = False
         self.unavailable_reason = "source_location_unmapped"
+        self._initial_unavailable_reason: str | None = None
         if model_path != "." and not _path(model_path):
-            self.unavailable_reason = "unsupported_source_path"
+            self._initial_unavailable_reason = self.unavailable_reason = "unsupported_source_path"
             return
         if not isinstance(files, dict) or len(files) > MAX_INVENTORY_FILES:
-            self.unavailable_reason = "source_inventory_limit"
+            self._initial_unavailable_reason = self.unavailable_reason = "source_inventory_limit"
             return
         try:
             identity_index(path for path in files if _path(path))
         except AmbiguousModelPath:
-            self.unavailable_reason = "ambiguous_source_location"
+            self._initial_unavailable_reason = self.unavailable_reason = "ambiguous_source_location"
             return
         for path, text in files.items():
             if not _path(path) or not isinstance(text, str):
@@ -235,6 +243,8 @@ class SnapshotIndex:
 
     def _parse_file(self, path: str) -> bool:
         if path in self._parsed:
+            if path in self._parse_failures:
+                self.unavailable_reason = self._parse_failures[path]
             return path in self._parse_success
         text = self._pending[path]
         try:
@@ -258,6 +268,7 @@ class SnapshotIndex:
             root = None
         if root is None:
             self.unavailable_reason = "unsupported_source_yaml"
+            self._parse_failures[path] = self.unavailable_reason
             return False
         item = self._files[path]
         self._index_paths(item, root)
@@ -333,6 +344,7 @@ class SnapshotIndex:
                                          key.start_mark.line + 1, view=name)
     def _file(self, reference: Any) -> _File | None:
         if not _path(reference):
+            self.unavailable_reason = "unsupported_source_path"
             return None
         # Prefer exact Git/verified API aliases. A filename-only fallback is
         # permitted only when unique across the complete model snapshot.
@@ -360,6 +372,9 @@ class SnapshotIndex:
     def detail(self, issue: dict) -> dict:
         """Return only independently mapped authored metadata and fixed wording."""
         if not isinstance(issue, dict):
+            return {}
+        if self._initial_unavailable_reason is not None:
+            self.unavailable_reason = self._initial_unavailable_reason
             return {}
         if self._files:
             self.unavailable_reason = "source_location_unmapped"

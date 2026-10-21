@@ -1,8 +1,10 @@
 """Execute the shipped workflow receipt shell, without GitHub or Omni calls."""
 from __future__ import annotations
 
+import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -34,6 +36,13 @@ def execute_receipt(tmp_path, *, name="omniflow.yml", overrides=None, report=Tru
     public.mkdir(parents=True, exist_ok=True)
     if report:
         (public / "report.md").write_text("# OmniFlow\nValidation decision: fail; one new model error.\n")
+        (public / "report.json").write_text(json.dumps({
+            "policy_decision": "fail", "exit_code": 1, "validation_complete": True,
+            "summary": {"new_issues": 1},
+            "issues": [{"validator": "model", "type": "model_validation_error", "severity": "error", "blocking": True}],
+        }))
+    event = tmp_path / "event.json"
+    event.write_text(json.dumps({"pull_request": {"head": {"sha": "a" * 40}}}))
     # Checked-out material must never be used as a publication receipt/detail.
     (workspace / ".omniflow" / "publication.md").write_text("STALE_CHECKOUT_RECEIPT")
     private = workspace / ".omniflow" / "repository"
@@ -49,9 +58,17 @@ def execute_receipt(tmp_path, *, name="omniflow.yml", overrides=None, report=Tru
         "REPOSITORY_UPLOAD_OUTCOME": "success", "REPOSITORY_ARTIFACT_ID": "17",
         "REPOSITORY_ARTIFACT_URL": URL, "REPOSITORY_READY": "true", "PRIVATE_REPOSITORY": "true",
         "DIAGNOSTIC_OUTPUT_READY": "true",
+        "GITHUB_EVENT_PATH": str(event), "TEST_PYTHON": sys.executable, "TRUSTED_PACKAGE_SRC": str(ROOT / "src"),
     }
     env.update(overrides or {})
-    result = subprocess.run(["bash", "-c", receipt_step(name)["run"]], cwd=workspace,
+    # Emulate the installed package without installing into the test interpreter.
+    # The workflow itself must use isolated mode and never checkout Python code.
+    installed_package = '''python() {
+      [[ "$1" == -I && "$2" == -m && "$3" == omniflow.github.report_publisher ]] || return 90
+      "$TEST_PYTHON" -I -c 'import runpy,sys; sys.path.insert(0,sys.argv.pop(1)); sys.argv=["publisher",*sys.argv[1:]]; runpy.run_module("omniflow.github.report_publisher",run_name="__main__")' "$TRUSTED_PACKAGE_SRC" "${@:4}"
+    }
+'''
+    result = subprocess.run(["bash", "-c", installed_package + receipt_step(name)["run"]], cwd=workspace,
                             env=env, capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
     output = Path(env["GITHUB_OUTPUT"]).read_text().splitlines()[-1]
@@ -115,7 +132,10 @@ def test_confirmed_uploads_link_current_run_and_preserve_failed_validation(tmp_p
     assert text.count("**uploaded**") == 2
     assert text.count(f"[Download artifact]({URL})") == 2
     assert "generation: **generated**" in text
-    assert "Validation decision: fail; one new model error." in summary
+    assert "OmniFlow: Action required" in summary
+    assert "Blocking findings: 1" in summary
+    assert summary.count("### Diagnostic publication") == 1
+    assert "unconfirmed" not in summary
     assert "upload failure does not change the validation decision" in text
 
 
@@ -174,7 +194,7 @@ def test_public_and_repository_uploads_have_independent_outcomes(tmp_path):
     assert "Public summary publication: **failed**" in text
     assert "Repository diagnostics publication: **uploaded**" in text
     assert text.count("[Download artifact]") == 1
-    assert "Validation decision: fail; one new model error." in summary
+    assert "OmniFlow: Action required" in summary
 
 
 def run_prepare(workspace, output, name="omniflow.yml"):
@@ -268,34 +288,13 @@ def test_failed_preparation_never_reads_checked_out_report_or_links_stale_public
     assert "[Download artifact]" not in text
 
 
-@pytest.mark.parametrize("receipt_kind", ["fresh", "checkout", "old_attempt", "symlink", "missing"])
-def test_pr_comment_consumes_only_fresh_runner_receipt_and_public_report(tmp_path, receipt_kind):
-    _, _, receipt, env, workspace = execute_receipt(tmp_path)
-    if receipt_kind == "checkout":
-        receipt = workspace / ".omniflow" / "publication.md"
-    elif receipt_kind == "old_attempt":
-        receipt = Path(env["RUNNER_TEMP"]) / "omniflow-publication-123-1.old"
-        receipt.write_text("STALE_CHECKOUT_RECEIPT")
-    elif receipt_kind == "symlink":
-        link = Path(env["RUNNER_TEMP"]) / "omniflow-publication-123-2.link"
-        link.symlink_to(receipt)
-        receipt = link
-    elif receipt_kind == "missing":
-        receipt = Path(env["RUNNER_TEMP"]) / "omniflow-publication-123-2.missing"
-    env.update(PUBLICATION_RECEIPT=str(receipt), PR_NUMBER="31", GH_TOKEN="synthetic",
-               COMMENT_CAPTURE=str(tmp_path / "comment"))
+def test_pr_comment_uses_trusted_isolated_publisher_and_current_upload_outputs():
     comment_step = next(step for step in steps() if step["name"] == "Comment on PR")
-    # Stub only the external publishing command; execute the actual body builder.
-    stub = 'gh() { if [[ "$1" == pr ]]; then printf "%s" "$5" > "$COMMENT_CAPTURE"; fi; }\n'
-    result = subprocess.run(["bash", "-c", stub + comment_step["run"]], cwd=workspace,
-                            env=env, capture_output=True, text=True)
-    assert result.returncode == 0, result.stderr
-    body = Path(env["COMMENT_CAPTURE"]).read_text()
-    assert "Validation decision: fail; one new model error." in body
-    assert "PRIVATE_SOURCE_IDENTIFIER_SENTINEL" not in body
-    assert "STALE_CHECKOUT_RECEIPT" not in body
-    if receipt_kind == "fresh":
-        assert body.count("[Download artifact]") == 2
-    else:
-        assert "Artifact publication is unconfirmed" in body
-        assert "[Download artifact]" not in body
+    assert "python -I -m omniflow.github.report_publisher" in comment_step["run"]
+    assert "cat " not in comment_step["run"]
+    assert "gh pr" not in comment_step["run"]
+    assert "PUBLICATION_RECEIPT" not in comment_step["env"]  # Never read stale checkout/runner receipt text.
+    assert comment_step["env"]["PUBLIC_UPLOAD_OUTCOME"] == "${{ steps.public_upload.outcome }}"
+    assert comment_step["env"]["REPOSITORY_ARTIFACT_URL"] == "${{ steps.repository_upload.outputs.artifact-url }}"
+    assert "hashFiles('.omniflow/public/report.json')" in comment_step["if"]
+    assert "github.event_name == 'pull_request_target'" in comment_step["if"]

@@ -18,6 +18,7 @@ class SemanticGraph:
     relationships: dict[str, dict[str, Any]] = field(default_factory=dict)
     fields: dict[str, dict[str, Any]] = field(default_factory=dict)
     files: dict[str, Any] = field(default_factory=dict)
+    relationship_evidence_complete: bool = True
 
 
 def load_yaml_graph(root: str | Path, *, require_view_names: bool = False) -> SemanticGraph:
@@ -75,6 +76,8 @@ def build_graph(
             _add_relationships(graph, file_path, payload)
             continue
         if not isinstance(payload, dict):
+            if kind == "topic":
+                graph.relationship_evidence_complete = False
             continue
         name = names_by_path.get(file_path) or _name(file_path, payload)
         if kind == "topic":
@@ -150,12 +153,16 @@ def _add_relationships(
     if isinstance(relationships, dict):
         items = relationships.items()
     elif isinstance(relationships, list):
+        if any(not isinstance(item, dict) for item in relationships):
+            graph.relationship_evidence_complete = False
         items = [
             (_relationship_name(item, index), item)
             for index, item in enumerate(relationships)
             if isinstance(item, dict)
         ]
     else:
+        if relationships is not None:
+            graph.relationship_evidence_complete = False
         return
     for name, relationship in items:
         if isinstance(relationship, dict):
@@ -166,11 +173,13 @@ def _add_relationships(
                 identity = f"{scope}:{display_name}#{duplicate}"
                 duplicate += 1
             graph.relationships[identity] = {
+                **relationship,
                 "file": file_path,
                 "name": display_name,
                 "scope": scope,
-                **relationship,
             }
+        else:
+            graph.relationship_evidence_complete = False
 
 
 def _relationship_name(item: dict[str, Any], index: int) -> str:
@@ -191,14 +200,79 @@ def _add_inline_topics(graph: SemanticGraph, file_path: str, payload: dict[str, 
     if isinstance(topics, dict):
         items = topics.items()
     elif isinstance(topics, list):
+        if any(not isinstance(item, dict) for item in topics):
+            graph.relationship_evidence_complete = False
         items = [
             (item.get("name") or item.get("base_view") or str(index), item)
             for index, item in enumerate(topics)
             if isinstance(item, dict)
         ]
     else:
+        if topics is not None:
+            graph.relationship_evidence_complete = False
         return
     for name, topic in items:
         if isinstance(topic, dict):
             _require_unique(graph.topics, str(name), kind="topic")
             graph.topics[str(name)] = {"file": file_path, "name": str(name), **topic}
+            _add_relationships(graph, file_path, topic, scope=f"topic:{name}")
+        else:
+            graph.relationship_evidence_complete = False
+
+
+def relationship_definition(relationship: dict[str, Any]) -> dict[str, Any]:
+    """Exact authored definition; only independently assigned storage is ignored."""
+    return {key: value for key, value in relationship.items() if key not in {"file", "scope"}}
+
+
+def effective_topic_relationships(graph: SemanticGraph) -> dict[str, Any] | None:
+    """Prove the explicit per-topic join trees without guessing Omni precedence.
+
+    This is deliberately not a replacement for Omni's join compiler. Automatic
+    joins, reverse traversal, duplicate choices, unresolved deltas and competing
+    local/global definitions cannot establish relocation equivalence here.
+    """
+    if (not graph.relationship_evidence_complete or not graph.topics
+            or any(r.get("scope", "").startswith("view:") for r in graph.relationships.values())):
+        return None
+    resolved: dict[str, Any] = {}
+    for name, topic in graph.topics.items():
+        base = topic.get("base_view")
+        if (not isinstance(base, str) or base not in graph.views or not isinstance(topic.get("joins"), dict)
+                or any(key in topic for key in ("extends", "added_joins", "removed_joins", "views"))):
+            return None
+        relationships = [r for r in graph.relationships.values() if r.get("scope") in {"global", f"topic:{name}"}]
+        # Invalid/missing definitions are not permission to pick another join.
+        for relationship in relationships:
+            if any(not isinstance(relationship.get(key), str) or not relationship[key].strip()
+                   for key in ("join_from_view", "join_to_view", "join_type", "on_sql", "relationship_type")):
+                return None
+            if any(key in relationship and (not isinstance(relationship[key], str) or not relationship[key].strip())
+                   for key in ("join_from_view_as", "join_to_view_as")):
+                return None
+            if any(relationship[key] not in graph.views for key in ("join_from_view", "join_to_view")):
+                return None
+        edges = []
+        pending = [(base, base, topic["joins"], ())]
+        visited = 0
+        while pending:
+            source, source_view, children, ancestry = pending.pop()
+            if len(ancestry) >= 32 or not isinstance(children, dict):
+                return None
+            for target, nested in children.items():
+                visited += 1
+                if visited > 10_000 or not isinstance(target, str) or not isinstance(nested, dict):
+                    return None
+                candidates = [r for r in relationships
+                              if r["join_from_view"] == source_view
+                              and (r.get("join_from_view_as") or r["join_from_view"]) == source
+                              and (r.get("join_to_view_as") or r["join_to_view"]) == target]
+                # Do not assume topic-local precedence over a conflicting global
+                # definition (or choose between duplicate joins/aliases).
+                if len(candidates) != 1:
+                    return None
+                edge_path = (*ancestry, source, target)
+                edges.append((edge_path, relationship_definition(candidates[0])))
+                pending.append((target, candidates[0]["join_to_view"], nested, (*ancestry, source)))
+        resolved[name] = {"base_view": base, "edges": sorted(edges, key=lambda edge: edge[0])}
+    return resolved

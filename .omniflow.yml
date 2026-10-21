@@ -79,6 +79,17 @@ checks:
     #   warn_relationship_cardinality_change: warn
     #   require_topic_labels: warn
 
+  # Optional EXPERIMENTAL result-quality contracts. OFF when omitted; no query
+  # execution or AI call is added to the standard workflow. Read
+  # docs/QUERY_VALIDATION.md before configuring reviewed contracts. Start in
+  # report mode; enforce requires stable data and native qualification.
+  # query_validation:
+  #   mode: "off"                # Quote off: YAML 1.1 treats bare off as false.
+  #   native_qualified: false
+  #   max_queries: 12             # Per-model submission budget, including rereads
+  #   timeout_seconds: 120        # Client deadline, NOT warehouse cancellation
+  #   contracts: []               # Reviewed scalar aggregates; never raw SQL
+
   # Optional: add published Omni dashboard-to-dbt model lineage to reports.
   # Requires a configured Omni dbt integration and Connection Admin permission.
   # Leave this commented out when the Omni connection does not use dbt.

@@ -61,6 +61,7 @@ from .github.repair_attempt import GitHubRepairAttemptGuard, load_repair_event
 from .logging import configure_logging
 from .nonsemantic import classify_pr_change
 from .omni_client import OmniClient
+from .query_validation import QueryProvenance
 from .repair.orchestrator import run_ai_repair, validate_ai_repair_policy
 from .repair.reporting import write_repair_artifacts
 from .reporting.issue_policy import is_blocking
@@ -84,6 +85,7 @@ from .validation_scope import ValidationEvidence, plan_content_scope
 from .validators.ai_eval import run_ai_eval_validation
 from .validators.content import ContentEvidenceError, run_content_validation
 from .validators.model import run_model_validation
+from .validators.query_validation import run_query_validation
 from .validators.yaml_lint import compare_lint_findings, has_error, lint_graph
 from .view_identity import ViewNamesMetadataError
 from .yaml_pull import pull_yaml
@@ -161,6 +163,16 @@ def build_parser() -> argparse.ArgumentParser:
     _add_common_omni_args(model_validate)
     model_validate.add_argument("--fail-on-warnings", action=argparse.BooleanOptionalAction, default=None)
     model_validate.set_defaults(func=cmd_model_validate)
+
+    query = subcommands.add_parser("query", help="Optional reviewed query-result checks")
+    query_sub = query.add_subparsers(required=True)
+    query_propose = query_sub.add_parser("propose", help="Generate a private AI proposal without executing it")
+    _add_config_arg(query_propose)
+    _add_common_omni_args(query_propose)
+    query_propose.add_argument("--topic", required=True)
+    query_propose.add_argument("--prompt", required=True)
+    query_propose.add_argument("--output", required=True)
+    query_propose.set_defaults(func=cmd_query_propose)
 
     yaml_parser = subcommands.add_parser("yaml", help="YAML commands")
     yaml_sub = yaml_parser.add_subparsers(required=True)
@@ -733,7 +745,8 @@ def _run_context(
         (config.content_validation.enabled and config.content_validation.fail_on_new_only)
         or (config.model_validation.enabled and config.model_validation.fail_on_new_only)
     )
-    if context.environment or regression_pr:
+    query_comparison = not strict_health and is_pull_request_event() and config.query_validation.enabled
+    if context.environment or regression_pr or query_comparison:
         progress.states["candidate"] = {"validator": "candidate", "status": "not_run"}
     try:
         return _run_context_steps(
@@ -750,6 +763,16 @@ def _run_context(
             for check in progress.reports:
                 if check.get("validator") in {"content", "model"}:
                     mark_health_only(check)
+                elif check.get("validator") == "query_validation":
+                    # A later snapshot change invalidates attribution, even if
+                    # the warehouse calls themselves completed successfully.
+                    check.update(validation_complete=False, execution_status="partial",
+                                 query_validation_status="inconclusive", comparison_status="unavailable",
+                                 new_issue_count=0, existing_issue_count=0)
+                    progress.states["query_validation"]["status"] = "partial"
+                    for issue in check.get("issues", []):
+                        issue.pop("state", None)
+                        issue.update(health_only=True, blocking=False)
         exc.omniflow_progress = progress
         raise
 
@@ -773,7 +796,8 @@ def _run_context_steps(
     reports = progress.reports
     evidence = ValidationEvidence()
     exit_code = 0
-    verify_provenance = bool(context.environment) or regression_pr
+    query_comparison = not strict_health and is_pull_request_event() and config.query_validation.enabled
+    verify_provenance = bool(context.environment) or regression_pr or query_comparison
     baseline_proof = None
     if verify_provenance:
         from .candidate import CandidateVerificationError
@@ -785,7 +809,7 @@ def _run_context_steps(
             # Inspect both sides before considering advisory handling. A sync
             # mismatch on one side must not conceal an exclusion conflict on
             # the other side.
-            for side in (("base", "head") if regression_pr else ("head",)):
+            for side in (("base", "head") if regression_pr or query_comparison else ("head",)):
                 try:
                     proofs[side] = verify_with_retry(
                         client, context, revision_side=side, non_omni_rules=config.files.non_omni,
@@ -891,7 +915,10 @@ def _run_context_steps(
     # The breaking-change hold reads the semantic diff, so it must be able to
     # request one even when semantic lint and contracts are both disabled.
     needs_breaking_hold = enforce_breaking_hold and config.breaking_change_hold.enabled
-    if config.semantic_lint.enabled or config.contracts.enabled or needs_breaking_hold:
+    query_needs_graph = config.query_validation.enabled and any(
+        contract.comparison == "absolute" for contract in config.query_validation.contracts
+    )
+    if config.semantic_lint.enabled or config.contracts.enabled or needs_breaking_hold or query_needs_graph:
         progress.begin("semantic_diff")
         base_yaml_dir = comparison_base_yaml_dir or output_dir / "yaml-base"
         head_yaml_dir = output_dir / "yaml-head"
@@ -913,6 +940,35 @@ def _run_context_steps(
         diff_report = diff_graphs(base_graph, head_graph)
         write_json_report(output_dir / "semantic-diff.json", diff_report)
         progress.complete("semantic_diff")
+
+    if config.query_validation.enabled:
+        progress.begin("query_validation")
+        base_revision = pull_request_revision("base") if query_comparison else None
+        head_revision = pull_request_revision("head") if query_comparison else None
+        newly_added_topics = (
+            set(head_graph.topics) - set(base_graph.topics)
+            if head_graph is not None and base_graph is not None else set()
+        )
+        provenance = QueryProvenance(
+            model_id=context.model_id, branch_id=branch_id or "",
+            base_sha=base_revision[0] if base_revision else "",
+            head_sha=head_revision[0] if head_revision else "",
+            base_verified=bool(query_comparison and baseline_proof),
+            head_verified=bool(query_comparison and context.candidate_verification.get("status") == "pending_recheck"),
+            added_entity_contract_ids=frozenset(
+                contract.id for contract in config.query_validation.contracts
+                if contract.comparison == "absolute"
+                and contract.query().get("join_paths_from_topic_name") in newly_added_topics
+            ),
+        )
+        query_report, query_exit = run_query_validation(
+            client, context.model_id, branch_id=branch_id,
+            settings=config.query_validation, provenance=provenance,
+        )
+        reports.append(query_report)
+        all_issues.extend(query_report.get("issues", []))
+        exit_code = max(exit_code, query_exit)
+        progress.complete("query_validation", query_exit, execution_status=query_report.get("execution_status"))
 
     if config.semantic_lint.enabled and head_graph is not None:
         progress.begin("semantic_lint")
@@ -1054,6 +1110,8 @@ def _run_context_steps(
     report = _base_report(config, context, branch_id, exit_code, all_issues, summary)
     report["check_reports"] = reports
     report.update(progress.evidence())
+    if not report["validation_complete"] and exit_code == 0:
+        report.update(policy_decision="advisory", decision_status="incomplete")
     write_json_report(output_dir / "report.json", report)
     return report, exit_code
 
@@ -1769,6 +1827,33 @@ def cmd_repair_ai(args: argparse.Namespace) -> int:
             restricted_artifacts_enabled=config.security.retain_restricted_artifacts,
             redaction_level=config.security.redaction_level,
         )
+
+
+def cmd_query_propose(args: argparse.Namespace) -> int:
+    """Local opt-in only: proposal output is not an approved runnable contract."""
+    from .query_transport import propose_query
+
+    if os.getenv("GITHUB_ACTIONS") == "true" or is_pull_request_event():
+        raise SecurityPolicyError("AI query proposals are local, human-reviewed preparation only; not a CI step.")
+    target = Path(args.output)
+    validate_repo_output_path(target)
+    if target.exists() or target.is_symlink():
+        raise ConfigError("Choose a new private proposal file; existing files are never overwritten.")
+    config = _override_config(load_config(args.config), args)
+    client, branch_id = _client_and_branch(config)
+    proposal = propose_query(
+        client, _required(config.omni.model_id, "model_id"),
+        topic=args.topic, prompt=args.prompt, branch_id=branch_id,
+    )
+    # Create exclusively after the network call as well, preventing races.
+    validate_repo_output_path(target)
+    target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        json.dump(proposal, handle, indent=2, allow_nan=False)
+        handle.write("\n")
+    print("Private query proposal saved. Review and qualify it before adding a contract; no query was executed.")
+    return 0
 
 
 def _client_and_branch(config):

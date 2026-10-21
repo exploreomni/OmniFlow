@@ -10,6 +10,7 @@ from typing import Any
 
 from .exceptions import ConfigError, MissingPolicyError, SecurityPolicyError
 from .file_scope import NonOmniRule, parse_non_omni_rules
+from .query_validation import QueryValidationSettings, parse_query_validation
 from .security import contains_secret_key, reject_secret_keys, validate_repo_output_path
 from .trust import read_trusted_repo_text
 from .yaml_security import parse_secure_yaml
@@ -43,7 +44,7 @@ OMNI_KEYS = {
     "include_personal_folders",
     "timeout",
 }
-CHECK_KEYS = {"content_validation", "model_validation", "semantic_lint", "dbt_exposures", "dbt_impact", "ai_eval"}
+CHECK_KEYS = {"content_validation", "model_validation", "semantic_lint", "dbt_exposures", "dbt_impact", "ai_eval", "query_validation"}
 CONTENT_KEYS = {"enabled", "fail_on_new_only", "labels", "classify_comment_only", "force_full_validation", "targeted"}
 MODEL_KEYS = {"enabled", "fail_on_warnings", "fail_on_new_only"}
 LINT_KEYS = {"enabled", "rules"}
@@ -123,6 +124,9 @@ _SCHEMA_GROUPS = {
     "checks.dbt_exposures": EXPOSURE_KEYS, "checks.dbt_impact": DBT_IMPACT_KEYS,
     "checks.dbt_impact.table_mapping": TABLE_MAPPING_KEYS,
     "checks.ai_eval": AI_EVAL_KEYS, "checks.ai_eval.prompt_sets": PROMPT_SET_KEYS,
+    "checks.query_validation": {"mode", "contracts", "native_qualified", "snapshot_attestation",
+                                "environment_connection_id", "user_id", "timezone", "max_queries",
+                                "timeout_seconds", "max_response_bytes", "max_polls"},
     "reporting": REPORTING_KEYS, "reporting.diagnostics": DIAGNOSTICS_KEYS,
     "security": SECURITY_KEYS, "contracts": CONTRACT_KEYS,
     "contracts.fail_on": CONTRACT_FAIL_KEYS, "repairs": REPAIR_KEYS,
@@ -405,6 +409,7 @@ class OmniFlowConfig:
     hash: str
     files: FileSettings = field(default_factory=FileSettings)
     validation: ValidationSettings = field(default_factory=ValidationSettings)
+    query_validation: QueryValidationSettings = field(default_factory=QueryValidationSettings)
 
 
 def load_config(path: str | Path | None = None) -> OmniFlowConfig:
@@ -695,6 +700,7 @@ def _to_config(raw: dict[str, Any], source: Path | None) -> OmniFlowConfig:
         hash=config_hash(raw),
         files=files,
         validation=validation,
+        query_validation=parse_query_validation(checks_raw.get("query_validation")),
     )
 
 
@@ -957,6 +963,9 @@ def _validate_config_schema(raw: dict[str, Any]) -> None:
     deployment = _mapping(raw.get("deployment"), "deployment")
     _reject_unknown_keys(omni, OMNI_KEYS, "omni")
     _reject_unknown_keys(checks, CHECK_KEYS, "checks")
+    # Query cohorts, budgets and attestations must be fixed reviewed policy, not
+    # mutable workflow-variable substitutions.
+    parse_query_validation(checks.get("query_validation"))
     _reject_unknown_keys(reporting, REPORTING_KEYS, "reporting")
     _diagnostics_mode(reporting)
     _reject_unknown_keys(security, SECURITY_KEYS, "security")

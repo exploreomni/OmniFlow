@@ -8,6 +8,7 @@ from ..security import redact, secure_write_text
 from .diagnostic_fields import DIAGNOSTIC_FACTS
 from .finding_groups import group_findings
 from .issue_policy import is_blocking
+from .notification import query_policy_reference, query_result_coverage
 
 
 def _render_minimal_diagnostic(report: dict[str, Any]) -> str:
@@ -44,8 +45,9 @@ def _render_minimal_diagnostic(report: dict[str, Any]) -> str:
                       f"(`{_safe_code(availability.get('diagnostics_reason', 'unknown'))}`)."])
         if availability["status"] in {"generated", "available"}:
             # 'available' is the older runner-local status, not an upload receipt.
-            lines.append("- Generated on the runner; upload is **unconfirmed** in this report. "
-                         "Check the workflow's **Diagnostic publication** receipt for download status. "
+            lines.append("- Pre-upload snapshot: diagnostics were generated on the runner. "
+                         "This downloaded report does not record later delivery status. "
+                         "Check the current run's **Diagnostic publication** receipt for authoritative download status. "
                          "If that section is absent, update the consumer workflow's guarded upload and receipt steps; "
                          "updating only the Action pin does not add them.")
     if report.get("validation_complete") is True and any(
@@ -98,6 +100,13 @@ def _render_minimal_diagnostic(report: dict[str, Any]) -> str:
         checks = context.get("check_reports") or [context]
         for check in checks:
             validator = check.get("validator")
+            if validator == "query_validation":
+                lines.extend(["", f"### Query-result Checks — {reference}", "", query_result_coverage(check), ""])
+                for key in ("query_validation_mode", "query_validation_status", "contracts_total", "contracts_checked",
+                            "new_issue_count", "existing_issue_count", "query_submission_count", "query_poll_count"):
+                    if key in check:
+                        lines.append(f"- {key.replace('_', ' ')}: `{_safe_code(check[key])}`")
+                continue
             if validator not in {"content", "model"}:
                 continue
             title = "Content" if validator == "content" else "Model"
@@ -130,6 +139,7 @@ def _render_minimal_diagnostic(report: dict[str, Any]) -> str:
                     value = "unknown" if check[key] is None else str(check[key])
                     lines.append(f"- {key.replace('_', ' ')}: `{_safe_code(value)}`")
     lines.extend(_next_action_lines(report, findings))
+    lines.extend(["", "## Query-result Coverage", "", query_result_coverage(report)])
     return "\n".join(lines) + "\n"
 
 
@@ -161,6 +171,9 @@ def _public_finding_lines(findings: list[dict[str, Any]], *, repository_detail: 
                 lines.append(f"   - diagnosis: {_safe_text(finding['title'])}")
             if finding.get("next_action"):
                 lines.append(f"   - next action: {_safe_text(finding['next_action'])}")
+            policy = query_policy_reference(finding)
+            if policy:
+                lines.append(f"   - assertion location: {policy} (positions are one-based).")
             if repository_detail:
                 for key in ("file", "line", "field", "view", "topic", "source_revision", "git_revision",
                             "location_unavailable_reason"):

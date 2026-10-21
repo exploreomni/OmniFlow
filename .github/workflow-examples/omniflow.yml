@@ -198,40 +198,36 @@ jobs:
             fi
           } > "$RECEIPT"
           printf 'receipt_path=%s\n' "$RECEIPT" >> "$GITHUB_OUTPUT"
-          if [[ "$DIAGNOSTIC_OUTPUT_READY" == true && -f .omniflow/public/report.md ]]; then
-            cat .omniflow/public/report.md >> "$GITHUB_STEP_SUMMARY"
+          SUMMARY="$(mktemp "${RUNNER_TEMP}/omniflow-summary-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.XXXXXX")"
+          # Run only the installed trusted Action package, never checkout code.
+          # The post-upload summary contains one authoritative delivery status.
+          if [[ "$DIAGNOSTIC_OUTPUT_READY" == true && -f .omniflow/public/report.json ]] &&
+             python -I -m omniflow.github.report_publisher --summary > "$SUMMARY"; then
+            cat "$SUMMARY" >> "$GITHUB_STEP_SUMMARY"
           else
-            echo "No fresh OmniFlow validation report is available. Inspect the first failed preparation/setup/install/route step; absence of a report is not a pass." >> "$GITHUB_STEP_SUMMARY"
+            echo "No fresh OmniFlow validation report could be displayed. Inspect the first failed preparation/setup/install/route/summary step; absence of a report is not a pass." >> "$GITHUB_STEP_SUMMARY"
+            cat "$RECEIPT" >> "$GITHUB_STEP_SUMMARY"
           fi
-          cat "$RECEIPT" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Comment on PR
-        if: always() && steps.diagnostic_output.outputs.ready == 'true' && github.event_name == 'pull_request_target' && hashFiles('.omniflow/public/report.md') != ''
+        if: always() && steps.diagnostic_output.outputs.ready == 'true' && github.event_name == 'pull_request_target' && hashFiles('.omniflow/public/report.json') != ''
         env:
           GH_TOKEN: ${{ github.token }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          PUBLICATION_RECEIPT: ${{ steps.publication.outputs.receipt_path }}
+          DIAGNOSTIC_OUTPUT_READY: ${{ steps.diagnostic_output.outputs.ready }}
+          PUBLIC_UPLOAD_OUTCOME: ${{ steps.public_upload.outcome }}
+          PUBLIC_ARTIFACT_ID: ${{ steps.public_upload.outputs.artifact-id }}
+          PUBLIC_ARTIFACT_URL: ${{ steps.public_upload.outputs.artifact-url }}
+          REPOSITORY_UPLOAD_OUTCOME: ${{ steps.repository_upload.outcome }}
+          REPOSITORY_ARTIFACT_ID: ${{ steps.repository_upload.outputs.artifact-id }}
+          REPOSITORY_ARTIFACT_URL: ${{ steps.repository_upload.outputs.artifact-url }}
+          REPOSITORY_READY: ${{ steps.omniflow.outputs.repository-diagnostics-ready }}
+          PRIVATE_REPOSITORY: ${{ github.event.repository.private }}
         run: |
           set -euo pipefail
-          MARKER='<!-- omniflow-report -->'
-          RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
-          BODY="$(
-            printf '%s\n\nRun: %s\n\n' "$MARKER" "$RUN_URL"
-            cat .omniflow/public/report.md
-            if [[ "$PUBLICATION_RECEIPT" == "$RUNNER_TEMP/omniflow-publication-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}."* &&
-                  -f "$PUBLICATION_RECEIPT" && ! -L "$PUBLICATION_RECEIPT" ]]; then
-              cat "$PUBLICATION_RECEIPT"
-            else
-              printf '\nArtifact publication is unconfirmed; inspect the current run upload steps.\n'
-            fi
-          )"
-          EXISTING="$(gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments?per_page=100" \
-            --jq '[.[] | select(.user.login == "github-actions[bot]") | select(.body | contains("<!-- omniflow-report -->"))][0].id // empty')"
-          if [ -n "$EXISTING" ]; then
-            gh api -X PATCH "repos/${GITHUB_REPOSITORY}/issues/comments/${EXISTING}" -f body="$BODY" >/dev/null
-          else
-            gh pr comment "$PR_NUMBER" --body "$BODY"
-          fi
+          # Freshness, pagination, retry reconciliation and failure/recovery
+          # transition deduplication live in the reviewed installed Action.
+          # A posted comment is not proof that GitHub delivered an email.
+          python -I -m omniflow.github.report_publisher
 
       # Applies the hold label. Only explicit current-head revalidation can release it.
       # The label is informational; the required readiness check enforces the gate.

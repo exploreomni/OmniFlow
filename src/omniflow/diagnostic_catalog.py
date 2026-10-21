@@ -49,6 +49,10 @@ CHANGE_MESSAGES = {
     "field_kind_changed": "A field changed between semantic kinds. Review dimension/measure usage in dependent content.",
     "measure_aggregation_changed": "A measure aggregation changed. Verify intended calculations and dependent metrics.",
     "relationship_cardinality_changed": "Join cardinality changed. Verify join grain, fanout, and dependent metrics.",
+    "relationship_relocated": (
+        "A relationship moved between topic and global definitions without changing the verified effective "
+        "join behavior of the affected topics. This relocation is informational; other checks still apply."
+    ),
     "governance_changed": "Model governance settings changed. Review access rules and ownership before accepting the change.",
 }
 
@@ -67,6 +71,10 @@ CHECK_GUIDANCE = {
     "dbt_impact": "Review the changed dbt resources and their mapped Omni dependencies.",
     "dbt_sync": "Review refresh and post-sync validation status before considering deployment complete.",
     "ai_eval": "Inspect the AI evaluation and cleanup status in the authorized Omni environment.",
+    "query_validation": (
+        "Review the approved query contract, comparison scope and result-quality evidence. "
+        "Incomplete or incomparable query results do not establish a clean regression check."
+    ),
     "ai_repair": "Inspect repair and rollback status before accepting any proposed change.",
     "breaking_change_hold": "Review deployment synchronization and current-head revalidation before releasing the hold.",
     "reporting": "Check artifact output permissions and use only fresh artifacts from this run.",

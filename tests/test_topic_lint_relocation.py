@@ -167,8 +167,16 @@ def test_inline_topics_do_not_authorize_model_file_relocation():
     base = build_graph({"Old/model.yaml": {"topics": {"orders": topic()}}})
     head = build_graph({"New/model.yaml": {"topics": {"orders": topic("Updated")}}})
     result = compare(base, head)
-    assert len(result) == 2
-    assert all(issue["state"] == "new" for issue in result)
+    # Inline relationships now participate in the semantic graph, just like
+    # standalone topic relationships. Their real governance finding must not be
+    # omitted or borrow a model-file relocation exception.
+    assert len(result) == 3
+    assert {issue["rule_id"] for issue in result} == {
+        "require_topic_labels", "require_owner_metadata", "forbid_many_to_many_without_comment",
+    }
+    assert sum("relationship" in issue for issue in result) == 1
+    assert all(issue["state"] == "new" and issue["blocking"] for issue in result)
+    assert all(issue["file"] == "New/model.yaml" for issue in result)
 
 
 def test_ambiguous_relationship_name_or_mismatched_scope_does_not_relocate_relationship_debt():
