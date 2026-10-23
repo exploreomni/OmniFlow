@@ -38,6 +38,7 @@ class RepositoryPolicy:
     repository: str | None = None
     head_sha: str | None = None
     base_sha: str | None = None
+    external_diagnostics_allowed: bool = False
 
 
 class _Ineligible(Exception):
@@ -116,11 +117,22 @@ def _resolve(config: OmniFlowConfig) -> RepositoryPolicy:
         reject_secret_keys(payload, source="trusted repository policy")
         _validate_config_schema(payload)
         trusted_mode = _diagnostics_mode(payload.get("reporting") or {})
+        from .config import _omni_repository_settings
+
+        trusted_dbt = ((payload.get("checks") or {}).get("dbt_impact") or {})
+        trusted_external = _omni_repository_settings(trusted_dbt.get("omni_repository"))
     except OmniFlowError:
         raise _Ineligible("policy_invalid") from None
     if trusted_mode != "repository":
         raise _Ineligible("minimal_requested")
-    return RepositoryPolicy(True, "repository_verified", repository, head, base)
+    # Private destination access does not itself authorize copying metadata
+    # from another repository. Require the same literal source scope and opt-in
+    # from the independently re-read trusted policy; caller config can only
+    # narrow this authority, never create or redirect it.
+    external_allowed = (trusted_external is not None and trusted_external.allow_repository_diagnostics is True
+                        and trusted_external == config.dbt_impact.omni_repository)
+    return RepositoryPolicy(True, "repository_verified", repository, head, base,
+                            external_diagnostics_allowed=external_allowed)
 
 
 def _same_repository(value, repository: str, identifier: int) -> bool:

@@ -256,7 +256,7 @@ def test_action_provenance_never_uses_the_input_sha(monkeypatch, action_ref, exp
 def test_all_cli_action_steps_receive_action_ref_via_environment():
     action = yaml.safe_load((Path(__file__).resolve().parents[1] / "action.yml").read_text())
     cli_steps = [step for step in action["runs"]["steps"] if "\nomniflow " in "\n" + step.get("run", "")]
-    assert len(cli_steps) == 7
+    assert len(cli_steps) == 8
     for step in cli_steps:
         assert step["env"]["OMNIFLOW_ACTION_REF"] == "${{ github.action_ref }}"
         assert "${{ github.action_ref }}" not in step["run"]

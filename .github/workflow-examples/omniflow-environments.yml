@@ -114,6 +114,8 @@ jobs:
           validation-environment: ${{ github.base_ref == 'main' && 'production' || 'development' }}
           # Each GitHub environment owns its own secret with this name.
           omni-api-key: ${{ secrets.OMNI_API_KEY }}
+          # Optional external Omni source: this environment owns its separate read-only token.
+          omni-repository-token: ${{ secrets.OMNIFLOW_OMNI_REPO_TOKEN }}
 
       - name: Route fork candidate without Omni credentials
         if: github.event.pull_request.head.repo.full_name != github.repository

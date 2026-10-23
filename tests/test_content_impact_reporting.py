@@ -8,13 +8,17 @@ import yaml
 
 from omniflow.artifacts import write_public_reports
 from omniflow.cli import _content_impact_authorized, _published_impact_client, main
-from omniflow.config import load_config
+from omniflow.config import OmniRepositorySettings, load_config
 from omniflow.content_impact_reporting import (
+    COUNTS,
     clear_content_impact,
+    content_impact_line,
     coverage_explanations,
     current_validation_report,
+    primary_coverage_explanation,
     public_content_impact,
     publish_content_impact,
+    render_private_impact,
     seal_validation_report,
 )
 from omniflow.diagnostics import public_diagnostic
@@ -106,6 +110,39 @@ def test_private_detail_clears_when_live_policy_changes(configured):
     assert not Path(".omniflow/repository/column-impact.md").exists()
 
 
+@pytest.mark.parametrize("allow,private,trusted_allow", [
+    (False, True, True), (True, False, True), (True, True, False), (True, True, True),
+])
+def test_external_details_require_explicit_opt_in_and_live_private_policy(configured, allow, private, trusted_allow):
+    original = current_validation_report(configured)
+    # Previously generated same-repository files cannot survive a policy switch.
+    with patch("omniflow.content_impact_reporting.resolve_repository_policy",
+               return_value=RepositoryPolicy(True, "repository_verified")):
+        publish_content_impact(configured, _detail(), original)
+    configured.dbt_impact.omni_repository = OmniRepositorySettings(
+        repository="private-source/models", ref="production", model_paths=["omni"],
+        allow_repository_diagnostics=allow,
+    )
+    detail = _detail() | {"source_repository": "private-source/models", "source_sha": "b" * 40,
+                          "dbt_impact_snapshot": {"repository": "private-source/models"}}
+    authorized = allow and private and trusted_allow
+    with patch("omniflow.content_impact_reporting.resolve_repository_policy",
+               return_value=RepositoryPolicy(private, "repository_verified" if private else "repository_not_private",
+                                             external_diagnostics_allowed=trusted_allow)), \
+         patch("omniflow.discovery.discover_published_contexts", return_value=[]) as discover:
+        assert publish_content_impact(configured, detail, original) is authorized
+    assert Path(".omniflow/repository/column-impact.json").exists() is authorized
+    assert Path(".omniflow/repository/column-impact.md").exists() is authorized
+    if authorized:
+        discover.assert_called_once_with(target_branch="production")
+        assert "private-source/models" in Path(".omniflow/repository/column-impact.json").read_text()
+    else:
+        discover.assert_not_called()
+    public = Path(".omniflow/public/report.json").read_text() + Path(".omniflow/public/report.md").read_text()
+    assert "private-source/models" not in public and "b" * 40 not in public
+    assert current_validation_report(configured)["exit_code"] == original["exit_code"]
+
+
 def test_public_rerender_clears_old_sidecar_and_receipt(configured):
     original = current_validation_report(configured)
     publish_content_impact(configured, _detail(), original)
@@ -167,6 +204,69 @@ def test_private_content_is_deduplicated_with_source_paths_and_recovery(configur
     assert "private/orders" not in public and "Affected document" not in public and "Test owner" not in public
 
 
+def test_base_head_display_rows_combine_but_raw_evidence_is_preserved(configured):
+    source = {"model_path": "omni", "view_file": "orders.view.yaml", "field_name": "amount",
+              "relation": "SALES.ORDERS", "column": "AMOUNT", "source_revision": "base",
+              "change_kind": "modified", "confidence": "exact", "dependency_path": ["orders.amount"]}
+    document = {"document_id": "doc", "name": "Affected document", "queries": [{"query_key": "1"}]}
+    detail = _detail()
+    detail["impacts"] = [source | {"documents": [document]},
+                         source | {"source_revision": "head", "documents": [document]},
+                         source | {"view_file": "unmatched.view.yaml", "documents": []},
+                         source | {"view_file": "unmatched.view.yaml", "source_revision": "head", "documents": []}]
+    detail["coverage_gaps"] = [{"reason_code": "content_impact_field_identity_unavailable", "impact_index": index}
+                               for index in (2, 3)]
+    before = json.dumps(detail, sort_keys=True)
+    with patch("omniflow.content_impact_reporting.resolve_repository_policy",
+               return_value=RepositoryPolicy(True, "repository_verified")):
+        publish_content_impact(configured, detail, current_validation_report(configured))
+    text = Path(".omniflow/repository/column-impact.md").read_text()
+    assert text.count("Confirmed source dependency") == 2
+    assert text.count("base, head / modified") == 2
+    assert text.count(r"`content\_impact\_field\_identity\_unavailable`") == 1
+    assert "location: omni / unmatched.view.yaml / amount / base, head" in text
+    raw = json.loads(Path(".omniflow/repository/column-impact.json").read_text())
+    assert raw["impacts"] == detail["impacts"] and raw["coverage_gaps"] == detail["coverage_gaps"]
+    assert json.dumps(detail, sort_keys=True) == before
+
+
+@pytest.mark.parametrize("difference", [
+    {"confidence": "potential"}, {"dependency_path": ["orders.amount", "orders.total"]},
+    {"view_file": "moved/orders.view.yaml"}, {"source_repository": "another/models"},
+    {"source_sha": "c" * 40}, {"environment": "another"},
+])
+def test_revision_dedup_keeps_distinct_dependency_and_source_identity(difference):
+    source = {"model_path": "omni", "view_file": "orders.view.yaml", "field_name": "amount",
+              "source_repository": "source/models", "source_sha": "b" * 40,
+              "source_revision": "base", "confidence": "exact", "dependency_path": ["orders.amount"],
+              "documents": [{"document_id": "doc", "name": "Affected document"}]}
+    detail = _detail() | {"impacts": [source, source | {"source_revision": "head"} | difference]}
+    text = render_private_impact(detail)
+    assert "base, head" not in text
+    assert text.count("source: omni/") == 2
+
+
+@pytest.mark.parametrize("status,expected", [
+    ("complete", "no affected content found — complete for supported published scope"),
+    ("partial", "none found in checked content — partial; affected content is still unknown"),
+    ("unavailable", "unavailable — affected content is unknown"),
+])
+def test_zero_counts_distinguish_complete_from_partial_and_unavailable(status, expected):
+    detail = {"status": status, "coverage_complete": status == "complete",
+              "summary": dict.fromkeys(COUNTS, 0), "coverage_gaps": []}
+    assert expected in content_impact_line({"content_impact": detail})
+    if status == "complete":
+        assert primary_coverage_explanation(detail) is None
+
+
+def test_missing_counts_and_filter_only_evidence_are_not_clean_zero():
+    detail = {"status": "partial", "summary": {}, "coverage_gaps": []}
+    assert "unknown dashboard(s)" in content_impact_line({"content_impact": detail})
+    detail["summary"] = dict.fromkeys(COUNTS, 0) | {"dashboard_filters": 1}
+    text = content_impact_line({"content_impact": detail})
+    assert "1 dashboard filter(s)" in text and "none found" not in text
+
+
 @pytest.mark.parametrize("reason,expected", [
     ("content_impact_field_identity_unavailable", "matched uniquely"),
     ("dbt_explicit_view_mapping_unresolved", "checks.dbt_impact.table_mapping"),
@@ -174,6 +274,12 @@ def test_private_content_is_deduplicated_with_source_paths_and_recovery(configur
     ("content_impact_query_expression_unverified", "Saved calculations"),
     ("content_impact_budget_exhausted", "limit was reached"),
     ("omni_forbidden", "acting-user permissions"),
+    ("omni_repository_credentials_unavailable", "read-only repository token"),
+    ("omni_repository_snapshot_unavailable", "read-only repository token"),
+    ("omni_repository_context_untrusted", "trusted model target"),
+    ("omni_repository_target_mismatch", "trusted model target"),
+    ("omni_repository_snapshot_changed", "stable snapshot"),
+    ("omni_repository_receipt_unavailable", "static-analysis receipt"),
 ])
 def test_coverage_recovery_prose_is_fixed_and_public_safe(reason, expected):
     detail = _detail("unavailable")

@@ -118,6 +118,66 @@ def _impact_tokens(model: DbtModel, settings: DbtImpactSettings, dialect: str | 
     return tokens
 
 
+def _jinja_expression(block: str) -> ast.expr | None:
+    """Parse an expression block as data; never render Jinja or execute calls."""
+    if not block.startswith("{{") or not block.endswith("}}"):
+        return None
+    expression = block[2:-2]
+    if expression.startswith("-"):
+        expression = expression[1:]
+    if expression.endswith("-"):
+        expression = expression[:-1]
+    try:
+        return ast.parse(expression.strip(), mode="eval").body
+    except (SyntaxError, ValueError, RecursionError):
+        return None
+
+
+def _literal_source_call(call: ast.AST) -> bool:
+    """Only the documented literal ref/source signatures have stable tokens."""
+    if not isinstance(call, ast.Call) or not isinstance(call.func, ast.Name):
+        return False
+    if not all(isinstance(arg, ast.Constant) and type(arg.value) is str for arg in call.args):
+        return False
+    if call.func.id == "source":
+        return len(call.args) == 2 and not call.keywords
+    if call.func.id != "ref" or len(call.args) not in {1, 2} or len(call.keywords) > 1:
+        return False
+    return all(keyword.arg in {"v", "version"} and isinstance(keyword.value, ast.Constant)
+               and type(keyword.value.value) in {str, int} for keyword in call.keywords)
+
+
+def _dbt_ref_names(sql: str) -> set[str] | None:
+    """Extract literal refs, including SQL-comment dependencies, without rendering.
+
+    Jinja comments are inert; SQL comments are not, because dbt uses comments
+    containing ref() to declare dependencies. Unsupported/dynamic template code
+    cannot prove that no upstream dependency exists and returns None.
+    """
+    names: set[str] = set()
+    cursor = 0
+    for match in JINJA_RE.finditer(sql):
+        if any(marker in sql[cursor:match.start()] for marker in ("{{", "{%", "{#")):
+            return None
+        cursor = match.end()
+        block = match.group()
+        if block.startswith("{#"):
+            continue
+        expression = _jinja_expression(block)
+        if expression is None:
+            return None
+        for node in ast.walk(expression):
+            if not isinstance(node, ast.Call):
+                continue
+            if not _literal_source_call(node):
+                return None
+            if node.func.id == "ref":
+                names.add(node.args[-1].value.lower())
+    if any(marker in sql[cursor:] for marker in ("{{", "{%", "{#")):
+        return None
+    return names
+
+
 def analyze_projection(sql: str, *, dialect: str | None = None) -> Projection:
     """Compare supported SELECT expressions, never raw formatting or comments.
 
@@ -129,42 +189,22 @@ def analyze_projection(sql: str, *, dialect: str | None = None) -> Projection:
     if len(sql.encode()) > MAX_SQL_BYTES:
         raise SecurityPolicyError("dbt model SQL exceeds the 5 MiB safety limit")
     replacements: dict[int, str] = {}
-    macro_tokens: set[str] = set()
     reference_text = _reference_text(sql, dialect)
     for match in JINJA_RE.finditer(sql):
         if reference_text[match.start():match.start() + 2] not in {"{{", "{%", "{#"}:
             continue
+        if match.group().startswith("{#"):
+            replacements[match.start()] = " "
+            continue
         source_position = bool(re.search(r"\b(?:FROM|JOIN)\s*$", sql[:match.start()], re.IGNORECASE))
-        if not re.fullmatch(r"\{\{[^{}]*\}\}", match.group(), re.DOTALL):
-            return Projection(reason="dbt_sql_dynamic_projection")
-        try:
-            call = ast.parse(match.group()[2:-2].strip(), mode="eval").body
-        except (SyntaxError, ValueError):
-            return Projection(reason="dbt_sql_dynamic_projection")
-        if not isinstance(call, ast.Call) or not all(
-                isinstance(item, ast.Constant) and type(item.value) in {str, int, float, bool}
-                for item in (*call.args, *(keyword.value for keyword in call.keywords))):
-            return Projection(reason="dbt_sql_dynamic_projection")
-        name = call.func.id if isinstance(call.func, ast.Name) else None
-        token = hashlib.sha256(ast.dump(call, include_attributes=False).encode()).hexdigest()
-        if name in {"ref", "source"} and source_position:
-            if any(type(item.value) not in {str, int} for item in (*call.args, *(k.value for k in call.keywords))):
-                return Projection(reason="dbt_sql_dynamic_projection")
+        call = _jinja_expression(match.group())
+        if source_position and _literal_source_call(call):
+            token = hashlib.sha256(ast.dump(call, include_attributes=False).encode()).hexdigest()
             replacements[match.start()] = f"omniflow_dbt_source_{token}"
             continue
-        # A constant-argument macro call outside a source position is compared as
-        # an opaque expression: the same call renders the same SQL while the macro
-        # source is unchanged, and a macro file change is its own coverage gap.
-        # It may only appear inside an aliased output, checked after parsing.
-        root_name = call.func
-        while isinstance(root_name, ast.Attribute):
-            root_name = root_name.value
-        if (source_position or not isinstance(root_name, ast.Name)
-                or name in {"ref", "source", "var", "env_var", "config", "this", "adapter"}
-                or root_name.id in {"adapter", "this", "target", "env_var", "var"}):
-            return Projection(reason="dbt_sql_dynamic_projection")
-        replacements[match.start()] = f"omniflow_dbt_macro_{token}"
-        macro_tokens.add(replacements[match.start()])
+        # Even a constant-argument macro followed by AS may expand to multiple
+        # columns or depend on runtime context. An alias is not scalar evidence.
+        return Projection(reason="dbt_sql_dynamic_projection")
     candidate = JINJA_RE.sub(lambda match: replacements.get(match.start(), match.group()), sql)
     try:
         statements = sqlglot.parse(candidate, read=dialect, error_level=sqlglot.ErrorLevel.RAISE)
@@ -177,12 +217,6 @@ def analyze_projection(sql: str, *, dialect: str | None = None) -> Projection:
         for item in tree.expressions:
             if isinstance(item, exp.Star) or (isinstance(item, exp.Column) and item.is_star):
                 return Projection(reason="dbt_sql_wildcard")
-        # An unaliased macro may expand to several columns (e.g. a star macro).
-        for select in tree.find_all(exp.Select):
-            for item in select.expressions:
-                if not isinstance(item, exp.Alias) and any(
-                        column.name in macro_tokens for column in item.find_all(exp.Column)):
-                    return Projection(reason="dbt_sql_dynamic_projection")
         columns = {}
         for item in tree.expressions:
             if isinstance(item, exp.Alias):
@@ -566,11 +600,12 @@ def _list_revision_files(ref: str, prefixes: list[str], *, root: Path) -> list[s
         return None
     try:
         # Arguments are passed directly to Git, never through a shell.
-        return subprocess.run(  # nosec B603
-            [git_executable(), "ls-tree", "-r", "--name-only", ref, "--", *cleaned],
-            cwd=root, check=True, capture_output=True, text=True, timeout=10,
-        ).stdout.splitlines()
-    except (OSError, subprocess.SubprocessError):
+        output = subprocess.run(  # nosec B603
+            [git_executable(), "ls-tree", "-r", "--name-only", "-z", ref, "--", *cleaned],
+            cwd=root, check=True, capture_output=True, timeout=10,
+        ).stdout.decode("utf-8")
+        return [path for path in output.split("\0") if path]
+    except (OSError, UnicodeError, subprocess.SubprocessError):
         return None
 
 
@@ -588,11 +623,9 @@ def _downstream_models(base_ref: str, changed: dict[str, str], dbt_paths: list[s
     if listing is None:
         return None
     candidates = sorted(path for path in listing if path.lower().endswith(".sql")
-                        and "macros" not in Path(path).parts and path not in changed.values())
+                        and "macros" not in Path(path).parts)
     if len(candidates) > MAX_DBT_FILES:
         return None
-    patterns = {name: re.compile(rf"\{{\{{\s*ref\(\s*(?:['\"][^'\"]+['\"]\s*,\s*)?['\"]{re.escape(name)}['\"]",
-                                 re.IGNORECASE) for name in changed}
     children: dict[str, list[str]] = defaultdict(list)
     for path in candidates:
         try:
@@ -600,12 +633,17 @@ def _downstream_models(base_ref: str, changed: dict[str, str], dbt_paths: list[s
         except (ConfigError, SecurityPolicyError):
             return None
         if text is None:
-            continue
+            return None
         budget -= len(text.encode())
         if budget < 0:
             return None
-        for name, pattern in patterns.items():
-            if pattern.search(text):
+        references = _dbt_ref_names(text)
+        if references is None:
+            return None
+        for name, source_path in changed.items():
+            # A child's own SQL edit does not analyze inherited effects in its
+            # otherwise unchanged outputs. Exclude only a source's self-edge.
+            if name in references and path != source_path:
                 children[name].append(path)
     return dict(children)
 
@@ -614,6 +652,7 @@ def collect_column_impacts(
     *, changed_files: list[str], dbt_paths: list[str], settings: DbtImpactSettings,
     omni_yaml_paths: list[str], base_ref: str | None, repo_root: Path | None = None,
     canonical_view_resolver: CanonicalViewResolver | None = None,
+    omni_snapshot=None,
 ) -> dict[str, Any]:
     """Return bounded private impact evidence without changing validation policy.
 
@@ -712,7 +751,8 @@ def collect_column_impacts(
             continue
         if scope == "base" and revision is None:
             revision = (base_ref, "")
-        files, coverage = _load_omni_snapshot(root, omni_yaml_paths, revision=revision)
+        files, coverage = _load_omni_snapshot(root, omni_yaml_paths, revision=revision,
+                                             external_snapshot=omni_snapshot)
         if not coverage:
             _gap(gaps, "omni_root_unavailable", source_revision=scope)
         for item in coverage:
@@ -735,5 +775,9 @@ def collect_column_impacts(
         if key not in unique:
             unique[key] = item
     result["impacts"] = list(unique.values())
+    if omni_snapshot is not None:
+        result["dbt_impact_snapshot"] = omni_snapshot.evidence()
+        for item in result["impacts"]:
+            item.update(source_repository=omni_snapshot.settings.repository, source_sha=omni_snapshot.sha)
     result["coverage_complete"] = not gaps
     return result

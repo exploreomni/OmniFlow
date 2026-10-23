@@ -116,6 +116,15 @@ checks:
   #     max_searches: 100                   # bounded field searches + document reads
   #     timeout_seconds: 120
 
+  # For a SEPARATE Omni repository, use omni_repository INSTEAD of omni_yaml_paths
+  # in the dbt_impact block above. The workflow needs omni-repository-token.
+  #   omni_repository:
+  #     repository: your-org/omni-models
+  #     ref: main                          # published branch, resolved to one SHA
+  #     model_paths: [omni/my_model]        # roots in the external repository
+  #     allow_repository_diagnostics: false # opt in only with cross-audience approval
+  # Cross-repo sync/holds and coordinated Omni+dbt PRs are unsupported.
+
   # Optional: run Omni AI eval prompt sets against main and the PR branch, and
   # fail on any regression. Unlike every other check here, this asks Omni AI
   # to answer real prompts rather than performing deterministic YAML

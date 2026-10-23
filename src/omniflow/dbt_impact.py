@@ -23,7 +23,7 @@ from .config import DbtImpactSettings
 from .dbt_manifest import MAX_MANIFEST_BYTES, DbtModel, diff_manifests, parse_manifest
 from .dbt_sql_diff import MAX_SQL_BYTES, analyze_output_columns, model_name_from_path, sql_reference_text
 from .diff.yaml_loader import load_yaml_files, parse_yaml_file_map
-from .exceptions import ConfigError, SecurityPolicyError
+from .exceptions import ConfigError, OmniFlowError, SecurityPolicyError
 from .model_paths import filename_identity, is_repo_control_file, is_semantic_file
 from .revision_data import FULL_SHA, pull_request_revision, read_git_text, read_github_text, read_head_text
 from .semantic_files import infer_file_kind
@@ -68,6 +68,7 @@ def evaluate_dbt_impact(
     omni_yaml_paths: list[str],
     base_ref: str | None,
     repo_root: Path | None = None,
+    omni_snapshot=None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     """Analyze dbt changes against candidate Omni references, including mixed PRs.
 
@@ -82,8 +83,10 @@ def evaluate_dbt_impact(
 
     head_revision = pull_request_revision("head")
     base_revision = pull_request_revision("base")
-    graph_files, root_coverage = _load_omni_snapshot(root, omni_yaml_paths, revision=head_revision)
+    graph_files, root_coverage = _load_omni_snapshot(root, omni_yaml_paths, revision=head_revision,
+                                                  external_snapshot=omni_snapshot)
     base_graph_files, base_coverage = (
+        (graph_files, [dict(item) for item in root_coverage]) if omni_snapshot is not None else
         _load_omni_snapshot(root, omni_yaml_paths, revision=base_revision)
         if base_revision else ({}, [])
     )
@@ -351,20 +354,38 @@ def _load_omni_files(root: Path, omni_yaml_paths: list[str]) -> dict[str, Any]:
     return merged
 
 
-def _load_omni_snapshot(root: Path, paths: list[str], *, revision: tuple[str, str] | None):
+def _load_omni_snapshot(root: Path, paths: list[str], *, revision: tuple[str, str] | None,
+                        external_snapshot=None):
+    try:
+        return _load_omni_snapshot_data(root, paths, revision=revision, external_snapshot=external_snapshot)
+    except OmniFlowError as exc:
+        if external_snapshot is not None:
+            # Preserve the safety/access exit class, but identify which source
+            # failed rather than returning an unclassified inventory message.
+            exc.reason_code = "omni_repository_snapshot_unavailable"
+        raise
+
+
+def _load_omni_snapshot_data(root: Path, paths: list[str], *, revision: tuple[str, str] | None,
+                             external_snapshot=None):
     """Read bounded data, never check out or execute the candidate revision."""
-    if revision is None:
+    if revision is None and external_snapshot is None:
         files = _load_omni_files(root, paths)
         coverage = [{"path": path, "status": "available" if (root / path).is_dir() else "missing"}
                     for path in paths]
     else:
-        sha, repository = revision
-        try:
-            entries = _local_tree(sha, root=root)
-            local = True
-        except _GitUnavailable:
-            entries = _remote_tree(repository, sha)
+        if external_snapshot is not None:
+            repository, sha = external_snapshot.identity
+            entries = list(external_snapshot.tree.values())
             local = False
+        else:
+            sha, repository = revision
+            try:
+                entries = _local_tree(sha, root=root)
+                local = True
+            except _GitUnavailable:
+                entries = _remote_tree(repository, sha)
+                local = False
         if len(entries) > MAX_TREE_ENTRIES:
             raise SecurityPolicyError("dbt impact Git tree exceeds the file inventory limit")
         tree = {}
@@ -402,7 +423,9 @@ def _load_omni_snapshot(root: Path, paths: list[str], *, revision: tuple[str, st
                     except UnicodeError as exc:
                         raise ConfigError("dbt impact source must be UTF-8") from exc
                 else:
-                    raw[name] = read_github_text(repository, sha, name, max_bytes=MAX_YAML_FILE_BYTES)
+                    raw[name] = (external_snapshot.read_text(name, max_bytes=MAX_YAML_FILE_BYTES)
+                                 if external_snapshot is not None else
+                                 read_github_text(repository, sha, name, max_bytes=MAX_YAML_FILE_BYTES))
                     if raw[name] is None:
                         raise ConfigError("dbt impact source disappeared from the immutable inventory")
         files = parse_yaml_file_map(raw)

@@ -57,7 +57,9 @@ DBT_IMPACT_KEYS = {
     "omni_yaml_paths",
     "table_mapping",
     "content_impact",
+    "omni_repository",
 }
+OMNI_REPOSITORY_KEYS = {"repository", "ref", "model_paths", "allow_repository_diagnostics"}
 CONTENT_IMPACT_KEYS = {"enabled", "sql_dialect", "max_searches", "timeout_seconds"}
 TABLE_MAPPING_KEYS = {"dbt_model", "omni_view", "sql_table_name"}
 MAX_TABLE_MAPPINGS = 500
@@ -126,6 +128,7 @@ _SCHEMA_GROUPS = {
     "checks.dbt_exposures": EXPOSURE_KEYS, "checks.dbt_impact": DBT_IMPACT_KEYS,
     "checks.dbt_impact.table_mapping": TABLE_MAPPING_KEYS,
     "checks.dbt_impact.content_impact": CONTENT_IMPACT_KEYS,
+    "checks.dbt_impact.omni_repository": OMNI_REPOSITORY_KEYS,
     "checks.ai_eval": AI_EVAL_KEYS, "checks.ai_eval.prompt_sets": PROMPT_SET_KEYS,
     "checks.query_validation": {"mode", "contracts", "native_qualified", "snapshot_attestation",
                                 "environment_connection_id", "user_id", "timezone", "max_queries",
@@ -328,6 +331,14 @@ class DbtContentImpactSettings:
 
 
 @dataclass
+class OmniRepositorySettings:
+    repository: str
+    ref: str
+    model_paths: list[str]
+    allow_repository_diagnostics: bool = False
+
+
+@dataclass
 class DbtImpactSettings:
     enabled: bool = False
     manifest_path: str | None = None
@@ -336,6 +347,7 @@ class DbtImpactSettings:
     omni_yaml_paths: list[str] = field(default_factory=list)
     table_mapping: list[dict[str, str]] = field(default_factory=list)
     content_impact: DbtContentImpactSettings = field(default_factory=DbtContentImpactSettings)
+    omni_repository: OmniRepositorySettings | None = None
 
 
 @dataclass
@@ -578,6 +590,7 @@ def _to_config(raw: dict[str, Any], source: Path | None) -> OmniFlowConfig:
         ),
         table_mapping=_table_mapping(dbt_impact_raw.get("table_mapping")),
         content_impact=_content_impact_settings(dbt_impact_raw.get("content_impact")),
+        omni_repository=_omni_repository_settings(dbt_impact_raw.get("omni_repository")),
     )
     ai_eval = AiEvalSettings(
         enabled=parse_bool("ai_eval.enabled", ai_eval_raw.get("enabled"), False),
@@ -694,6 +707,13 @@ def _to_config(raw: dict[str, Any], source: Path | None) -> OmniFlowConfig:
         dbt_paths=_dbt_paths(breaking_hold_raw.get("dbt_paths")),
         pending_label=_pending_label(breaking_hold_raw.get("pending_label")),
     )
+    if dbt_impact.omni_repository is not None:
+        if not dbt_impact.enabled or dbt_impact.omni_yaml_paths:
+            raise ConfigError("External Omni snapshots require enabled dbt impact and model_paths, not omni_yaml_paths",
+                              reason_code="omni_repository_configuration_invalid")
+        if breaking_change_hold.enabled or dbt_sync.enabled:
+            raise ConfigError("Cross-repository deployment synchronization and holds are not supported",
+                              reason_code="omni_repository_configuration_invalid")
     return OmniFlowConfig(
         raw=raw,
         source=source,
@@ -979,6 +999,7 @@ def _validate_config_schema(raw: dict[str, Any]) -> None:
     # Query cohorts, budgets and attestations must be fixed reviewed policy, not
     # mutable workflow-variable substitutions.
     parse_query_validation(checks.get("query_validation"))
+    _omni_repository_settings(_mapping(checks.get("dbt_impact"), "checks.dbt_impact").get("omni_repository"))
     _reject_unknown_keys(reporting, REPORTING_KEYS, "reporting")
     _diagnostics_mode(reporting)
     _reject_unknown_keys(security, SECURITY_KEYS, "security")
@@ -1056,6 +1077,44 @@ def _bounded_int(name: str, value: Any, *, minimum: int, maximum: int, default: 
         raise _config_error(f"{name} must be between {minimum} and {maximum}", name, "integer",
                             reason="config_invalid_value")
     return parsed
+
+
+def _omni_repository_settings(value: Any) -> OmniRepositorySettings | None:
+    if value is None:
+        return None
+    from .revision_data import FULL_SHA, REPOSITORY
+    from .trust import SAFE_GIT_REF_RE, _safe_repo_path
+
+    source = "checks.dbt_impact.omni_repository"
+    raw = _mapping(value, source)
+    _reject_unknown_keys(raw, OMNI_REPOSITORY_KEYS, source)
+    repository, ref = raw.get("repository"), raw.get("ref")
+    if (not isinstance(repository, str) or not REPOSITORY.fullmatch(repository)
+            or any(part in {".", ".."} for part in repository.split("/"))):
+        raise _config_error("External source requires owner/repository", f"{source}.repository", "string")
+    # First release follows a named published branch, not a tag or a coordinated
+    # second PR. Resolve it once to a commit; never let a mutable name reach blobs.
+    if (not isinstance(ref, str) or not SAFE_GIT_REF_RE.fullmatch(ref) or len(ref) > 255
+            or FULL_SHA.fullmatch(ref) or ref.startswith(("refs/", "-", "/")) or ref.endswith(("/", ".", ".lock"))
+            or any(part in {".", "..", ""} or part.startswith(".") for part in ref.split("/"))
+            or ".." in ref or "@{" in ref):
+        raise _config_error("External ref must be a branch name", f"{source}.ref", "string")
+    paths = raw.get("model_paths")
+    if not isinstance(paths, list) or not paths or len(paths) > MAX_DBT_PATHS:
+        raise _config_error("External model_paths must be a bounded non-empty list", f"{source}.model_paths", "non_empty_list")
+    normalized = []
+    for path in paths:
+        if not isinstance(path, str) or not path or "$" in path or _safe_repo_path(Path(path)) != path:
+            raise _config_error("External model_paths must be canonical repository paths", f"{source}.model_paths", "repository_path")
+        if any(path == prior or path == "." or prior == "." or path.startswith(prior + "/")
+               or prior.startswith(path + "/") for prior in normalized):
+            raise _config_error("External model_paths must not overlap", f"{source}.model_paths", "repository_path")
+        normalized.append(path)
+    return OmniRepositorySettings(
+        repository=repository, ref=ref, model_paths=normalized,
+        allow_repository_diagnostics=parse_bool(f"{source}.allow_repository_diagnostics",
+                                               raw.get("allow_repository_diagnostics"), False),
+    )
 
 
 def _content_impact_settings(value: Any) -> DbtContentImpactSettings:

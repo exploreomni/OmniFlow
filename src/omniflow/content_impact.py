@@ -32,7 +32,7 @@ MAX_LAYOUT_NODES = 10_000
 class _ImpactSession:
     """Private single-run metadata cache; never reusable permission authority."""
 
-    def __init__(self, contexts, client_factory, settings, client_verifier):
+    def __init__(self, contexts, client_factory, settings, client_verifier, source_identity=()):
         self.contexts = contexts
         self.client_factory = client_factory
         self.client_verifier = client_verifier
@@ -45,10 +45,10 @@ class _ImpactSession:
         self.source_files = {}
         self.correspondences = {}
         self.require_correspondence = False
+        self.source_identity = source_identity
 
-    @staticmethod
-    def context_key(context):
-        return context.base_url, context.model_id, context.model_path, context.environment
+    def context_key(self, context):
+        return (*self.source_identity, context.base_url, context.model_id, context.model_path, context.environment)
 
     def scope_key(self, context, scope):
         return (*self.context_key(context), scope)
@@ -89,6 +89,7 @@ def collect_and_enrich_content_impact(
     settings: Any, user_id: str | None = None, include_personal_folders: bool = False,
     source_file_reader: Callable[[ModelContext, str, str], str] | None = None,
     client_verifier: Callable | None = None,
+    source_identity: tuple = (),
 ) -> dict[str, Any]:
     """Resolve authored canonical references and enrich within one read budget.
 
@@ -102,7 +103,7 @@ def collect_and_enrich_content_impact(
     if not getattr(settings, "enabled", False):
         return enrich_content_impact(static_report={}, contexts=contexts, client_factory=client_factory,
                                      settings=settings)
-    session = _ImpactSession(contexts, client_factory, settings, client_verifier)
+    session = _ImpactSession(contexts, client_factory, settings, client_verifier, source_identity)
     session.require_correspondence = True
     resolver_gaps = []
 

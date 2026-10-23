@@ -164,20 +164,26 @@ def read_head_text(path: str, *, root: Path, max_bytes: int) -> str | None:
         return read_github_text(repository, sha, path, max_bytes=max_bytes)
 
 
-def read_github_text(repository: str, sha: str, path: str, *, max_bytes: int) -> str | None:
+def read_github_text(repository: str, sha: str, path: str, *, max_bytes: int,
+                     api=None, tree: dict | None = None) -> str | None:
     path = _safe_repo_path(Path(path))
     if not REPOSITORY.fullmatch(repository) or not FULL_SHA.fullmatch(sha):
         raise SecurityPolicyError("GitHub data read requires a repository and exact SHA")
-    token = os.getenv("OMNIFLOW_GITHUB_TOKEN")
-    if not token:
-        raise ConfigError(
-            "OMNIFLOW_GITHUB_TOKEN is required to read exact pull request data", reason_code="github_missing_token",
-            diagnostic_context={"service": "github", "api_operation": "github_blob", "retryable": False},
-        )
-    from .github.revalidation import GitHubRepository
+    if api is None:
+        token = os.getenv("OMNIFLOW_GITHUB_TOKEN")
+        if not token:
+            raise ConfigError(
+                "OMNIFLOW_GITHUB_TOKEN is required to read exact pull request data", reason_code="github_missing_token",
+                diagnostic_context={"service": "github", "api_operation": "github_blob", "retryable": False},
+            )
+        from .github.revalidation import GitHubRepository
 
-    api = GitHubRepository(repository, token)
-    tree = _github_tree(repository, sha, os.getenv("GITHUB_API_URL", "https://api.github.com"))
+        api = GitHubRepository(repository, token)
+        tree = _github_tree(repository, sha, os.getenv("GITHUB_API_URL", "https://api.github.com"))
+    elif api.repository != repository:
+        raise SecurityPolicyError("GitHub data client does not match the source repository")
+    if tree is None:
+        tree = github_tree(api, sha)
     for parent in Path(path).parents:
         parent_entry = tree.get(parent.as_posix())
         if parent_entry and parent_entry.get("type") != "tree":
@@ -187,7 +193,7 @@ def read_github_text(repository: str, sha: str, path: str, *, max_bytes: int) ->
         return None
     if entry.get("type") != "blob" or entry.get("mode") not in {"100644", "100755"}:
         raise SecurityPolicyError("GitHub revision data must be a regular file, not a symlink")
-    if not isinstance(entry.get("size"), int) or entry["size"] > max_bytes:
+    if type(entry.get("size")) is not int or not 0 <= entry["size"] <= max_bytes:
         raise SecurityPolicyError("GitHub revision file exceeds its size limit")
     blob_sha = entry.get("sha")
     if not isinstance(blob_sha, str) or not FULL_SHA.fullmatch(blob_sha):
@@ -195,7 +201,7 @@ def read_github_text(repository: str, sha: str, path: str, *, max_bytes: int) ->
     payload = api.request("GET", f"/git/blobs/{blob_sha}", max_bytes=max_bytes * 2 + 65536)
     if not isinstance(payload, dict) or payload.get("encoding") != "base64" or payload.get("sha") != blob_sha:
         raise ConfigError("GitHub did not return complete immutable blob data")
-    if not isinstance(payload.get("size"), int) or payload["size"] > max_bytes:
+    if type(payload.get("size")) is not int or payload["size"] != entry["size"]:
         raise SecurityPolicyError("GitHub revision file exceeds its size limit")
     try:
         value = base64.b64decode("".join(payload["content"].split()), validate=True)
@@ -211,10 +217,23 @@ def _github_tree(repository: str, sha: str, api_url: str) -> dict:
     from .github.revalidation import GitHubRepository
 
     api = GitHubRepository(repository, os.getenv("OMNIFLOW_GITHUB_TOKEN", ""))
+    return github_tree(api, sha)
+
+
+def github_tree(api, sha: str) -> dict:
+    """Bounded inventory for an explicit client; no cross-credential tree cache."""
+    if not FULL_SHA.fullmatch(sha):
+        raise SecurityPolicyError("GitHub tree read requires an exact SHA")
     payload = api.request("GET", f"/git/trees/{sha}?recursive=1")
     if not isinstance(payload, dict) or payload.get("truncated") is not False or not isinstance(payload.get("tree"), list):
         raise ConfigError("GitHub revision tree is incomplete")
     entries = payload["tree"]
     if len(entries) > 10000 or any(not isinstance(item, dict) or not isinstance(item.get("path"), str) for item in entries):
         raise ConfigError("GitHub revision tree exceeds the bounded file inventory or is invalid")
-    return {item["path"]: item for item in entries}
+    tree = {}
+    for item in entries:
+        path = _safe_repo_path(Path(item["path"]))
+        if path != item["path"] or path == "." or path in tree:
+            raise ConfigError("GitHub revision tree contains ambiguous paths")
+        tree[path] = item
+    return tree

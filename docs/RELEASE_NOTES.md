@@ -1,10 +1,29 @@
 # Release notes
 
+## Unreleased — dbt comparison precision and external Omni snapshots
+
+- Repairs the PR #57 CI fixture without changing production metadata trust.
+  Downstream `ref` detection handles whitespace, package/version arguments and
+  comments, including children edited in the same PR. Arbitrary macro expansion
+  remains partial/potential; an alias is not proof of a scalar result.
+- Compact impact summaries explain their leading coverage gap and distinguish
+  complete zero impact from none found with partial coverage. Markdown combines
+  identical base/head rows; full JSON retains revision-level evidence.
+- Opt-in `checks.dbt_impact.omni_repository` supports a dbt PR against one external
+  Omni branch snapshot, using a separate read-only GitHub credential. Evidence
+  records immutable revisions; drift checks and `dbt verify-source` reject stale
+  source/PR results. Private cross-repository details require explicit trusted
+  opt-in as well as verified private-destination eligibility.
+- Existing single-repository behavior and optional defaults are unchanged.
+  Coordinated two-PR deployment, cross-repo holds and API-only snapshots are not
+  supported. Update the Action pin **and** workflow input for this mode; see
+  [dbt impact setup and freshness requirements](DBT_IMPACT.md#separate-dbt-and-omni-repositories).
+
 ## Unreleased — verified relocation, source locations and result-quality probes
 
 - dbt column-to-content impact keeps column precision for dbt-style import CTEs
-  (`select * from {{ ref(...) }}`) and compares aliased constant-argument macro
-  outputs per column. A changed model with downstream dbt children now reports
+  (`select * from {{ ref(...) }}`). Unknown macro output shapes remain partial.
+  A changed model with downstream dbt children now reports
   `dbt_downstream_models_not_analyzed` instead of reading as zero impact.
 - Blocking dbt orphan findings now have specific codes and guidance
   (`OF-DBT-IMPACT-ORPHANED-COLUMN`, `OF-DBT-IMPACT-ORPHANED-MODEL`) instead of the

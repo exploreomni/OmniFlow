@@ -8,7 +8,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from ..content_impact_reporting import content_impact_line, coverage_explanations
+from ..content_impact_reporting import content_impact_line, coverage_explanations, primary_coverage_explanation
 from ..diagnostics import ENUMS, public_diagnostic
 from .finding_groups import group_findings
 from .issue_policy import is_blocking
@@ -173,6 +173,9 @@ def render_pr_comment(
 
     impact_line = content_impact_line(safe)
     if impact_line:
+        reason = primary_coverage_explanation(safe["content_impact"])
+        if reason:
+            impact_line += " Coverage gap: " + reason
         lines.append(impact_line + " " + _impact_details_link(run_url, publication))
     # Impact details use their own generated-and-uploaded receipt; the generic
     # full-report link remains public, even if other private diagnostics exist.

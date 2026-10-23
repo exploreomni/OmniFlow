@@ -17,6 +17,31 @@ def _add(reason: str, code: str, title: str, action: str, category: str = "incom
 
 
 for _reason, _title, _action in (
+    ("omni_repository_configuration_invalid", "The external Omni source configuration is unsupported.",
+     "Use a named source branch and nonoverlapping model_paths with enabled dbt impact. Do not combine this mode "
+     "with local Omni changes, deployment sync, or the breaking-change hold. See docs/DBT_IMPACT.md."),
+    ("omni_repository_credentials_unavailable", "The separate Omni repository read credential is missing.",
+     "Set OMNIFLOW_OMNI_REPO_TOKEN, or the omni-repository-token Action input, with Contents read access to the "
+     "configured source repository. The ordinary workflow token is not a fallback."),
+    ("omni_repository_context_untrusted", "This workflow context cannot access the external Omni repository.",
+     "Use a trusted same-repository PR or protected manual run. Forks must never receive the external credential."),
+    ("omni_repository_snapshot_unavailable", "The external Omni snapshot could not be read completely.",
+     "Check the configured repository, branch, model roots and separate token's Contents read permission. "
+     "Resolve truncated, invalid or oversized evidence before rerunning; missing evidence is not zero impact."),
+    ("omni_repository_snapshot_changed", "The recorded dbt or Omni revision changed.",
+     "Run the full comparison again against current PR base/head and the current external Omni branch. "
+     "Do not reuse a passing result from another snapshot."),
+    ("omni_repository_target_mismatch", "The published Omni target does not match the external source registration.",
+     "Match .omni/flow.json model_path, web_url, base_branch and provider to the configured external source and "
+     "the model's live Git configuration; preserve environment-specific credentials."),
+    ("omni_repository_receipt_unavailable", "The current-run external source validation receipt is unavailable.",
+     "Run static dbt validation first in the same protected job, then content-impact and verify-source. "
+     "Do not download or reuse a receipt from an earlier run."),
+):
+    _add(_reason, "OF-" + _reason.upper().replace("_", "-"), _title, _action)
+
+
+for _reason, _title, _action in (
     ("invalid_query_validation_config", "The query-validation policy is invalid.",
      "Use the bounded reviewed-contract schema in docs/QUERY_VALIDATION.md; unknown keys and mutable substitutions are rejected."),
     ("query_contract_regression", "A reviewed query assertion detected a new or worsened finding.",

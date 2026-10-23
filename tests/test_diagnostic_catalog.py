@@ -231,11 +231,16 @@ def test_dbt_orphan_findings_get_fixed_specific_guidance(rule, code):
     assert_no_private_markers(json.dumps(issue))
 
 
-def test_missing_model_identity_explains_the_fix():
+def test_missing_model_identity_explains_the_fix(tmp_path, monkeypatch):
     from omniflow.diagnostics import safe_exception_message
     from omniflow.discovery import discover_contexts
     from omniflow.exceptions import ConfigError
 
+    # This is a local missing-input case, not a PR trusted-metadata test. A real
+    # Actions event must not redirect this fixture to the runner's base commit.
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("GITHUB_EVENT_NAME", raising=False)
+    monkeypatch.delenv("GITHUB_EVENT_PATH", raising=False)
     with pytest.raises(ConfigError) as caught:
         discover_contexts(auto=False)
     message = safe_exception_message(caught.value)

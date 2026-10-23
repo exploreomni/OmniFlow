@@ -336,6 +336,12 @@ It is disabled by default and never fires for additive changes. Leave it disable
 
 ### 9. Optional dbt Impact Analysis
 
+Separate dbt and Omni repositories are supported through an opt-in immutable
+external snapshot and a separate read-only GitHub credential. See the
+[two-repository setup](docs/DBT_IMPACT.md#separate-dbt-and-omni-repositories), including
+private-detail authorization and required freshness checks before merge/deployment.
+Existing single-repository installations do not need new settings or credentials.
+
 The breaking change hold covers breaking Omni changes. This check covers the opposite direction: a dbt-only pull request that removes a warehouse column or model the committed Omni YAML still references.
 
 Without it, two dbt pull requests can rename columns, merge cleanly because neither touches Omni files, and break dashboards once dbt deploys. The check runs on pull requests OmniFlow would otherwise skip, needs no Omni credential, and uses a committed dbt manifest when available or conservative SQL parsing when not.

@@ -46,6 +46,9 @@ GAP_REASONS = frozenset({
     "omni_field_reference_ambiguous", "omni_field_reference_unresolved", "omni_field_dependency_cycle",
     "omni_field_dependency_depth", "omni_view_evidence_unavailable", "omni_inheritance_unsupported",
     "omni_relation_identity_unavailable", "omni_view_identity_unavailable",
+    "omni_repository_credentials_unavailable", "omni_repository_context_untrusted",
+    "omni_repository_snapshot_unavailable", "omni_repository_snapshot_changed",
+    "omni_repository_target_mismatch", "omni_repository_receipt_unavailable",
     "impact_evidence_limit",
 })
 
@@ -102,46 +105,91 @@ def content_impact_line(report: dict) -> str | None:
     counts = safe["summary"]
     if safe["status"] == "unavailable":
         return "dbt content impact: unavailable — affected content is unknown (advisory)."
+    content_counts = ("dashboards", "workbooks", "queries", "dashboard_filters")
+    if all(counts.get(key) == 0 for key in content_counts):
+        if safe["coverage_complete"]:
+            return ("dbt content impact: no affected content found — complete for supported published scope "
+                    "(advisory).")
+        return ("dbt content impact: none found in checked content — partial; affected content is still unknown "
+                "(advisory).")
     coverage = "complete for supported published scope" if safe["coverage_complete"] else "partial; totals are lower bounds"
-    return (f"dbt content impact: {counts.get('dashboards', 0)} dashboard(s), "
-            f"{counts.get('workbooks', 0)} workbook(s), {counts.get('queries', 0)} query(s) observed "
-            f"— {coverage} (advisory).")
+    return (f"dbt content impact: {counts.get('dashboards', 'unknown')} dashboard(s), "
+            f"{counts.get('workbooks', 'unknown')} workbook(s), {counts.get('queries', 'unknown')} query(s) observed "
+            + (f", {counts['dashboard_filters']} dashboard filter(s)" if counts.get("dashboard_filters") else "")
+            + f" — {coverage} (advisory).")
 
 
 def coverage_explanations(report: dict) -> list[str]:
     """Fixed recovery prose only; never render API messages or source identifiers."""
+    return _coverage_messages(report, compact=False)
+
+
+def primary_coverage_explanation(report: dict) -> str | None:
+    """One deterministic, fixed reason for a compact partial-coverage summary."""
+    safe = public_content_impact(report)
+    if safe["status"] == "disabled" or safe["coverage_complete"]:
+        return None
+    return _coverage_messages(safe, compact=True)[0]
+
+
+def _coverage_messages(report: dict, *, compact: bool) -> list[str]:
     safe = public_content_impact(report)
     reasons = set(safe["coverage_reasons"]) | set(safe["coverage_causes"])
+    # Priority is stable across base/head and API ordering. Each category keeps
+    # its short public explanation beside the full recovery guidance.
     groups = (
+        ({"omni_repository_context_untrusted", "omni_repository_target_mismatch"},
+         "The external Omni repository is not bound to the trusted model target. Verify the trusted repository, "
+         "branch and model registration; no different target is substituted.",
+         "The external Omni repository could not be verified against the trusted model target."),
+        ({"omni_repository_credentials_unavailable", "omni_repository_snapshot_unavailable"},
+         "The external Omni repository snapshot could not be read. Check the configured read-only repository token "
+         "and its access to the trusted repository and branch, then rerun.",
+         "The external Omni repository snapshot could not be read; check token/read access."),
+        ({"omni_repository_snapshot_changed"},
+         "The external Omni repository changed during analysis. Rerun against a stable snapshot; the previous "
+         "snapshot is not treated as current evidence.",
+         "The external Omni repository snapshot changed during analysis; rerun."),
+        ({"omni_repository_receipt_unavailable"},
+         "The external Omni repository's static-analysis receipt is missing or not current. Rerun the trusted "
+         "static impact step and enrichment together; do not reuse an older receipt.",
+         "A current external-repository static-analysis receipt is unavailable; rerun both impact steps."),
         ({"dbt_explicit_view_mapping_unresolved"},
          "A configured dbt-to-Omni view mapping could not be resolved. Impact coverage is incomplete. "
          "Check checks.dbt_impact.table_mapping against the authored views for the recorded revision; "
-         "no other view is substituted."),
+         "no other view is substituted.",
+         "A configured dbt-to-Omni view mapping is unresolved; check checks.dbt_impact.table_mapping."),
         ({"dbt_downstream_models_not_analyzed", "dbt_downstream_models_unavailable"},
          "A changed dbt model feeds other dbt models, or that inventory could not be read. Column lineage through "
          "downstream models is not analyzed, so Omni content built on them is not counted. Treat the totals as a "
-         "lower bound and check the downstream marts' Omni views."),
+         "lower bound and check the downstream marts' Omni views.",
+         "Downstream dbt model lineage is not analyzed or its inventory is unavailable."),
         ({"content_impact_field_identity_unavailable", "omni_view_identity_unavailable",
           "omni_field_reference_ambiguous", "omni_field_reference_unresolved",
           "dbt_relation_ambiguous", "dbt_relation_identity_unavailable", "dbt_relation_case_ambiguous"},
          "A source field could not be matched uniquely to a published Omni view. Verify database/schema identity "
-         "and published model synchronization; unresolved fields are not attributed to another view's content."),
+         "and published model synchronization; unresolved fields are not attributed to another view's content.",
+         "A source field could not be matched uniquely to a published Omni view."),
         ({"content_impact_query_expression_unverified", "content_impact_timeframe_identity_unverified",
           "content_impact_query_type_unsupported", "content_impact_app_unsupported", "omni_query_view_unsupported"},
          "Saved calculations, timeframe references, or SQL/App queries have unsupported lineage. Direct supported "
-         "references may be listed, but inspect the affected queries in Omni for additional dependencies."),
+         "references may be listed, but inspect the affected queries in Omni for additional dependencies.",
+         "Saved calculations, timeframe references, or SQL/App queries have unsupported lineage."),
         ({"dbt_sql_dynamic_projection", "dbt_sql_unsupported", "dbt_sql_wildcard", "dbt_source_unsupported",
           "dbt_manifest_only_change", "dbt_sql_output_identity_unavailable", "dbt_sql_duplicate_output"},
          "The changed dbt source cannot be fully analyzed. Dynamic macros, wildcard outputs, and compiled-SQL-only "
-         "changes are not resolved by this feature. Review the source and generated SQL separately; no dbt code is executed."),
+         "changes are not resolved by this feature. Review the source and generated SQL separately; no dbt code is executed.",
+         "Dynamic macros, wildcard outputs, or unsupported SQL prevent complete dbt source analysis."),
         ({"omni_inheritance_unsupported", "omni_field_dependency_cycle", "omni_field_expression_unsupported",
           "omni_field_filter_unsupported"},
          "An authored Omni dependency uses unsupported inheritance, an expression/filter, or a cycle. Inspect its "
-         "dependency path in the private detail report and validate the same scope in Omni."),
+         "dependency path in the private detail report and validate the same scope in Omni.",
+         "An Omni dependency uses unsupported inheritance, an expression/filter, or a cycle."),
         ({"content_impact_budget_exhausted", "content_impact_timeout", "impact_evidence_limit",
           "omni_field_dependency_depth", "omni_timeout"},
          "A bounded lookup or analysis limit was reached. Narrow the scope or adjust supported limits, then rerun; "
-         "omitted content is not confirmed unaffected."),
+         "omitted content is not confirmed unaffected.",
+         "A bounded lookup or analysis limit was reached."),
         ({"content_impact_search_unavailable", "content_impact_queries_unavailable", "content_impact_model_unavailable",
           "content_impact_credentials_unavailable", "content_impact_actor_scope_unverified",
           "content_pat_impersonation_unsupported", "content_actor_unresolved", "omni_http_error",
@@ -149,18 +197,21 @@ def coverage_explanations(report: dict) -> list[str]:
           "omni_tls_error", "omni_connection_error", "omni_request_failed", "omni_response_interrupted",
           "empty_api_response", "invalid_json_response"},
          "Required metadata could not be read. Check the API credential, acting-user permissions, and connection "
-         "for the registered model, then rerun. An unavailable response is not zero impact."),
+         "for the registered model, then rerun. An unavailable response is not zero impact.",
+         "Required metadata could not be read; check API access, acting-user permissions, and connection."),
         ({"content_impact_layout_unavailable", "content_impact_layout_unsupported",
           "content_impact_document_changed", "content_impact_snapshot_changed",
           "content_impact_document_scope_mismatch", "content_impact_draft_document",
           "content_impact_query_inventory_incomplete", "content_impact_reference_unverified"},
          "Document placement, scope, or snapshot evidence is incomplete. Inspect the published document and rerun "
-         "after it is stable; a saved tab is not assumed to be a dashboard tile."),
+         "after it is stable; a saved tab is not assumed to be a dashboard tile.",
+         "Document placement, scope, or snapshot evidence is incomplete."),
     )
-    messages = [message for codes, message in groups if reasons & codes]
-    covered = set().union(*(codes for codes, _ in groups))
+    messages = [short if compact else message for codes, message, short in groups if reasons & codes]
+    covered = set().union(*(codes for codes, _, _ in groups))
     if reasons - covered or (safe["status"] in {"partial", "unavailable"} and not messages):
-        messages.append("Impact coverage remains incomplete. Review the reason categories and private source locations "
+        messages.append("Required impact evidence is incomplete; inspect the detailed coverage report." if compact else
+                        "Impact coverage remains incomplete. Review the reason categories and private source locations "
                         "when available; do not interpret missing evidence as no affected content.")
     return messages
 
@@ -237,14 +288,18 @@ def publish_content_impact(config, detail: dict, original: dict) -> bool:
     # A saved report cannot authorize disclosure: re-check the live private-repo
     # policy independently, without deleting existing validator diagnostics.
     policy = resolve_repository_policy(config)
+    external = getattr(config.dbt_impact, "omni_repository", None)
     ready = False
-    if policy.enabled:
+    if policy.enabled and (external is None or
+                           (external.allow_repository_diagnostics and policy.external_diagnostics_allowed)):
         # The internal enricher accepts returned URLs only from a trusted model
         # origin. Re-verify against the registry; generic redact otherwise strips
         # all links, defeating navigation in this private artifact.
         from .discovery import discover_published_contexts
         try:
-            origins = {urlsplit(context.base_url).netloc for context in discover_published_contexts()}
+            contexts = (discover_published_contexts(target_branch=external.ref) if external is not None else
+                        discover_published_contexts())
+            origins = {urlsplit(context.base_url).netloc for context in contexts}
         except Exception:
             origins = set()
         private = _private_detail(detail, origins)
@@ -261,14 +316,28 @@ def _metadata_link(item: dict, fallback: str) -> str:
     return f"[{title}]({url})" if url and url != "[REDACTED_URL]" else title
 
 
-def _impact_description(item: dict) -> str:
+def _impact_description(item: dict, revisions: list[str] | None = None) -> str:
     kind = "Potential impact" if item.get("confidence") == "potential" else "Confirmed source dependency"
     source = "/".join(str(item.get(key, "")) for key in ("model_path", "view_file"))
     column = ".".join(str(item.get(key, "")) for key in ("relation", "column")).rstrip(".")
     path = item.get("dependency_path") or [item.get("field_name", "unresolved field")]
-    return (f"{kind}; {_escape(item.get('source_revision', 'unknown'))} / "
+    revision = ", ".join(revisions) if revisions else item.get("source_revision", "unknown")
+    return (f"{kind}; {_escape(revision)} / "
             f"{_escape(item.get('change_kind', 'unknown'))}; column: {_escape(column or 'unknown')}; "
             f"source: {_escape(source)}; dependency: {_escape(' → '.join(str(part) for part in path))}")
+
+
+def _revision_rows(items: list[dict]) -> list[tuple[dict, list[str]]]:
+    """Display-only grouping; preserve every source/context property and raw record."""
+    grouped: dict[str, tuple[dict, set[str]]] = {}
+    for item in items:
+        identity = {key: value for key, value in item.items()
+                    if key not in {"source_revision", "documents", "impact_index"}}
+        key = json.dumps(identity, sort_keys=True, ensure_ascii=True, separators=(",", ":"))
+        _, revisions = grouped.setdefault(key, (item, set()))
+        revisions.add(str(item.get("source_revision") or "unknown"))
+    return [(item, sorted(revisions, key=lambda value: ({"base": 0, "head": 1}.get(value, 2), value)))
+            for item, revisions in grouped.values()]
 
 
 def render_private_impact(private: dict) -> str:
@@ -285,13 +354,17 @@ def render_private_impact(private: dict) -> str:
         if not item.get("documents"):
             unresolved.append(item)
         for document in item.get("documents", []):
-            key = (item.get("model_path", ""), document.get("document_id") or document.get("url") or f"unknown-{index}")
-            record = documents.setdefault(key, {"document": document, "queries": {}, "filters": set(), "sources": {}})
+            # Do not collapse the same document/path from independently bound
+            # repositories, snapshots, environments, or registered models.
+            context = json.dumps({name: item.get(name, private.get(name, "")) for name in
+                                  ("source_repository", "source_sha", "model_path", "model_id", "environment")},
+                                 sort_keys=True)
+            key = (context, document.get("document_id") or document.get("url") or f"unknown-{index}")
+            record = documents.setdefault(key, {"document": document, "queries": {}, "filters": set(), "sources": []})
             for query in document.get("queries", []):
                 record["queries"].setdefault(query.get("query_key"), query)
             record["filters"].update(control.get("control_id") for control in document.get("dashboard_filters", []))
-            description = _impact_description(item)
-            record["sources"].setdefault(description, None)
+            record["sources"].append(item)
     for (_, identity), record in list(documents.items())[:100]:
         document = record["document"]
         owner = document.get("owner") or {}
@@ -305,26 +378,30 @@ def render_private_impact(private: dict) -> str:
         if not record["queries"] and not record["filters"]:
             lines.append("- Search candidate only; no supported query/filter reference was confirmed.")
         lines.extend(["", "Changed columns and dependency paths:", ""])
-        lines.extend(f"- {value}" for value in list(record["sources"])[:20])
+        lines.extend(f"- {_impact_description(item, revisions)}"
+                     for item, revisions in _revision_rows(record["sources"])[:20])
         lines.append("")
     if not documents:
         lines.append("No supported published content references were recorded. Check coverage before treating this as zero impact.")
     if unresolved:
         lines.extend(["", "## Source impacts without confirmed content", ""])
-        lines.extend(f"- {_impact_description(item)}" for item in unresolved[:30])
+        lines.extend(f"- {_impact_description(item, revisions)}" for item, revisions in _revision_rows(unresolved)[:30])
     lines.extend(["", "## Coverage gaps and recovery", ""])
     explanations = coverage_explanations(private)
     lines.extend(f"- {message}" for message in explanations)
     if not explanations:
         lines.append("No coverage gaps were recorded for the supported published scope.")
-    for gap in private.get("coverage_gaps", [])[:30]:
+    located_gaps = []
+    for gap in private.get("coverage_gaps", []):
         if not isinstance(gap, dict):
             continue
         index = gap.get("impact_index")
         impact = impacts[index] if type(index) is int and 0 <= index < len(impacts) else {}
-        location = " / ".join(str(gap.get(key) or impact.get(key)) for key in
-                              ("model_path", "file", "view_file", "field_name", "source_revision")
-                              if gap.get(key) or impact.get(key))
+        located_gaps.append({**impact, **gap})
+    for gap, revisions in _revision_rows(located_gaps)[:30]:
+        location = " / ".join(str(gap[key]) for key in ("model_path", "file", "view_file", "field_name") if gap.get(key))
+        if revisions != ["unknown"]:
+            location = " / ".join(filter(None, (location, ", ".join(revisions))))
         mapping = gap.get("configured_view") if gap.get("reason_code") == "dbt_explicit_view_mapping_unresolved" else None
         lines.append(f"- `{_escape(gap.get('reason_code', 'unknown'))}`" +
                      (f" — mapping: `checks.dbt_impact.table_mapping[].omni_view` = {_escape(mapping)}" if mapping else "") +

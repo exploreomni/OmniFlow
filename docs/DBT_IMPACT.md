@@ -1,6 +1,6 @@
 # dbt Impact Analysis
 
-OmniFlow's dbt impact analysis catches a pull request that removes a warehouse column or model still referenced by the candidate Omni YAML. It runs for both dbt-only and mixed dbt/Omni changes. It is optional, disabled by default, and needs no Omni credential because it compares repository data.
+OmniFlow's dbt impact analysis catches a pull request that removes a warehouse column or model still referenced by the candidate Omni YAML. In a single repository it runs for both dbt-only and mixed dbt/Omni changes. The opt-in [two-repository mode](#separate-dbt-and-omni-repositories) compares a dbt PR with one external Omni snapshot. Static analysis needs no Omni credential because it compares repository data.
 
 ## The Problem It Solves
 
@@ -144,7 +144,7 @@ deployment:
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `enabled` | `false` | Turns the check on. |
-| `manifest_path` | none | Repository-relative dbt manifest. Falls back to SQL heuristics when absent or unreadable. |
+| `manifest_path` | none | Repository-relative dbt manifest. Omit to use SQL heuristics; incomplete configured evidence stays a coverage gap. |
 | `fail_on_orphaned_references` | `true` | `true` blocks the merge. `false` reports a warning only. |
 | `fail_on_incomplete_coverage` | `true` | Missing or unsupported evidence blocks the gate. Set `false` only for explicitly advisory adoption. |
 | `omni_yaml_paths` | `model_path` entries from `.omni/flow.json` | Directories holding Omni model YAML. |
@@ -176,7 +176,80 @@ Each run writes `dbt-impact.json` alongside the normal public reports:
   public/
 ```
 
-The artifact records `coverage_complete`, analysis mode, analyzed files, index counts, fallback notes, and per-finding detail. `dbt_impact_incomplete_coverage` identifies evidence gaps explicitly. It does not contain warehouse rows, query results, compiled SQL, or credentials.
+Public artifacts retain allowlisted coverage, decision, check state and diagnostic categories, not arbitrary source paths or fallback text. `dbt_impact_incomplete_coverage` identifies evidence gaps explicitly. In two-repository mode, `dbt_impact_snapshot` also records the exact dbt base/head and Omni commit SHAs plus an opaque source-scope fingerprint. No warehouse rows, query results, compiled SQL, or credentials are included.
+
+## Separate dbt and Omni repositories
+
+Use this mode when the PR lives in a dbt repository and Omni owns a different Git repository. It is **opt-in**; existing single-repository installations do not change. The supported comparison is:
+
+`dbt PR base → dbt PR head`, both checked against **the same external Omni commit**.
+
+The source branch is resolved once per analysis stage. Tree/blob reads use that exact SHA, with a separate client and cache; no external checkout, code execution, dbt compilation, or warehouse query occurs. The advisory stage must reuse the static stage's sealed current-run snapshot, not select another source revision silently.
+
+### Setup in the dbt repository
+
+1. Commit this policy at the dbt repository root as `.omniflow.yml`, on its trusted base branch. Replace the example repository and paths. Do **not** also configure `omni_yaml_paths` in this mode.
+
+```yaml
+checks:
+  dbt_impact:
+    enabled: true
+    fail_on_orphaned_references: true
+    fail_on_incomplete_coverage: true
+    # manifest_path: target/manifest.json  # optional; requires complete contracts
+    omni_repository:
+      repository: your-org/omni-models
+      ref: main                         # named published branch, not tag/PR/SHA
+      model_paths: [omni/my_model]       # nonoverlapping roots in THAT repository
+      allow_repository_diagnostics: false
+    # Optional advisory lookup; requires the registry and Omni credential below.
+    # content_impact:
+    #   enabled: true
+    #   sql_dialect: snowflake
+```
+
+The dbt file paths remain `models/`, `seeds/`, `snapshots/`, and `macros/` by default. Override `deployment.breaking_change_hold.dbt_paths` if needed, **without enabling the hold**. `model_paths: ['.']` supports a source model at the external repository root.
+
+2. Create `OMNIFLOW_OMNI_REPO_TOKEN` as a dbt repository/environment secret. Use a fine-grained PAT or GitHub App installation token with **Contents: read** on the one external Omni repository. The normal `github.token` still reads the dbt PR; it is never reused as an external credential. Do not put either token in policy or metadata.
+
+3. Update `.github/workflows/omniflow.yml` from the current example and add this input to its **trusted same-repository** Run OmniFlow step:
+
+```yaml
+with:
+  config: .omniflow.yml
+  omni-repository-token: ${{ secrets.OMNIFLOW_OMNI_REPO_TOKEN }}
+  # Only needed when content_impact is enabled:
+  omni-api-key: ${{ secrets.OMNI_API_KEY }}
+```
+
+Never pass either secret to the fork route. The Action exposes the new token only after trusted routing, and not to installation, repair, or deployment sync.
+
+4. For optional content lookup, commit `.omni/flow.json` in the **dbt repo**. Register the published Omni model, its **external** `model_path`, `base_branch` matching `omni_repository.ref`, `git_provider: github`, and `web_url` pointing to the **external** repository. The model's live Git configuration must match. Keep model/content validation workflows in the Omni repository; this dbt-side mode does not validate local Omni edits or stage a second Omni PR. Version-2 registrations still require the matching environment-scoped credential and Git follower configuration.
+
+5. Keep external private details off unless the source repository/model owner approves sharing identifiers, paths, document names, links and owner metadata with the dbt repository's readers. Then set `allow_repository_diagnostics: true` in trusted base policy. This setting **and** the independently verified private-destination policy must both allow publication. A private source and private destination do not necessarily share an audience. Public comments always retain only safe counts, categories and recovery steps.
+
+### Freshness and failure behavior
+
+- The source branch is checked again after static analysis. The Action also runs `omniflow dbt verify-source --config .omniflow.yml` after advisory enrichment to verify the same source SHA and current PR base/head. Drift fails the run with `OF-OMNI-REPOSITORY-SNAPSHOT-CHANGED`; rerun the full comparison.
+- Manual CLI sequence in one trusted checkout/job: `omniflow run --auto`, optionally `omniflow dbt content-impact`, then `omniflow dbt verify-source`. Do not restore old reports/receipts between stages.
+- Missing credentials, inaccessible branches, truncated trees, unsafe modes, oversized sources, empty/missing roots and target mismatches are **unavailable/incomplete evidence**, never a clean zero-impact result. Static incomplete-coverage policy remains authoritative; advisory lookup failure never changes the orphan gate into a pass.
+- Before merge or deployment, run a fresh full check when either repository changes. **GitHub does not automatically invalidate a green dbt PR check when the external Omni branch moves.** A rerun of an old event cannot replace a current-head run if PR revisions changed. Operators must trigger the updated PR workflow/current-head protected check; the final verifier rejects stale PR revisions.
+- The source is a snapshot, not an atomic lock across repositories. Cross-repository breaking-change holds, coordinated two-PR merges, deployment synchronization, and API-only source substitution are not supported. Enabling sync/hold or mixing local Omni semantic edits into this mode is rejected; use separate reviewed deployment orchestration.
+
+Remote source limits are the existing bounded tree/blob and authored-YAML limits. A second repository is not an excuse to download an unbounded archive. Keep the source credential read-only and rotate it independently of the Omni API credential.
+
+### Adoption verification
+
+Use a disposable dbt PR and synthetic content before enabling this in a production gate:
+
+1. Comment-only SQL change: complete supported zero content impact, no false column change.
+2. One explicit output-column expression change: only that column's supported dependencies; unrelated same-named fields excluded.
+3. Rename/remove a referenced column: orphan gate fails with the specific diagnostic and optional affected-content details.
+4. Change an upstream model, including a child edited in the same PR: downstream gap is explicit, not a complete zero.
+5. Remove source access or move its branch during analysis: unavailable/stale evidence, never clean zero; a fresh run recovers.
+6. Compare equivalent single-repo and two-repo fixtures: same supported field impacts. Confirm public comments omit identities and private details appear only after independent opt-in and a successful current-run upload.
+
+CI simulations and live read-only metadata checks do not prove hosted artifact delivery or customer acceptance. Qualify the complete Action, dedicated artifact link, and compact PR comment in the adopter's private test repository. No automatic merge or coordinated deployment is performed.
 
 ## Optional column-to-content impact
 
@@ -209,15 +282,21 @@ and filtered measures. Comments and formatting do not create column changes.
 WHERE/JOIN/grouping changes can broaden potential impact. Import CTEs such as
 `with orders as (select * from {{ ref('orders') }})` keep column precision: the CTE
 is part of the compared context, so changing it broadens impact to every field on
-the model. A star in the final projection remains a gap. A constant-argument macro
-call inside an aliased output, such as `{{ cents_to_dollars('amount') }} as amount`,
-is compared per column; a changed macro file, unaliased macros (which can expand to
-several columns), `var()`/`env_var()`, and Jinja blocks remain gaps. Ambiguous
+the model. A star in the final projection remains a gap. Arbitrary macros,
+including `{{ cents_to_dollars('amount') }} as amount`, remain partial/potential:
+an outer alias cannot prove that a macro expands to only one column. No macro is
+executed to guess its shape. A changed macro file, `var()`/`env_var()`, and Jinja
+blocks also remain gaps. Ambiguous
 identities, inheritance, or dependency cycles also remain explicit coverage gaps
 rather than guessed lineage. Upstream dbt column lineage is not included: when a
 changed model is `ref()`'d by other dbt models (read at the base revision), the
 report adds `dbt_downstream_models_not_analyzed` so the totals read as a lower bound,
 not zero.
+This detection includes children that also changed in the PR. Literal `ref`
+calls support whitespace, Jinja whitespace-control delimiters, package arguments
+and version keywords. Jinja comments are ignored; SQL-comment `ref` dependencies
+are retained because dbt evaluates them. Dynamic or unreadable dependency syntax
+is reported as unavailable, not zero downstream dependencies.
 For native cross-view names, the optional step uses Omni's returned view-name
 mapping only after matching it to the immutable authored files. It does not derive
 canonical names by concatenating folder or schema names. Unavailable or ambiguous
@@ -231,7 +310,8 @@ Targeted Content Validator field searches find candidate documents. Query and
 document-layout metadata distinguish rendered dashboard tiles from workbook-only
 tabs and dashboard filters. This observes **published content in the registered
 base model**, not a simulated post-deployment warehouse or every branch draft.
-Base/head source references remain separate; impact is not proof that a PR breaks
+Base/head source references remain separate in JSON; identical display rows combine
+their revision labels in Markdown. Impact is not proof that a PR breaks
 the reported document. User impersonation, permissions, unsupported layouts, and
 request/time limits can narrow coverage; incomplete counts are lower bounds.
 Saved calculated-field expressions, raw/app queries, and unresolved timeframe
@@ -239,7 +319,9 @@ references also retain explicit gaps instead of claiming full query lineage.
 A document can contribute to both dashboard and workbook counts when it contains
 both displayed tiles and affected saved tabs that are not placed on the dashboard.
 
-The PR receives only one short advisory impact line, with **View affected content**
+The PR receives one short advisory impact line, including the leading reason when
+coverage is partial. “None found; coverage partial” is not “zero with complete
+supported coverage.” It includes **View affected content**
 when this run generated authorized private details and their dedicated upload succeeded.
 That link downloads `omniflow-column-impact`, a repository-only artifact; open `column-impact.md` inside
 it for a deduplicated content list, owners when returned, navigation links,

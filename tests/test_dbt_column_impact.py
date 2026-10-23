@@ -445,9 +445,14 @@ def test_dependency_depth_and_impact_budgets_never_silently_truncate(tmp_path, m
         collect(tmp_path, base)
 
 
-def test_source_jinja_normalization_does_not_execute_or_erase_literal_changes():
+@pytest.mark.parametrize("candidate", [
+    "SELECT amount AS net FROM {{ref('orders', version = 2)}}",
+    "SELECT amount AS net FROM {{- ref ('orders', version = 2) -}}",
+    "{# ignored {{ arbitrary_macro() }} #}\nSELECT amount AS net FROM {{ref('orders', version = 2)}}",
+])
+def test_source_jinja_normalization_does_not_execute_or_erase_literal_changes(candidate):
     before = analyze_projection('select amount as net from {{ ref("orders", version=2) }}')
-    after = analyze_projection("SELECT amount AS net FROM {{ref('orders', version = 2)}}")
+    after = analyze_projection(candidate)
     assert before.complete and after.complete
     assert before.columns == after.columns and before.context == after.context
     assert not analyze_projection("select amount as net from {{ ref(var('source')) }}").complete
@@ -539,13 +544,22 @@ def test_changed_import_cte_wildcard_is_wider_potential(tmp_path):
     assert all(item["change_kind"] == "potential" for item in result["impacts"])
 
 
-def test_aliased_constant_macro_is_compared_per_column(tmp_path):
-    before = "select id, {{ cents_to_dollars('amount') }} as net from raw.orders"
+@pytest.mark.parametrize("before,after", [
+    ("select id, {{ cents_to_dollars('amount') }} as net from raw.orders",
+     "select id, {{ cents_to_dollars('subtotal') }} as net from raw.orders"),
+    # An unchanged macro can return `id, amount` for 1 and just `amount` for 2.
+    # The trailing alias does not establish the number of expanded columns.
+    ("select {{ projected_columns(1) }} as net from raw.orders",
+     "select {{ projected_columns(2) }} as net from raw.orders"),
+])
+def test_aliased_constant_macro_has_unknown_expansion(tmp_path, before, after):
     base = fixture(tmp_path, before=before)
-    (tmp_path / "models/orders.sql").write_text(before.replace("'amount'", "'subtotal'"))
+    (tmp_path / "models/orders.sql").write_text(after)
     result = collect(tmp_path, base)
-    assert result["coverage_complete"] is True
-    assert {(item["column"], item["change_kind"]) for item in result["impacts"]} == {("net", "modified")}
+    assert result["coverage_complete"] is False
+    assert "dbt_sql_dynamic_projection" in {gap["reason_code"] for gap in result["coverage_gaps"]}
+    assert {item["field_name"] for item in result["impacts"]} == {"id", "net", "doubled", "constant", "filtered_count"}
+    assert all(item["change_kind"] == "potential" for item in result["impacts"])
 
 
 @pytest.mark.parametrize("candidate", [
@@ -571,6 +585,59 @@ def test_changed_model_with_dbt_children_reports_downstream_gap(tmp_path):
     assert gaps == [{"reason_code": "dbt_downstream_models_not_analyzed", "file": "models/orders.sql",
                      "downstream_model_count": 1, "downstream_files": ["models/fct_orders.sql"]}]
     assert result["impacts"]
+
+
+@pytest.mark.parametrize("child,dependent", [
+    ("select id from {{ ref ('orders') }}", True),
+    ("select id from {{- ref('orders') -}}", True),
+    ("select id from {{ ref('package', 'orders', version=2) }}", True),
+    ("select id from {{ ref('orders', v=2) }}", True),
+    ("-- depends_on: {{ ref('orders') }}\nselect id from raw.orders", True),
+    ("{# ignored {{ ref('orders') }} #}\nselect id from raw.orders", False),
+    ("select id from {{ ref('orders_archive') }}", False),
+])
+def test_downstream_refs_use_jinja_syntax_not_raw_substrings(tmp_path, child, dependent):
+    base = fixture(tmp_path, extra={"models/fct_orders.sql": child})
+    (tmp_path / "models/orders.sql").write_text("select id, amount * 0.8 as net from raw.orders")
+    result = collect(tmp_path, base)
+    assert result["coverage_complete"] is not dependent
+    assert any(gap["reason_code"] == "dbt_downstream_models_not_analyzed"
+               for gap in result["coverage_gaps"]) is dependent
+
+
+@pytest.mark.parametrize("child_sql", [
+    "select id * 2 as id, net from {{ ref('orders') }}",
+    "select id, net from {{ ref('orders') }} -- comment only",
+])
+def test_changed_downstream_child_does_not_prove_upstream_coverage(tmp_path, child_sql):
+    base = fixture(tmp_path, extra={"models/fct_orders.sql": "select id, net from {{ ref('orders') }}"})
+    (tmp_path / "models/orders.sql").write_text("select id, amount * 0.8 as net from raw.orders")
+    (tmp_path / "models/fct_orders.sql").write_text(child_sql)
+    result = collect(tmp_path, base, changed=["models/orders.sql", "models/fct_orders.sql"])
+    assert result["coverage_complete"] is False
+    assert any(gap["reason_code"] == "dbt_downstream_models_not_analyzed"
+               and gap["file"] == "models/orders.sql" for gap in result["coverage_gaps"])
+
+
+def test_downstream_unicode_filename_is_not_lost_to_git_quoting(tmp_path):
+    child = "models/café orders.sql"
+    base = fixture(tmp_path, extra={child: "select id from {{ ref('orders') }}"})
+    (tmp_path / "models/orders.sql").write_text("select id, amount * 0.8 as net from raw.orders")
+    result = collect(tmp_path, base)
+    assert result["coverage_complete"] is False
+    assert any(child in gap.get("downstream_files", []) for gap in result["coverage_gaps"])
+
+
+@pytest.mark.parametrize("child", [
+    "select id from {{ ref(var('parent')) }}",
+    "select id from {{ ref('orders')",
+])
+def test_dynamic_downstream_ref_is_unavailable_not_clean_absence(tmp_path, child):
+    base = fixture(tmp_path, extra={"models/fct_orders.sql": child})
+    (tmp_path / "models/orders.sql").write_text("select id, amount * 0.8 as net from raw.orders")
+    result = collect(tmp_path, base)
+    assert result["coverage_complete"] is False
+    assert "dbt_downstream_models_unavailable" in {gap["reason_code"] for gap in result["coverage_gaps"]}
 
 
 def test_comment_only_change_with_dbt_children_has_no_downstream_gap(tmp_path):

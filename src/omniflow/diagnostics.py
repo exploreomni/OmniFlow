@@ -214,7 +214,10 @@ def public_diagnostic(payload: dict[str, Any]) -> dict[str, Any]:
                 key = ("public_context", reference)
                 result["context_reference"] = contexts.setdefault(key, f"context-{len(contexts) + 1}")
         for key, item in value.items():
-            if key == "content_impact" and isinstance(item, dict):
+            if key == "dbt_impact_snapshot" and isinstance(item, dict):
+                from .omni_repository import public_snapshot
+                result[key] = public_snapshot(item)
+            elif key == "content_impact" and isinstance(item, dict):
                 from .content_impact_reporting import public_content_impact
                 result[key] = public_content_impact(item)
             elif key == "rule_id" and value.get("validator") == "semantic_lint":

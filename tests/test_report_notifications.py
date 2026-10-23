@@ -245,10 +245,59 @@ def test_impact_comment_links_only_generated_uploaded_private_details_and_stays_
     assert f"[View affected content]({RUN_URL}/artifacts/19)" in text
     assert f"[Full report]({RUN_URL}/artifacts/17)" in text
     assert "repository-only" in text and "lower bounds" in text
+    assert "Coverage gap: A source field could not be matched uniquely" in text
     assert "PRIVATE_" not in text
     summary = render_notification(impact_report(), head_sha=HEAD, run_url=RUN_URL, run_attempt=1,
                                   publication=receipts)
     assert "View affected content" in summary and "matched uniquely" in summary
+
+
+@pytest.mark.parametrize("reason,expected", [
+    ("content_impact_field_identity_unavailable", "matched uniquely"),
+    ("dbt_explicit_view_mapping_unresolved", "check checks.dbt_impact.table_mapping"),
+    ("dbt_downstream_models_not_analyzed", "Downstream dbt model lineage"),
+    ("content_impact_query_expression_unverified", "unsupported lineage"),
+    ("content_impact_budget_exhausted", "limit was reached"),
+    ("omni_repository_snapshot_changed", "snapshot changed during analysis; rerun"),
+    ("omni_repository_snapshot_unavailable", "check token/read access"),
+    ("UNKNOWN_PRIVATE_REASON", "Required impact evidence is incomplete"),
+])
+def test_compact_impact_explains_primary_gap_inline_without_private_identity(reason, expected):
+    data = impact_report()
+    data["content_impact"]["coverage_gaps"] = [
+        {"reason_code": reason, "file": "PRIVATE_PATH", "message": "PRIVATE_MESSAGE",
+         "source_repository": "PRIVATE_SOURCE", "source_sha": "b" * 40}]
+    text = render_pr_comment(data, head_sha=HEAD, run_url=RUN_URL)
+    impact_line = next(line for line in text.splitlines() if line.startswith("dbt content impact:"))
+    assert expected in impact_line and "Coverage gap:" in impact_line
+    assert "PRIVATE_" not in text and "b" * 40 not in text and len(text.splitlines()) == 5
+
+
+def test_primary_gap_is_stable_when_base_head_evidence_order_changes():
+    data = impact_report()
+    data["content_impact"]["coverage_gaps"] = [
+        {"reason_code": "content_impact_query_expression_unverified"},
+        {"reason_code": "dbt_explicit_view_mapping_unresolved"},
+    ]
+    first = render_pr_comment(data, head_sha=HEAD, run_url=RUN_URL)
+    data["content_impact"]["coverage_gaps"].reverse()
+    assert first == render_pr_comment(data, head_sha=HEAD, run_url=RUN_URL)
+    assert "check checks.dbt_impact.table_mapping" in first
+
+
+@pytest.mark.parametrize("rule,code", [
+    ("dbt_column_removal_orphans_omni_field", "OF-DBT-IMPACT-ORPHANED-COLUMN"),
+    ("dbt_model_removal_orphans_omni_view", "OF-DBT-IMPACT-ORPHANED-MODEL"),
+])
+def test_impact_summary_does_not_replace_orphan_blocker_guidance(rule, code):
+    data = impact_report()
+    data.update(policy_decision="fail", exit_code=1, issues=[{
+        "validator": "dbt_impact", "rule": rule, "reason_code": rule,
+        "severity": "error", "blocking": True, "message": "PRIVATE_RAW_MESSAGE",
+    }])
+    text = render_pr_comment(data, head_sha=HEAD, run_url=RUN_URL)
+    assert "Action required" in text and code in text and "migrat" in text
+    assert "Coverage gap:" in text and "PRIVATE_RAW_MESSAGE" not in text
 
 
 @pytest.mark.parametrize("changes,explanation", [

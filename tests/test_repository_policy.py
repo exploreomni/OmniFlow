@@ -9,7 +9,7 @@ from unittest.mock import Mock
 import pytest
 
 from omniflow import repository_policy
-from omniflow.config import _to_config, load_config
+from omniflow.config import OmniRepositorySettings, _to_config, load_config
 from omniflow.exceptions import ConfigError
 from omniflow.repository_policy import POLICY_REASONS, RepositoryPolicy, resolve_repository_policy
 
@@ -123,6 +123,66 @@ def test_caller_can_only_narrow_trusted_policy(context):
     context.config.reporting.diagnostics_mode = "minimal"
     assert_minimal(resolve_repository_policy(context.config), "minimal_requested")
     assert context.calls == []
+
+
+def _external_policy(allow=True):
+    return {"repository": "source/models", "ref": "published", "model_paths": ["omni"],
+            "allow_repository_diagnostics": allow}
+
+
+def test_external_disclosure_requires_matching_trusted_literal_opt_in(context):
+    source = _external_policy()
+    context.config.dbt_impact.omni_repository = OmniRepositorySettings(**source)
+    context.trusted_text = json.dumps({"checks": {"dbt_impact": {"omni_repository": source}}})
+    policy = resolve_repository_policy(context.config)
+    assert policy.enabled and policy.external_diagnostics_allowed is True
+    assert context.policy_reads == [(REPOSITORY, BASE, ".omniflow.yml", 1024 * 1024)]
+    assert [path for _, path, _ in context.calls] == ["", "/pulls/7"]
+
+
+@pytest.mark.parametrize("trusted", [None, _external_policy(False),
+                                      {key: value for key, value in _external_policy().items()
+                                       if key != "allow_repository_diagnostics"}])
+def test_caller_cannot_enable_external_disclosure_missing_from_trusted_base(context, trusted):
+    context.config.dbt_impact.omni_repository = OmniRepositorySettings(**_external_policy())
+    context.trusted_text = json.dumps({"checks": {"dbt_impact": {"omni_repository": trusted}}})
+    # The working copy is not an authority for the re-read disclosure decision.
+    Path(".omniflow.yml").write_text(json.dumps({"checks": {"dbt_impact": {"omni_repository": _external_policy()}}}))
+    policy = resolve_repository_policy(context.config)
+    assert policy.enabled and policy.external_diagnostics_allowed is False
+    assert context.policy_reads[0][1] == BASE
+
+
+@pytest.mark.parametrize("change", [
+    {"repository": "another/models"}, {"ref": "other"}, {"model_paths": ["other"]},
+    {"model_paths": ["omni", "another"]}, {"allow_repository_diagnostics": False},
+])
+def test_external_disclosure_cannot_redirect_or_broaden_trusted_source(context, change):
+    context.trusted_text = json.dumps({"checks": {"dbt_impact": {"omni_repository": _external_policy()}}})
+    context.config.dbt_impact.omni_repository = OmniRepositorySettings(**(_external_policy() | change))
+    policy = resolve_repository_policy(context.config)
+    assert policy.enabled and policy.external_diagnostics_allowed is False
+
+
+@pytest.mark.parametrize("change", [
+    {"allow_repository_diagnostics": "${ALLOW_DETAILS}"}, {"ref": "${SOURCE_REF}"},
+    {"repository": "${SOURCE_REPOSITORY}"},
+])
+def test_external_opt_in_is_never_authorized_by_environment_interpolation(context, monkeypatch, change):
+    for name, value in {"ALLOW_DETAILS": "true", "SOURCE_REF": "published", "SOURCE_REPOSITORY": "source/models"}.items():
+        monkeypatch.setenv(name, value)
+    context.config.dbt_impact.omni_repository = OmniRepositorySettings(**_external_policy())
+    context.trusted_text = json.dumps({"checks": {"dbt_impact": {"omni_repository": _external_policy() | change}}})
+    assert_minimal(resolve_repository_policy(context.config), "policy_invalid")
+
+
+def test_external_opt_in_still_requires_live_private_same_repository_pr(context):
+    context.config.dbt_impact.omni_repository = OmniRepositorySettings(**_external_policy())
+    context.trusted_text = json.dumps({"checks": {"dbt_impact": {"omni_repository": _external_policy()}}})
+    context.pr["head"]["repo"] = {"full_name": "external/fork", "id": 456}
+    policy = resolve_repository_policy(context.config)
+    assert_minimal(policy, "fork_pull_request")
+    assert policy.external_diagnostics_allowed is False and context.policy_reads == []
 
 
 def test_absolute_in_repo_config_still_reads_base_not_local_file(context):

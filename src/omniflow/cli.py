@@ -69,6 +69,7 @@ from .github.repair_attempt import GitHubRepairAttemptGuard, load_repair_event
 from .logging import configure_logging
 from .nonsemantic import classify_pr_change
 from .omni_client import OmniClient
+from .omni_repository import OmniRepositorySnapshot, recorded_snapshot, trusted_source_context
 from .query_validation import QueryProvenance
 from .repair.orchestrator import run_ai_repair, validate_ai_repair_policy
 from .repair.reporting import write_repair_artifacts
@@ -206,6 +207,9 @@ def build_parser() -> argparse.ArgumentParser:
     impact_content = dbt_sub.add_parser("content-impact", help="Read-only advisory column-to-content enrichment")
     _add_config_arg(impact_content)
     impact_content.set_defaults(func=cmd_dbt_content_impact)
+    verify_source = dbt_sub.add_parser("verify-source", help="Recheck this run's external Omni and PR revisions")
+    _add_config_arg(verify_source)
+    verify_source.set_defaults(func=cmd_dbt_verify_source)
     dbt_sync = dbt_sub.add_parser("sync", help="Refresh Omni after a successful production dbt deployment")
     _add_config_arg(dbt_sync)
     _add_common_omni_args(dbt_sync)
@@ -271,7 +275,7 @@ def cmd_run(args: argparse.Namespace, *, changed_files: list[str] | None = None)
     try:
         with repository_reporting(config, output_dir=output_dir):
             result = _execute_run(args, config=config, output_dir=output_dir, changed_files=changed_files)
-        if config.dbt_impact.enabled and config.dbt_impact.content_impact.enabled:
+        if config.dbt_impact.enabled and (config.dbt_impact.content_impact.enabled or config.dbt_impact.omni_repository):
             try:
                 seal_validation_report(config)
             except Exception:
@@ -295,16 +299,7 @@ def _execute_run(args, *, config, output_dir: Path, changed_files: list[str] | N
         print("OmniFlow skipped under the trusted workflow policy; see the sanitized report.")
         return 0
     try:
-        contexts = discover_contexts(
-            auto=args.auto,
-            base_url=config.omni.base_url,
-            model_id=config.omni.model_id,
-            model_path=getattr(args, "model_path", None),
-            branch_name=config.omni.branch_name,
-            branch_id=config.omni.branch_id,
-            allow_skip=True,
-            changed_files=changed_files,
-        )
+        contexts = _discover_run_contexts(config, args, changed_files=changed_files)
     except OmniFlowError as exc:
         _write_setup_failure_artifacts(config=config, output_dir=output_dir, exc=exc)
         raise
@@ -406,6 +401,29 @@ def _execute_run(args, *, config, output_dir: Path, changed_files: list[str] | N
     return exit_code
 
 
+def _discover_run_contexts(config, args, *, changed_files=None):
+    if config.dbt_impact.omni_repository is not None:
+        from .model_paths import is_git_model_file, is_repo_control_file
+
+        if not args.auto:
+            raise ConfigError("External dbt validation requires --auto and trusted policy",
+                              reason_code="omni_repository_configuration_invalid")
+        if not trusted_source_context():
+            raise SecurityPolicyError("External dbt validation is unavailable for this context",
+                                      reason_code="omni_repository_context_untrusted")
+        changes = get_dbt_changed_files() if changed_files is None else changed_files
+        if any(is_git_model_file(path) and not is_repo_control_file(path) for path in changes):
+            raise ConfigError("Mixed local Omni and external-repository changes require separate validation",
+                              reason_code="omni_repository_configuration_invalid")
+        return []
+    return discover_contexts(
+        auto=args.auto, base_url=config.omni.base_url, model_id=config.omni.model_id,
+        model_path=getattr(args, "model_path", None), branch_name=config.omni.branch_name,
+        branch_id=config.omni.branch_id, allow_skip=True,
+        **({"changed_files": changed_files} if changed_files is not None else {}),
+    )
+
+
 def cmd_route(args: argparse.Namespace) -> int:
     """Perform trusted discovery before the Omni credential enters a process."""
     try:
@@ -418,15 +436,7 @@ def cmd_route(args: argparse.Namespace) -> int:
     if not config.security.retain_restricted_artifacts:
         _purge_restricted_path(restricted_dir(output_dir))
     try:
-        contexts = discover_contexts(
-            auto=args.auto,
-            base_url=config.omni.base_url,
-            model_id=config.omni.model_id,
-            model_path=getattr(args, "model_path", None),
-            branch_name=config.omni.branch_name,
-            branch_id=config.omni.branch_id,
-            allow_skip=True,
-        )
+        contexts = _discover_run_contexts(config, args)
     except OmniFlowError as exc:
         _write_setup_failure_artifacts(config=config, output_dir=output_dir, exc=exc)
         raise
@@ -455,6 +465,7 @@ def cmd_route(args: argparse.Namespace) -> int:
         print(f"should_run={'true' if should_run else 'false'}")
         print(f"requires_omni={'true' if requires_omni else 'false'}")
         print(f"content_impact={'true' if payload.get('content_impact') else 'false'}")
+        print(f"external_omni={'true' if dbt_impact_needed and config.dbt_impact.omni_repository else 'false'}")
         print(f"reason={reason}")
         print(f"model_count={len(contexts)}")
         if environment:
@@ -594,15 +605,21 @@ def _collect_dbt_impact_check(*, config, output_dir: Path, changed_files: list[s
     if not any(_path_under_any(path, dbt_paths) for path in changed_files):
         return None
 
-    omni_yaml_paths = config.dbt_impact.omni_yaml_paths or _flow_model_paths()
+    external = config.dbt_impact.omni_repository
+    omni_yaml_paths = external.model_paths if external else config.dbt_impact.omni_yaml_paths or _flow_model_paths()
     try:
+        snapshot = OmniRepositorySnapshot.resolve(external) if external else None
         report, issues = evaluate_dbt_impact(
             changed_files=changed_files,
             dbt_paths=dbt_paths,
             settings=config.dbt_impact,
             omni_yaml_paths=omni_yaml_paths,
             base_ref=_base_ref(),
+            **({"omni_snapshot": snapshot} if snapshot is not None else {}),
         )
+        if snapshot is not None:
+            snapshot.assert_unchanged()
+            report["dbt_impact_snapshot"] = snapshot.evidence()
     except OmniFlowError as exc:
         _write_setup_failure_artifacts(config=config, output_dir=output_dir, exc=exc)
         raise
@@ -734,19 +751,36 @@ def cmd_dbt_content_impact(args: argparse.Namespace) -> int:
         from .dbt_column_impact import collect_column_impacts
 
         changed_files = get_dbt_changed_files()
+        external = config.dbt_impact.omni_repository
+        snapshot = OmniRepositorySnapshot.resolve(external, expected=recorded_snapshot(original)) if external else None
+        contexts = _external_published_contexts(external) if external else discover_published_contexts()
         detail = collect_and_enrich_content_impact(
             collect_static=lambda resolver: collect_column_impacts(
                 changed_files=changed_files, dbt_paths=config.breaking_change_hold.dbt_paths,
-                settings=config.dbt_impact, omni_yaml_paths=config.dbt_impact.omni_yaml_paths or _flow_model_paths(),
+                settings=config.dbt_impact, omni_yaml_paths=(external.model_paths if external else
+                                                           config.dbt_impact.omni_yaml_paths or _flow_model_paths()),
                 base_ref=_base_ref(), canonical_view_resolver=resolver,
+                **({"omni_snapshot": snapshot} if snapshot is not None else {}),
             ),
-            contexts=discover_published_contexts(),
+            contexts=contexts,
             client_factory=lambda context: _published_impact_client(context, config.omni.timeout),
-            client_verifier=_verify_published_impact_context,
+            client_verifier=(lambda context, client: _verify_external_impact_context(context, client, external))
+            if external else _verify_published_impact_context,
             settings=config.dbt_impact.content_impact, user_id=config.omni.user_id,
             include_personal_folders=config.omni.include_personal_folders,
-            source_file_reader=_content_impact_source,
+            source_file_reader=(lambda context, path, scope: snapshot.read_text(
+                f"{context.model_path}/{path}" if context.model_path != "." else path,
+                max_bytes=1024 * 1024)) if snapshot is not None else _content_impact_source,
+            **({"source_identity": snapshot.identity} if snapshot is not None else {}),
         )
+        if snapshot is not None:
+            snapshot.assert_unchanged()
+            detail["dbt_impact_snapshot"] = snapshot.evidence()
+    except OmniFlowError as exc:
+        code = getattr(exc, "reason_code", None)
+        reason = code if str(code).startswith("omni_repository_") else "content_impact_execution_unavailable"
+        detail = {"status": "unavailable", "coverage_complete": False, "summary": {},
+                  "coverage_gaps": [{"reason_code": reason}], "impacts": []}
     except Exception:
         # Arbitrary API/SQL exception text is never a public diagnostic.
         detail = {"status": "unavailable", "coverage_complete": False, "summary": {},
@@ -761,6 +795,89 @@ def cmd_dbt_content_impact(args: argparse.Namespace) -> int:
                             redaction_level=config.security.redaction_level)
     print(content_impact_line({"content_impact": detail}))
     return 0
+
+
+def cmd_dbt_verify_source(args: argparse.Namespace) -> int:
+    """A final freshness gate, not an upload or automatic merge authorization."""
+    config = load_config(args.config)
+    external = config.dbt_impact.omni_repository
+    if external is None:
+        print("OmniFlow external source verification: not configured.")
+        return 0
+    try:
+        require_matching_report_directory(config.reporting.output_dir)
+        original = current_validation_report(config)
+        snapshot = OmniRepositorySnapshot.resolve(external, expected=recorded_snapshot(original))
+        if is_pull_request_event():
+            from .github.revalidation import GitHubRepository
+
+            base, head = pull_request_revision("base"), pull_request_revision("head")
+            number = pr_number()
+            if not number:
+                raise ConfigError("Current PR identity is unavailable", reason_code="omni_repository_receipt_unavailable")
+            api = GitHubRepository(base[1], os.getenv("OMNIFLOW_GITHUB_TOKEN", ""))
+            current = api.request("GET", f"/pulls/{number}")
+            for side, expected in (("base", base), ("head", head)):
+                value = current.get(side) if isinstance(current, dict) else None
+                if (not isinstance(value, dict) or value.get("sha") != expected[0]
+                        or not isinstance(value.get("repo"), dict)
+                        or value["repo"].get("full_name") != expected[1]):
+                    raise ConfigError("The PR moved after static validation", reason_code="omni_repository_snapshot_changed")
+        snapshot.assert_unchanged()
+        print("OmniFlow external source verification: recorded revisions are still current. "
+              "Revalidate before merge/deployment if either repository changes.")
+        return int(original.get("exit_code", ExitCodes.CONFIGURATION_ERROR))
+    except (OSError, ValueError) as exc:
+        error = ConfigError("Current source receipt is unavailable", reason_code="omni_repository_receipt_unavailable")
+        _write_setup_failure_artifacts(config=config, output_dir=Path(config.reporting.output_dir), exc=error)
+        raise error from exc
+    except OmniFlowError as exc:
+        _write_setup_failure_artifacts(config=config, output_dir=Path(config.reporting.output_dir), exc=exc)
+        raise
+
+
+def _external_published_contexts(external) -> list[ModelContext]:
+    contexts = discover_published_contexts(target_branch=external.ref)
+    expected_url = f"{os.getenv('GITHUB_SERVER_URL', 'https://github.com').rstrip('/')}/{external.repository}"
+    selected = []
+    for path in external.model_paths:
+        matches = [context for context in contexts if context.model_path == path]
+        if len(matches) != 1:
+            raise ConfigError("Each external model root requires exactly one trusted registration",
+                              reason_code="omni_repository_target_mismatch")
+        context = matches[0]
+        if (context.base_branch != external.ref or context.git_provider != "github"
+                or str(context.web_url).rstrip("/").removesuffix(".git") != expected_url):
+            raise ConfigError("Published model registration does not match the external snapshot source",
+                              reason_code="omni_repository_target_mismatch")
+        selected.append(context)
+    return selected
+
+
+def _verify_external_impact_context(context, client, external):
+    actual = client.get_git_configuration(context.model_id)
+    try:
+        if not isinstance(actual, dict):
+            raise ConfigError("Git configuration is not an object")
+        if context.environment:
+            _verify_target_git_configuration(context, actual, expected_repository=external.repository)
+            return
+        path = actual.get("modelPath") or "."
+        expected_url = str(context.web_url).rstrip("/").removesuffix(".git")
+        urls = set()
+        for value in (actual.get("webUrl"), actual.get("cloneUrl")):
+            if not isinstance(value, str):
+                continue
+            if value.startswith("git@") and ":" in value:
+                host, repo = value[4:].split(":", 1)
+                value = f"https://{host}/{repo}"
+            urls.add(value.rstrip("/").removesuffix(".git"))
+        if (path != context.model_path or actual.get("baseBranch") != external.ref
+                or actual.get("gitServiceProvider") != "github" or expected_url not in urls):
+            raise ConfigError("Git source identity differs")
+    except ConfigError as exc:
+        raise ConfigError("Published Omni Git settings do not match the registered external source",
+                          reason_code="omni_repository_target_mismatch") from exc
 
 
 def _published_impact_client(context: ModelContext, timeout: int) -> OmniClient:
@@ -2238,7 +2355,8 @@ def _context_dict(context: ModelContext) -> dict[str, Any]:
     }
 
 
-def _verify_target_git_configuration(context: ModelContext, git_config: dict[str, Any]) -> None:
+def _verify_target_git_configuration(context: ModelContext, git_config: dict[str, Any],
+                                     *, expected_repository: str | None = None) -> None:
     """Version 2 cannot silently skip missing or unauthorized identity evidence."""
     expected = {
         "baseBranch": context.base_branch, "modelPath": context.model_path,
@@ -2267,7 +2385,7 @@ def _verify_target_git_configuration(context: ModelContext, git_config: dict[str
         raise ConfigError("Selected environment's Omni Git repository does not match trusted web_url",
                           reason_code="git_configuration_mismatch")
     if is_pull_request_event():
-        repository = os.getenv("GITHUB_REPOSITORY")
+        repository = expected_repository or os.getenv("GITHUB_REPOSITORY")
         server = os.getenv("GITHUB_SERVER_URL", "https://github.com").rstrip("/")
         if not repository or expected_url != f"{server}/{repository}":
             raise ConfigError("Trusted target repository does not match the GitHub PR repository",

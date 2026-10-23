@@ -16,6 +16,10 @@ inputs:
     description: Version 2 target environment bound to the supplied environment-scoped validation credential.
     required: false
     default: ""
+  omni-repository-token:
+    description: Optional separate GitHub token with Contents read on the trusted external Omni repository. Never supplied to fork or non-validation steps.
+    required: false
+    default: ""
   repair-api-key:
     description: Separate write-capable Omni PAT. Exposed only to the opt-in repair step.
     required: false
@@ -160,6 +164,7 @@ runs:
         OMNIFLOW_ACTION_REF: ${{ github.action_ref }}
         OMNIFLOW_INPUT_CONFIG: ${{ inputs.config }}
         OMNIFLOW_GITHUB_TOKEN: ${{ github.token }}
+        OMNIFLOW_OMNI_REPO_TOKEN: ${{ steps.route.outputs.external_omni == 'true' && inputs['omni-repository-token'] || '' }}
       run: |
         set -euo pipefail
         omniflow run --auto --config "$OMNIFLOW_INPUT_CONFIG"
@@ -177,9 +182,24 @@ runs:
         OMNIFLOW_ENVIRONMENT: ${{ inputs['validation-environment'] }}
         OMNIFLOW_INPUT_CONFIG: ${{ inputs.config }}
         OMNIFLOW_GITHUB_TOKEN: ${{ github.token }}
+        OMNIFLOW_OMNI_REPO_TOKEN: ${{ steps.route.outputs.external_omni == 'true' && inputs['omni-repository-token'] || '' }}
       run: |
         set -euo pipefail
         omniflow dbt content-impact --config "$OMNIFLOW_INPUT_CONFIG"
+
+    # A source branch may have moved while advisory content was being read.
+    # This is a freshness gate; it does not make the advisory lookup blocking.
+    - name: Verify external Omni source is still current
+      if: always() && !cancelled() && steps.route.outputs.external_omni == 'true' && steps.dbt_impact.outcome == 'success'
+      shell: bash
+      env:
+        OMNIFLOW_ACTION_REF: ${{ github.action_ref }}
+        OMNIFLOW_INPUT_CONFIG: ${{ inputs.config }}
+        OMNIFLOW_GITHUB_TOKEN: ${{ github.token }}
+        OMNIFLOW_OMNI_REPO_TOKEN: ${{ inputs['omni-repository-token'] }}
+      run: |
+        set -euo pipefail
+        omniflow dbt verify-source --config "$OMNIFLOW_INPUT_CONFIG"
 
     - name: Run OmniFlow AI repair
       if: inputs.mode == 'repair'

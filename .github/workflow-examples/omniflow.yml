@@ -117,6 +117,8 @@ jobs:
         with:
           config: .omniflow.yml
           omni-api-key: ${{ secrets.OMNI_API_KEY }}
+          # Optional two-repo dbt impact: Contents read on the external Omni repo only.
+          omni-repository-token: ${{ secrets.OMNIFLOW_OMNI_REPO_TOKEN }}
           # Recorded by the protected dbt sync workflow. Enables the hold policy to
           # detect breaking Omni changes made while a dbt deployment is still pending.
           last-sync-sha: ${{ vars.OMNIFLOW_LAST_SYNC_SHA }}

@@ -367,7 +367,22 @@ Successful `omniflow dbt sync` and a recorded commit do not automatically releas
 
 ### A blocking `OF-DBT-IMPACT-ORPHANED-COLUMN` or `OF-DBT-IMPACT-ORPHANED-MODEL` finding
 
-The dbt change removes a column, or removes or moves a relation, that the candidate Omni YAML still references. Update the referencing Omni fields or views in the same deployment sequence, or keep the old name until Omni and its content are migrated (expand, migrate, then contract). The private repository report and `dbt-impact.json` list the affected fields.
+The dbt change removes a column, or removes or moves a relation, that the candidate Omni YAML still references. Update the referencing Omni fields or views in the same deployment sequence, or keep the old name until Omni and its content are migrated (expand, migrate, then contract). Public `dbt-impact.json` carries safe categories, not field names. When optional content lookup and disclosure are authorized, use the affected-content artifact for dependency details; otherwise inspect the changed dbt projection and registered Omni views directly.
+
+### External Omni repository errors
+
+These errors mean the external-source comparison is incomplete, not that the PR has a confirmed content defect:
+
+| Code ending | What to check |
+| --- | --- |
+| `CREDENTIALS-UNAVAILABLE` | Provide `omni-repository-token` with Contents read on the external source. The dbt repository token is not reused. |
+| `SNAPSHOT-UNAVAILABLE` | Verify the named branch, model roots, access, regular file modes and bounded tree/blob/YAML evidence. |
+| `SNAPSHOT-CHANGED` | The source or PR moved. Run the full check against current revisions; do not reuse a prior green result. |
+| `TARGET-MISMATCH` | Align the trusted registry and live model Git settings with the external repository, branch and model root. |
+| `RECEIPT-UNAVAILABLE` | Run static validation, optional content lookup and `dbt verify-source` in one fresh trusted job. |
+| `CONFIGURATION-INVALID` | Use external `model_paths`, not `omni_yaml_paths`. Cross-repo holds/sync and mixed local Omni edits are unsupported. |
+
+All codes above begin `OF-OMNI-REPOSITORY-`. Ordinary tooling YAML is not an Omni semantic artifact. Forks cannot receive the external token. Private affected-content details additionally require the trusted `allow_repository_diagnostics: true` opt-in and verified destination eligibility. See [two-repository setup](DBT_IMPACT.md#separate-dbt-and-omni-repositories).
 
 ### The finding is marked `ambiguous_relation_match`
 
