@@ -384,7 +384,7 @@ Read `analysis_mode` and `notes` in `dbt-impact.json`:
 
 ### The check did not run at all
 
-It only evaluates pull requests with dbt-path changes and no Omni model changes. Confirm `checks.dbt_impact.enabled` is `true`, that a changed file matches `deployment.breaking_change_hold.dbt_paths`, and that an Omni model path is resolvable from `checks.dbt_impact.omni_yaml_paths` or `.omni/flow.json`. When both dbt and Omni files change, the breaking change hold and contract validation apply instead.
+It evaluates dbt-only and mixed pull requests. Confirm `checks.dbt_impact.enabled` is `true`, that a changed file matches `deployment.breaking_change_hold.dbt_paths`, and that an Omni model path is resolvable from `checks.dbt_impact.omni_yaml_paths` or `.omni/flow.json`. Optional column-to-content lookup additionally requires `checks.dbt_impact.content_impact.enabled` in trusted base policy, same-repository scope, and an Omni credential with suitable read access. Partial/unavailable impact coverage is not zero affected content and does not replace the validation gate.
 
 ### `no Omni model path is available`
 

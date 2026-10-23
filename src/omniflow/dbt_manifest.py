@@ -34,6 +34,14 @@ class DbtModel:
     materialized: str | None = None
     contract_enforced: bool = False
     columns: set[str] = field(default_factory=set)
+    original_file_path: str | None = None
+
+    def canonical_relation(self) -> str:
+        """Prefer the declared physical identity; do not broaden a known schema."""
+        if self.relation_name:
+            return self.relation_name.replace('"', "").replace("`", "").strip().lower()
+        return ".".join(part.strip().lower() for part in
+                        (self.database, self.schema_name, self.alias or self.name) if part)
 
     def relation_candidates(self) -> set[str]:
         """Return every normalized name an Omni view might use for this model.
@@ -104,6 +112,7 @@ def parse_manifest(text: str, *, source: str = "manifest.json") -> dict[str, Dbt
             materialized=materialized,
             contract_enforced=_contract_enforced(node),
             columns=_node_columns(node, source=source),
+            original_file_path=_optional_string(node.get("original_file_path")),
         )
     return models
 

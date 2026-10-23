@@ -216,7 +216,64 @@ def analyze_output_columns(sql: str) -> tuple[set[str], bool]:
         if re.search(r"\bFROM\s*$|\bJOIN\s*$", prefix, re.IGNORECASE) is None:
             return columns, False
     items = _split_top_level(selection)
-    return columns, bool(items) and all(_column_name(item) is not None for item in items)
+    names = [_column_name(item) for item in items]
+    # A set hides duplicate aliases, which do not establish a unique output schema.
+    return columns, bool(items) and None not in names and len(names) == len(set(names))
+
+
+def sql_reference_text(sql: str, *, backslash_escapes: bool = False) -> str:
+    """Remove SQL literals/comments without treating their words as references.
+
+    Keep quoted identifiers and Omni substitutions. This is a lexical guard for
+    the legacy direct-reference check, not a SQL dependency parser.
+    """
+    result: list[str] = []
+    index = 0
+    while index < len(sql):
+        start = index
+        if sql.startswith("--", index):
+            end = sql.find("\n", index + 2)
+            index = len(sql) if end < 0 else end
+            result.append(" " * (index - start))
+        elif sql.startswith("/*", index):
+            end = sql.find("*/", index + 2)
+            index = len(sql) if end < 0 else end + 2
+            result.append(" " * (index - start))
+        elif sql[index] == "'":
+            index += 1
+            while index < len(sql):
+                if backslash_escapes and sql[index] == "\\":
+                    index += 2
+                elif sql.startswith("''", index):
+                    index += 2
+                elif sql[index] == "'":
+                    index += 1
+                    break
+                else:
+                    index += 1
+            result.append(" " * (min(index, len(sql)) - start))
+        elif sql[index] == "$" and (marker := re.match(r"\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$", sql[index:])):
+            delimiter = marker.group()
+            end = sql.find(delimiter, index + len(delimiter))
+            index = len(sql) if end < 0 else end + len(delimiter)
+            result.append(" " * (index - start))
+        elif sql[index] in {'"', '`'}:
+            quote = sql[index]
+            start = index
+            index += 1
+            while index < len(sql):
+                if sql.startswith(quote * 2, index):
+                    index += 2
+                elif sql[index] == quote:
+                    index += 1
+                    break
+                else:
+                    index += 1
+            result.append(sql[start:index])
+        else:
+            result.append(sql[index])
+            index += 1
+    return "".join(result)
 
 
 def model_name_from_path(path: str) -> str | None:

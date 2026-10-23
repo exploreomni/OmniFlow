@@ -327,7 +327,7 @@ Before enabling the failing gate, complete a protected deployment and successful
 
 ## dbt Impact Analysis
 
-This optional check covers the opposite direction from the breaking change hold: a dbt-only pull request that removes a warehouse column or model the committed Omni YAML still references. It runs only on pull requests that have dbt-path changes and no Omni model changes, needs no Omni credential, and never queries the warehouse.
+This optional check covers the opposite direction from the breaking change hold: a dbt or mixed pull request that removes a warehouse column or model the committed Omni YAML still references. The static check needs no Omni credential and never queries the warehouse. Optional content enrichment runs separately and is advisory.
 
 ```yaml
 checks:
@@ -349,8 +349,12 @@ checks:
 | `fail_on_orphaned_references` | `true` | `true` blocks the merge; `false` reports a warning only. |
 | `omni_yaml_paths` | `model_path` values from `.omni/flow.json` | Relative directories holding Omni model YAML, maximum 50. |
 | `table_mapping` | none | `dbt_model` plus `sql_table_name` or `omni_view` overrides, maximum 500 entries. |
+| `content_impact.enabled` | `false` | Separate read-only, credentialed published-content lookup. Advisory; does not change existing gates. |
+| `content_impact.sql_dialect` | none | SQLGlot dialect such as `snowflake`, `bigquery`, or `postgres`; use the actual dialect. No SQL or dbt code executes. |
+| `content_impact.max_searches` | `100` | 1–500 unique field searches; detail reads are also bounded. Truncation is incomplete coverage. |
+| `content_impact.timeout_seconds` | `120` | 5–300 seconds for API enrichment; exhausted budget is incomplete coverage. |
 
-The check reuses `deployment.breaking_change_hold.dbt_paths` to identify dbt source files, so both policies stay consistent. Manifest mode is precise; SQL heuristic mode is conservative and reports nothing for `SELECT *` or unparseable statements. Column matching is case-insensitive and uses word boundaries so removing `customer` never flags a field referencing `customer_id`. See [dbt Impact Analysis](DBT_IMPACT.md).
+The check reuses `deployment.breaking_change_hold.dbt_paths` to identify dbt source files, so both policies stay consistent. Manifest evidence preserves qualified relation identities. Unsupported SQL, wildcards, and unavailable evidence are coverage gaps—not proof of no impact. See [dbt Impact Analysis](DBT_IMPACT.md), including the opt-in content lookup and its scope limits.
 
 ## AI Eval
 

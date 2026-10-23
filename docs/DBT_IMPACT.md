@@ -94,7 +94,7 @@ Column matching:
 - Other SQL is matched on word boundaries, so removing `customer` never flags a field referencing `customer_id`
 - Comparison is case-insensitive, matching warehouse behavior
 
-Relation matching tries the bare name, the schema-qualified name, and the fully qualified name. A model that matches through several of those forms still produces a single finding.
+Relation matching preserves any known database/schema qualification; it never broadens a qualified relation to unrelated same-named tables. Unqualified heuristic matches remain ambiguous when several distinct relations fit. A model that matches through several supported forms still produces a single finding.
 
 Views are indexed by **file path**, not by view name. A repository that materializes the same table into several schemas has several view files with the same name, and keying by name would silently collapse them and hide all but one from this check.
 
@@ -178,16 +178,85 @@ Each run writes `dbt-impact.json` alongside the normal public reports:
 
 The artifact records `coverage_complete`, analysis mode, analyzed files, index counts, fallback notes, and per-finding detail. `dbt_impact_incomplete_coverage` identifies evidence gaps explicitly. It does not contain warehouse rows, query results, compiled SQL, or credentials.
 
+## Optional column-to-content impact
+
+Enable this **in the trusted base branch's `.omniflow.yml`**, underneath the existing
+`checks.dbt_impact` block. It is off by default:
+
+```yaml
+checks:
+  dbt_impact:
+    enabled: true
+    content_impact:
+      enabled: true
+      sql_dialect: snowflake
+      max_searches: 100
+      timeout_seconds: 120
+```
+
+Keep the existing workflow's `omni-api-key: ${{ secrets.OMNI_API_KEY }}` input.
+Use a PAT or organization API key with permission to read the registered model and
+the content you intend to cover. The Action runs static analysis without an Omni
+credential, followed by a separate credentialed `omniflow dbt content-impact`
+step. Fork PRs cannot run this lookup. There is no warehouse query execution,
+dbt invocation, branch deployment, document editing, or new blocking policy.
+Version-2 environment registrations retain the dedicated validation-environment
+credential and verified Git-target requirements; the lookup never creates a branch.
+
+The analysis compares immutable base/head SQL projections, including same-name
+expression changes, and follows supported Omni field references into derived fields
+and filtered measures. Comments and formatting do not create column changes.
+WHERE/JOIN/grouping changes can broaden potential impact. Unsupported macros,
+wildcards, ambiguous identities, inheritance, or dependency cycles remain explicit
+coverage gaps rather than guessed lineage. Upstream dbt column lineage is not included.
+For native cross-view names, the optional step uses Omni's returned view-name
+mapping only after matching it to the immutable authored files. It does not derive
+canonical names by concatenating folder or schema names. Unavailable or ambiguous
+identity metadata remains an explicit coverage gap.
+
+Targeted Content Validator field searches find candidate documents. Query and
+document-layout metadata distinguish rendered dashboard tiles from workbook-only
+tabs and dashboard filters. This observes **published content in the registered
+base model**, not a simulated post-deployment warehouse or every branch draft.
+Base/head source references remain separate; impact is not proof that a PR breaks
+the reported document. User impersonation, permissions, unsupported layouts, and
+request/time limits can narrow coverage; incomplete counts are lower bounds.
+Saved calculated-field expressions, raw/app queries, and unresolved timeframe
+references also retain explicit gaps instead of claiming full query lineage.
+A document can contribute to both dashboard and workbook counts when it contains
+both displayed tiles and affected saved tabs that are not placed on the dashboard.
+
+The PR receives only one short advisory impact line. Public
+`.omniflow/public/content-impact.json` and the normal report contain safe counts and
+coverage status. Detailed dependency paths and document metadata are emitted only
+when the existing live private-repository diagnostic policy authorizes disclosure:
+
+```text
+.omniflow/repository/column-impact.json
+.omniflow/repository/column-impact.md
+```
+
+Update the consumer workflow from `.github/workflow-examples/omniflow.yml` to upload
+these new files. Updating only the Action SHA does not update upload paths. Private
+artifacts are for repository readers, not shareable support bundles. Disable the
+feature with `content_impact.enabled: false`; use `reporting.diagnostics.mode: minimal`
+to retain counts while suppressing identity-rich private artifacts.
+
+The advisory step cannot overwrite the earlier validation decision. Its local
+receipt binds enrichment to the unchanged report, exact revisions, configuration,
+and current Actions run/attempt. An unavailable lookup is never reported as zero
+affected dashboards.
+
 ## Limitations
 
 State these plainly when planning an adoption.
 
-- **Static analysis only.** OmniFlow never queries the warehouse, so it cannot confirm whether a column actually exists today. It reasons from committed dbt and Omni files.
+- **No warehouse execution.** OmniFlow cannot confirm whether a column actually exists today. Static analysis reasons from committed dbt and Omni files; optional enrichment reads content metadata only.
 - **Heuristic mode supports a narrow subset.** Unsupported SQL is incomplete and blocks by default; it cannot substitute for warehouse or adapter validation.
 - **Custom schema macros need help.** When a dbt model's warehouse relation is not derivable from its name or manifest, add a `table_mapping` entry.
-- **Word-boundary matching can still over-report.** A column name appearing incidentally in a field's SQL is treated as a reference. Review findings before assuming a hard break.
+- **Impact is not a regression verdict.** Supported expressions are parsed without executing them. Unsupported syntax remains a coverage gap; review potential-impact findings rather than assuming a hard break.
 - **Unqualified matches can be ambiguous.** In heuristic mode a bare model name cannot distinguish same-named tables across schemas. Those findings are marked `ambiguous_relation_match` with the candidate list rather than silently picking one.
-- **Only runs on Omni-free pull requests.** When a pull request changes both dbt and Omni files, the breaking change hold and normal contract validation cover it instead.
+- **Mixed pull requests are supported.** Static dbt evidence remains independent of Omni validation, so a comment-only Omni edit cannot hide a destructive warehouse change.
 - **A pass is bounded static evidence.** Complete local parsing does not establish deployment acceptance or manifest provenance. In advisory mode, inspect `coverage_complete` and warnings before making a merge decision.
 
 For renames and removals, use expand/contract: deploy the new column or relation while preserving old names, synchronize, migrate Omni and downstream consumers, validate adoption, and only then remove obsolete warehouse names. Simply deploying a destructive dbt rename before changing Omni breaks the existing consumers.

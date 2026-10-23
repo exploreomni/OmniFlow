@@ -155,6 +155,16 @@ def discover_contexts(
     return contexts
 
 
+def discover_published_contexts() -> list[ModelContext]:
+    """Read-only impact targets from trusted metadata, never PR identity overrides."""
+    flow = load_flow_metadata()
+    target = (os.getenv("GITHUB_BASE_REF") if is_pull_request_event()
+              else current_branch() if os.getenv("GITHUB_ACTIONS") == "true" else None)
+    contexts = [_model_from_payload(item, branch_name=None, version=flow["version"])
+                for item in flow["models"]]
+    return [context for context in contexts if target is None or not context.base_branch or context.base_branch == target]
+
+
 def discover_deployment_contexts(
     *,
     auto: bool,

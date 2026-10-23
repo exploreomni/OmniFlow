@@ -85,13 +85,14 @@ jobs:
               private = open_directory('repository', root) if root is not None else None
               targets = [(root, 'artifact-manifest.json')] if root is not None else []
               names = ('report.json', 'report.md', 'report.sarif', 'junit.xml', 'evidence.json',
-                       'dbt-sync.json', 'dbt-impact.json', 'repair.json', 'repair.md')
+                       'dbt-sync.json', 'dbt-impact.json', 'content-impact.json', 'repair.json', 'repair.md')
               for directory in (root, public):
                   if directory is not None:
                       targets.extend((directory, name) for name in names)
               if private is not None:
                   targets.extend((private, name) for name in
-                                 ('report.json', 'report.md', 'report.sarif', 'junit.xml', 'status.json'))
+                                 ('report.json', 'report.md', 'report.sarif', 'junit.xml', 'status.json',
+                                  'column-impact.json', 'column-impact.md'))
               # Preflight every target before deleting any. Directory handles
               # prevent following replacement symlinks during exact-file cleanup.
               present = []

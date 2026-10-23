@@ -10,7 +10,7 @@ API_OPERATIONS = frozenset({
     "github_compare", "github_tree", "github_blob", "github_pull_request",
     "github_check", "github_variable", "github_label", "github_request",
     "git_revision_read", "git_tree_read",
-    "query_run", "query_wait", "query_proposal",
+    "query_run", "query_wait", "query_proposal", "document_queries", "document_state",
 })
 TRANSPORT_REASON_CODES = frozenset({
     "omni_unauthorized", "omni_forbidden", "omni_rate_limited", "omni_service_unavailable",

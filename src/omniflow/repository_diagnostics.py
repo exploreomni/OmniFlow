@@ -159,7 +159,7 @@ def clear_repository_reports(output_dir: str | Path) -> None:
     if directory.resolve() != directory:
         raise SecurityPolicyError("Repository diagnostic output must not traverse symbolic links")
     paths = []
-    for name in (*REPORT_NAMES, "status.json"):
+    for name in (*REPORT_NAMES, "status.json", "column-impact.json", "column-impact.md"):
         path = directory / name
         if path.resolve() != path:
             raise SecurityPolicyError("Repository diagnostic output must not traverse symbolic links")

@@ -19,7 +19,7 @@ The complete walkthrough is in [Install OmniFlow In A GitHub Repository](docs/IN
 7. Create a harmless model change in an Omni branch, select **Create pull request**, and confirm OmniFlow validates the resulting GitHub pull request.
 8. For repositories that deploy dbt, optionally add the protected [post-deployment dbt sync](docs/DBT_SYNC.md) after the production dbt command succeeds.
 9. For monorepos that keep dbt and Omni on one branch, optionally enable the [breaking change hold](docs/BREAKING_CHANGE_HOLD.md) so breaking model changes cannot merge ahead of their dbt deployment.
-10. Optionally enable [dbt impact analysis](docs/DBT_IMPACT.md) so a dbt-only pull request cannot remove a column or model that the Omni model still references.
+10. Optionally enable [dbt impact analysis](docs/DBT_IMPACT.md) so a dbt or mixed pull request cannot remove a column or model that the Omni model still references. Its separate opt-in content lookup maps changed columns to published dashboards/workbook tabs, without changing validation gates.
 
 After the first live run succeeds, make the OmniFlow check required in GitHub branch protection. Continue with the [installation checklist](docs/INSTALLATION.md#step-9-verify-the-installation) before treating OmniFlow as a merge gate.
 

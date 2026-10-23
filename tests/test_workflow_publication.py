@@ -108,6 +108,7 @@ def test_receipt_runs_after_uploads_without_changing_privileges_or_failure_polic
         ".omniflow/repository/report.json", ".omniflow/repository/report.md",
         ".omniflow/repository/report.sarif", ".omniflow/repository/junit.xml",
         ".omniflow/repository/status.json",
+        ".omniflow/repository/column-impact.json", ".omniflow/repository/column-impact.md",
     ]
     assert not by_id["omniflow"].get("continue-on-error", False)
     for step in all_steps:

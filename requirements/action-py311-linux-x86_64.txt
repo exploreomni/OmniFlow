@@ -1,6 +1,8 @@
 # Security lock for the official GitHub Action runtime.
 # Platform: CPython 3.11 on Linux x86_64. Every selected wheel is hash-verified.
 # Runner-provided pip performs only this verified bootstrap; subsequent installs use this audited pin.
+sqlglot==30.24.0 \
+    --hash=sha256:9488828cc018453b7a3ba01e65d2749c9a731314c14583695163ca1f358203fe
 pip==26.2.1 \
     --hash=sha256:71138adf1f4ca900cdb7d289c21b7494329f2332b6d85f0e1c42108c0384ed3e \
     --hash=sha256:f6ad667e89a1fe78046c8f13232b247200f5258d7828f3f7883d660878e0813f

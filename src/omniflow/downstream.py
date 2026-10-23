@@ -50,7 +50,7 @@ def generate_downstream_dependencies(
             continue
         for dependency in search_dependencies:
             identity = (
-                dependency.get("content_id"),
+                dependency.get("content_id") or dependency.get("content_identifier"),
                 dependency.get("query_id"),
                 tuple((ref.get("type"), ref.get("name")) for ref in dependency.get("references", [])),
             )
@@ -150,7 +150,9 @@ def _dependencies_from_payload(payload: Any, search: dict[str, str]) -> list[dic
                 dependencies.append(
                     {
                         **base,
-                        "query_id": query.get("query_presentation_id") or query.get("query_id"),
+                        "query_id": (query.get("query_presentation_id") or query.get("query_id")
+                                     or query.get("query_id_map_key")),
+                        "query_id_map_key": query.get("query_id_map_key"),
                         "query_name": query.get("query_name"),
                         "references": [{"type": search["type"], "name": search["name"]}],
                     }

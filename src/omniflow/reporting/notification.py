@@ -8,6 +8,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from ..content_impact_reporting import content_impact_line
 from ..diagnostics import ENUMS, public_diagnostic
 from .finding_groups import group_findings
 from .issue_policy import is_blocking
@@ -157,6 +158,9 @@ def render_pr_comment(
                   "Inspect this run's routing, coverage and policy before treating it as validated.")
         lines.append(f"**Next action:** {action}")
 
+    impact_line = content_impact_line(safe)
+    if impact_line:
+        lines.append(impact_line)
     # Only the confirmed public artifact belongs in the compact comment. The
     # run summary retains independent private/public upload status and links.
     links = _run_link(run_url)

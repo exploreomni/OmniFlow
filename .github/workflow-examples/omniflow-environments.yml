@@ -69,13 +69,14 @@ jobs:
               private = open_directory('repository', root) if root is not None else None
               targets = [(root, 'artifact-manifest.json')] if root is not None else []
               names = ('report.json', 'report.md', 'report.sarif', 'junit.xml', 'evidence.json',
-                       'dbt-sync.json', 'dbt-impact.json', 'repair.json', 'repair.md')
+                       'dbt-sync.json', 'dbt-impact.json', 'content-impact.json', 'repair.json', 'repair.md')
               for directory in (root, public):
                   if directory is not None:
                       targets.extend((directory, name) for name in names)
               if private is not None:
                   targets.extend((private, name) for name in
-                                 ('report.json', 'report.md', 'report.sarif', 'junit.xml', 'status.json'))
+                                 ('report.json', 'report.md', 'report.sarif', 'junit.xml', 'status.json',
+                                  'column-impact.json', 'column-impact.md'))
               # Preflight every target before deleting any. Directory handles
               # prevent following replacement symlinks during exact-file cleanup.
               present = []
@@ -133,6 +134,7 @@ jobs:
             ${{ env.OMNIFLOW_REPORT_DIR }}/public/report.sarif
             ${{ env.OMNIFLOW_REPORT_DIR }}/public/junit.xml
             ${{ env.OMNIFLOW_REPORT_DIR }}/public/evidence.json
+            ${{ env.OMNIFLOW_REPORT_DIR }}/public/content-impact.json
           if-no-files-found: ignore
           include-hidden-files: true
 
@@ -148,6 +150,8 @@ jobs:
             ${{ env.OMNIFLOW_REPORT_DIR }}/repository/report.sarif
             ${{ env.OMNIFLOW_REPORT_DIR }}/repository/junit.xml
             ${{ env.OMNIFLOW_REPORT_DIR }}/repository/status.json
+            ${{ env.OMNIFLOW_REPORT_DIR }}/repository/column-impact.json
+            ${{ env.OMNIFLOW_REPORT_DIR }}/repository/column-impact.md
           retention-days: 7
           if-no-files-found: error
           include-hidden-files: true

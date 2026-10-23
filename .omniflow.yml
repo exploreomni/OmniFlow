@@ -97,7 +97,7 @@ checks:
   #   enabled: true
   #   fail_on_unavailable: false
 
-  # Optional: block a dbt-only pull request that removes a warehouse column or
+  # Optional: block a dbt or mixed pull request that removes a warehouse column or
   # model the committed Omni YAML still references. Runs without an Omni
   # credential and needs no dbt invocation. Uses deployment.breaking_change_hold
   # dbt_paths to identify dbt sources. See docs/DBT_IMPACT.md.
@@ -110,6 +110,11 @@ checks:
   #   table_mapping:                        # only for custom schema macros
   #     - dbt_model: orders_v2
   #       sql_table_name: analytics.marts.orders
+  #   content_impact:                       # separate, read-only advisory lookup
+  #     enabled: true                       # requires OMNI_API_KEY; off by default
+  #     sql_dialect: snowflake              # choose your actual warehouse dialect
+  #     max_searches: 100                   # bounded field searches + document reads
+  #     timeout_seconds: 120
 
   # Optional: run Omni AI eval prompt sets against main and the PR branch, and
   # fail on any regression. Unlike every other check here, this asks Omni AI

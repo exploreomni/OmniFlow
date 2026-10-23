@@ -5,6 +5,8 @@ import json
 import logging
 import time
 from collections.abc import Mapping
+from contextlib import contextmanager
+from dataclasses import dataclass
 from typing import Any
 from uuid import UUID
 
@@ -28,6 +30,30 @@ AI_EVAL_STATES = AI_EVAL_TERMINAL_STATES | {"RUNNING"}
 MAX_AI_EVAL_DESCRIPTION_CHARS = 200
 SCHEMA_REFRESH_STATES = {"RUNNING", "COMPLETED", "FAILED"}
 SCHEMA_REFRESH_MODEL_KINDS = {"SHARED", "SHARED_EXTENSION"}
+
+
+@dataclass
+class OmniReadBudget:
+    """One bounded advisory operation, shared across its clients; no retry budget."""
+
+    deadline: float
+    max_requests: int
+    requests: int = 0
+
+    def remaining(self) -> float:
+        seconds = self.deadline - time.monotonic()
+        if seconds <= 0:
+            raise OmniAPIError("Read-only analysis reached its time limit.",
+                               reason_code="content_impact_timeout")
+        return seconds
+
+    def consume(self) -> float:
+        remaining = self.remaining()
+        if self.requests >= self.max_requests:
+            raise OmniAPIError("Read-only analysis reached its request limit.",
+                               reason_code="content_impact_budget_exhausted")
+        self.requests += 1
+        return remaining
 
 
 class OmniClient:
@@ -56,6 +82,19 @@ class OmniClient:
         # Identity only, never content or permission evidence. Bind this run-local
         # cache to the instance and actual credential, not the requested actor.
         self._content_identity_cache: tuple[tuple[str, str], tuple[str, str, str]] | None = None
+        self._read_budget: OmniReadBudget | None = None
+
+    @contextmanager
+    def bounded_reads(self, budget: OmniReadBudget):
+        """Apply a shared deadline/request bound without changing other workflows."""
+        previous = self._read_budget
+        if previous is not None:
+            raise ConfigError("Read-only budgets cannot be nested.")
+        self._read_budget = budget
+        try:
+            yield self
+        finally:
+            self._read_budget = previous
 
     def validation_evidence_binding(self) -> tuple[str, str]:
         """Private run-local binding; never expose credential hashes in reports."""
@@ -233,6 +272,43 @@ class OmniClient:
         payload = self._request("GET", f"/api/v1/models/{model_id}/git")
         if not isinstance(payload, dict):
             raise OmniAPIError("Git configuration returned an unexpected response shape")
+        return payload
+
+    def get_document_queries(
+        self, document_id: str, *, user_id: str | None = None,
+        include_personal_folders: bool = False,
+    ) -> dict[str, Any]:
+        """Read saved query definitions for a search-discovered document only."""
+        document_id = validate_path_segment(document_id, name="document_id")
+        actor = self._resolve_content_actor(user_id, include_personal_folders=include_personal_folders)
+        params = {"userId": actor[2]} if actor is not None and actor[0] == "organization" else {}
+        payload = self._request("GET", f"/api/v1/documents/{document_id}/queries", params=params)
+        if (not isinstance(payload, dict) or not isinstance(payload.get("queries"), list)
+                or any(not isinstance(query, dict) for query in payload["queries"])):
+            raise OmniAPIError("Saved query metadata is unavailable.",
+                               reason_code="content_impact_invalid_queries")
+        return payload
+
+    def get_document_state(
+        self, document_id: str, *, user_id: str | None = None,
+        include_personal_folders: bool = False,
+    ) -> dict[str, Any]:
+        """Read published layout without silently broadening an acting-user scope."""
+        document_id = validate_path_segment(document_id, name="document_id")
+        self._resolve_content_actor(user_id, include_personal_folders=include_personal_folders)
+        if user_id is not None:
+            raise ConfigError(
+                "The document-state API does not document acting-user scope. "
+                "Use that user's PAT without user_id to inspect layout in the same scope.",
+                reason_code="content_impact_document_scope_unavailable",
+            )
+        payload = self._request("GET", f"/api/v2/documents/{document_id}")
+        if not isinstance(payload, dict):
+            raise OmniAPIError("Published document state is unavailable.",
+                               reason_code="content_impact_invalid_document")
+        if payload.get("draftOf") is not None:
+            raise OmniAPIError("The document response identifies a draft, not published content.",
+                               reason_code="content_impact_draft_document")
         return payload
 
     def get_dbt_exposures(self, model_id: str, branch_id: str | None = None) -> dict[str, Any]:
@@ -691,8 +767,14 @@ class OmniClient:
     ) -> Any:
         url = f"{self.base_url}{path}"
         last_error: Exception | None = None
+        budget = self._read_budget
+        if budget is not None:
+            if method != "GET":
+                raise ConfigError("Read-only analysis cannot make write requests.")
+            retry_transient = False
         attempts = 4 if retry_transient else 1
         for attempt in range(attempts):
+            timeout = min(self.timeout, budget.consume()) if budget is not None else self.timeout
             context = {
                 "service": "omni", "api_operation": _api_operation(path),
                 "attempt_count": attempt + 1, "max_attempts": attempts,
@@ -703,7 +785,7 @@ class OmniClient:
                     url,
                     params=params,
                     json=json_payload,
-                    timeout=self.timeout,
+                    timeout=timeout,
                     allow_redirects=False,
                     stream=True,
                 )
@@ -744,6 +826,10 @@ class OmniClient:
                     },
                 )
             try:
+                if budget is not None:
+                    payload = _bounded_response_json(response, deadline=budget.deadline)
+                    budget.remaining()
+                    return payload
                 return _bounded_response_json(response)
             except OmniAPIError as exc:
                 exc.diagnostic_context.update({
@@ -786,6 +872,10 @@ def _api_operation(path: str) -> str:
         return "identity_lookup"
     if parts[:3] == ["api", "v1", "documents"] and len(parts) == 5 and parts[4] == "drafts":
         return "document_drafts"
+    if parts[:3] == ["api", "v1", "documents"] and len(parts) == 5 and parts[4] == "queries":
+        return "document_queries"
+    if parts[:3] == ["api", "v2", "documents"] and len(parts) == 4:
+        return "document_state"
     if parts[:3] == ["api", "v1", "jobs"] and len(parts) == 5 and parts[4] == "status":
         return "job_status"
     if parts[:4] == ["api", "v1", "ai", "jobs"]:
@@ -900,7 +990,7 @@ def _yaml_write_result(payload: Any, *, file_name: str, operation: str) -> dict[
     return {"file_name": file_name, "success": True}
 
 
-def _bounded_response_json(response: Any) -> Any:
+def _bounded_response_json(response: Any, *, deadline: float | None = None) -> Any:
     content_length = response.headers.get("Content-Length") if isinstance(response.headers, Mapping) else None
     if content_length is not None:
         try:
@@ -914,6 +1004,9 @@ def _bounded_response_json(response: Any) -> Any:
         body = bytearray()
         try:
             for chunk in iter_content(chunk_size=64 * 1024):
+                if deadline is not None and time.monotonic() >= deadline:
+                    raise OmniAPIError("Read-only analysis reached its time limit.",
+                                       reason_code="content_impact_timeout")
                 if not chunk:
                     continue
                 body.extend(chunk)

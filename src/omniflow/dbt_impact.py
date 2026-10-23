@@ -21,7 +21,7 @@ from typing import Any
 from .candidate import MAX_TREE_ENTRIES, _bounded_git, _GitUnavailable, _local_tree, _remote_tree
 from .config import DbtImpactSettings
 from .dbt_manifest import MAX_MANIFEST_BYTES, DbtModel, diff_manifests, parse_manifest
-from .dbt_sql_diff import MAX_SQL_BYTES, analyze_output_columns, model_name_from_path
+from .dbt_sql_diff import MAX_SQL_BYTES, analyze_output_columns, model_name_from_path, sql_reference_text
 from .diff.yaml_loader import load_yaml_files, parse_yaml_file_map
 from .exceptions import ConfigError, SecurityPolicyError
 from .model_paths import filename_identity, is_repo_control_file, is_semantic_file
@@ -96,6 +96,13 @@ def evaluate_dbt_impact(
         base_ref=base_ref,
         root=root,
     )
+    # A precise dbt relation cannot prove that an Omni relation with an implicit
+    # database/schema is unrelated. Do not broaden it, or silently call it clean.
+    unique_views = {reference.identity: reference for bucket in view_refs.values() for reference in bucket}
+    for token in sorted(removed_columns_by_model.keys() | removed_models.keys()):
+        if any(_relation_requires_context(token, reference.sql_table_name) for reference in unique_views.values()):
+            notes.append(f"Incomplete coverage: dbt relation '{token}' has less-qualified Omni relation candidates; "
+                         "supply explicit relation metadata or table_mapping rather than guessing the connection default.")
 
     issues: list[dict[str, Any]] = []
     issues.extend(
@@ -305,15 +312,15 @@ def _sql_changes(
 
 
 def _model_tokens(model: DbtModel, settings: DbtImpactSettings) -> set[str]:
-    tokens = model.relation_candidates()
+    tokens: set[str] = set()
     for mapping in settings.table_mapping:
         if mapping.get("dbt_model", "").strip().lower() != model.name.lower():
             continue
-        for key in ("sql_table_name", "omni_view"):
-            value = mapping.get(key)
-            if value:
-                tokens.add(value.strip().lower())
-    return tokens
+        # An explicit physical relation is stronger evidence than an alias.
+        value = mapping.get("sql_table_name") or mapping.get("omni_view")
+        if value:
+            tokens.add(_clean_relation(value))
+    return tokens or {model.canonical_relation()}
 
 
 def _load_omni_files(root: Path, omni_yaml_paths: list[str]) -> dict[str, Any]:
@@ -543,6 +550,12 @@ def _clean_relation(value: str) -> str:
     return value.replace('"', "").replace("`", "").replace("[", "").replace("]", "").strip().lower()
 
 
+def _relation_requires_context(known: str, candidate: str) -> bool:
+    """A shorter matching suffix is not proof of the omitted database/schema."""
+    known, candidate = _clean_relation(known), _clean_relation(candidate)
+    return bool(candidate) and known.count(".") > candidate.count(".") and known.endswith("." + candidate)
+
+
 def _table_tokens(sql_table_name: str, view_name: str) -> set[str]:
     """Return every relation form a dbt model might be matched against.
 
@@ -693,9 +706,13 @@ def _references_column(reference: OmniFieldRef, column: str) -> bool:
         return False
     if not reference.sql:
         return reference.field.strip().lower() == target
-    lowered = reference.sql.lower()
-    if any(token.lower() == target for token in TABLE_TOKEN_RE.findall(reference.sql)):
+    reference_text = sql_reference_text(reference.sql)
+    if any(token.lower() == target for token in TABLE_TOKEN_RE.findall(reference_text)):
         return True
+    # ${field} and ${view.field} identify Omni fields, not physical columns.
+    # Their transitive dependencies belong to the field graph. Leaving their
+    # words in this direct matcher can incorrectly block an unrelated removal.
+    lowered = re.sub(r"\$\{[^{}]*\}", " ", reference_text).lower()
     return re.search(rf"(?<![A-Za-z0-9_]){re.escape(target)}(?![A-Za-z0-9_])", lowered) is not None
 
 

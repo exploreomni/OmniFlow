@@ -4,6 +4,7 @@ import re
 from pathlib import Path
 from typing import Any
 
+from ..content_impact_reporting import content_impact_line
 from ..security import redact, secure_write_text
 from .diagnostic_fields import DIAGNOSTIC_FACTS
 from .finding_groups import group_findings
@@ -140,6 +141,20 @@ def _render_minimal_diagnostic(report: dict[str, Any]) -> str:
                     lines.append(f"- {key.replace('_', ' ')}: `{_safe_code(value)}`")
     lines.extend(_next_action_lines(report, findings))
     lines.extend(["", "## Query-result Coverage", "", query_result_coverage(report)])
+    impact = content_impact_line(report)
+    if impact:
+        lines.extend(["", "## dbt Content Impact (advisory)", "", impact,
+                      "Published content is observed live; branch drafts and upstream dbt column lineage are not covered. "
+                      "Impact counts do not change the validation decision. Incomplete coverage is not zero impact."])
+        from ..content_impact_reporting import public_content_impact
+        detail = public_content_impact(report["content_impact"])
+        if detail["coverage_reasons"]:
+            lines.extend(["", "Coverage reasons: " + ", ".join(f"`{reason}`" for reason in detail["coverage_reasons"]),
+                          "Check read access and acting-user scope for unavailable metadata; correct ambiguous relation/field "
+                          "mappings or unsupported SQL for static gaps. For budgets, narrow the scope or raise the "
+                          "bounded lookup limits. Do not interpret omitted content as unaffected."])
+        if detail["coverage_causes"]:
+            lines.append("Reported cause categories: " + ", ".join(f"`{cause}`" for cause in detail["coverage_causes"]))
     return "\n".join(lines) + "\n"
 
 

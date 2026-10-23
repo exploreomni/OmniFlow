@@ -47,7 +47,7 @@ outputs:
     value: ${{ steps.sync.outputs.post-sync-validation-complete }}
   repository-diagnostics-ready:
     description: Fresh repository-only reports were generated for this trusted private run; this authorizes the guarded upload but does not confirm publication. Not shareable output.
-    value: ${{ steps.validate.outputs.repository_diagnostics_ready }}
+    value: ${{ steps.content_impact.outputs.repository_diagnostics_ready || steps.validate.outputs.repository_diagnostics_ready }}
   hold-triggered:
     description: >-
       "true" when the breaking-change hold policy found same-PR dbt overlap,
@@ -150,6 +150,7 @@ runs:
         omniflow run --auto --config "$OMNIFLOW_INPUT_CONFIG"
 
     - name: Run dbt impact without Omni credentials
+      id: dbt_impact
       if: inputs.mode == 'validate' && inputs['skip-reason'] == '' && steps.route.outputs.should_run == 'true' && steps.route.outputs.requires_omni == 'false'
       shell: bash
       env:
@@ -159,6 +160,23 @@ runs:
       run: |
         set -euo pipefail
         omniflow run --auto --config "$OMNIFLOW_INPUT_CONFIG"
+
+    # Advisory only. The static dbt step above never receives an Omni credential.
+    # Trusted base policy controls this opt-in; the CLI also rejects fork scope.
+    - name: Map dbt columns to published Omni content
+      id: content_impact
+      if: always() && !cancelled() && inputs.mode == 'validate' && inputs['skip-reason'] == '' && steps.route.outputs.content_impact == 'true'
+      continue-on-error: true
+      shell: bash
+      env:
+        OMNIFLOW_ACTION_REF: ${{ github.action_ref }}
+        OMNI_API_KEY: ${{ inputs['omni-api-key'] }}
+        OMNIFLOW_ENVIRONMENT: ${{ inputs['validation-environment'] }}
+        OMNIFLOW_INPUT_CONFIG: ${{ inputs.config }}
+        OMNIFLOW_GITHUB_TOKEN: ${{ github.token }}
+      run: |
+        set -euo pipefail
+        omniflow dbt content-impact --config "$OMNIFLOW_INPUT_CONFIG"
 
     - name: Run OmniFlow AI repair
       if: inputs.mode == 'repair'

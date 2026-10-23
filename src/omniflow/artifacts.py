@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from . import __version__
+from .content_impact_reporting import clear_content_impact
 from .diagnostics import public_diagnostic, record_private_report
 from .exceptions import OmniFlowError, SecurityPolicyError
 from .git import tool_revision
@@ -39,6 +40,7 @@ def write_public_reports(
     report = dict(report)
     report.setdefault("tool_revision", tool_revision())
     try:
+        clear_content_impact(Path(output_dir))
         clear_repository_reports(output_dir)
         safe_report = public_diagnostic(report)
         record_private_report(report)
@@ -79,6 +81,7 @@ def write_emergency_failure(*, output_dir: str | Path) -> None:
     Deliberately fixed text: arbitrary exceptions, payloads and partial model
     metadata must never be serialized by this last-resort public path.
     """
+    clear_content_impact(Path(output_dir))
     clear_repository_reports(output_dir)
     message = "OF-EXECUTION-INTERNAL: OmniFlow could not complete this run. Current validation evidence is incomplete; do not merge."
     issue = {"validator": "execution", "type": "internal_execution_failure", "severity": "error", "message": message,
@@ -161,7 +164,8 @@ def write_artifact_manifest(
             "audience": "repository_readers",
             "publication_status": "unconfirmed",
             "artifacts": [f"repository/{path.as_posix()}" for path in repository_files
-                          if path.as_posix() in {"report.json", "report.md", "report.sarif", "junit.xml", "status.json"}],
+                          if path.as_posix() in {"report.json", "report.md", "report.sarif", "junit.xml", "status.json",
+                                                "column-impact.json", "column-impact.md"}],
             "shareable": False,
         },
         # This manifest is public. Count all restricted files, but never publish
@@ -204,7 +208,7 @@ RESTRICTED_REPORT_NAMES = (
 
 PUBLIC_REPORT_NAMES = frozenset({
     "report.json", "report.md", "report.sarif", "junit.xml", "evidence.json", "repair.json", "repair.md",
-    "dbt-impact.json", "dbt-sync.json",
+    "dbt-impact.json", "dbt-sync.json", "content-impact.json",
 })
 
 STANDARD_REPORT_FORMATS = {

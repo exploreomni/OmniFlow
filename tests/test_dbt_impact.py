@@ -14,7 +14,7 @@ from omniflow.dbt_impact import (
     evaluate_dbt_impact,
 )
 from omniflow.dbt_manifest import diff_manifests, parse_manifest
-from omniflow.dbt_sql_diff import diff_sql_columns, extract_output_columns, model_name_from_path
+from omniflow.dbt_sql_diff import analyze_output_columns, diff_sql_columns, extract_output_columns, model_name_from_path
 from omniflow.exceptions import ConfigError, SecurityPolicyError
 
 ORDERS_VIEW = """name: orders
@@ -117,6 +117,21 @@ class SqlHeuristicTests(unittest.TestCase):
         base = "select id as customer_id from raw.orders"
         head = "select id as customer_id, email as customer_email from raw.orders"
         self.assertEqual(diff_sql_columns(base, head), set())
+
+    def test_duplicate_output_aliases_do_not_establish_complete_schema(self):
+        self.assertFalse(analyze_output_columns("select amount as total, tax as total from orders")[1])
+
+    def test_literals_and_comments_do_not_become_warehouse_references(self):
+        from omniflow.dbt_impact import OmniFieldRef, _references_column
+
+        for sql in ("'customer_id'", "'escaped '' customer_id'", "$$customer_id$$",
+                    "1 /* customer_id */", "1 -- customer_id\n", "${customer_id}", "${orders.customer_id}"):
+            with self.subTest(sql=sql):
+                self.assertFalse(_references_column(OmniFieldRef("orders", "constant", "orders.view", sql), "customer_id"))
+        self.assertTrue(_references_column(OmniFieldRef("orders", "x", "orders.view", '${TABLE}."customer_id"'), "customer_id"))
+        # Standard SQL does not escape a closing quote with a backslash. A
+        # following operative reference must not be swallowed as literal text.
+        self.assertTrue(_references_column(OmniFieldRef("orders", "x", "orders.view", "'suffix\\' || ${TABLE}.customer_id"), "customer_id"))
 
     def test_oversized_sql_is_rejected(self):
         with self.assertRaises(SecurityPolicyError):

@@ -29,6 +29,13 @@ from .config import (
     require_repair_api_key,
     require_sync_api_key,
 )
+from .content_impact_reporting import (
+    clear_content_impact,
+    content_impact_line,
+    current_validation_report,
+    publish_content_impact,
+    seal_validation_report,
+)
 from .contracts import evaluate_contracts
 from .dbt_impact import evaluate_dbt_impact
 from .dbt_sync import run_dbt_sync, validate_dbt_sync_environment
@@ -40,6 +47,7 @@ from .discovery import (
     ModelContext,
     discover_contexts,
     discover_deployment_contexts,
+    discover_published_contexts,
     get_changed_files,
     load_flow_metadata,
 )
@@ -195,6 +203,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     dbt = subcommands.add_parser("dbt", help="dbt deployment commands")
     dbt_sub = dbt.add_subparsers(required=True)
+    impact_content = dbt_sub.add_parser("content-impact", help="Read-only advisory column-to-content enrichment")
+    _add_config_arg(impact_content)
+    impact_content.set_defaults(func=cmd_dbt_content_impact)
     dbt_sync = dbt_sub.add_parser("sync", help="Refresh Omni after a successful production dbt deployment")
     _add_config_arg(dbt_sync)
     _add_common_omni_args(dbt_sync)
@@ -259,7 +270,15 @@ def cmd_run(args: argparse.Namespace, *, changed_files: list[str] | None = None)
     _validate_run_output_layout(output_dir)
     try:
         with repository_reporting(config, output_dir=output_dir):
-            return _execute_run(args, config=config, output_dir=output_dir, changed_files=changed_files)
+            result = _execute_run(args, config=config, output_dir=output_dir, changed_files=changed_files)
+        if config.dbt_impact.enabled and config.dbt_impact.content_impact.enabled:
+            try:
+                seal_validation_report(config)
+            except Exception:
+                # This receipt only authorizes optional advisory enrichment.
+                # A reporting/size failure here must not replace the gate result.
+                print("OmniFlow dbt content impact: validation receipt unavailable; advisory enrichment will be skipped.")
+        return result
     except OmniFlowError:
         raise
     except Exception:
@@ -427,12 +446,15 @@ def cmd_route(args: argparse.Namespace) -> int:
         "reason": reason,
         "model_count": len(contexts),
     }
+    if config.dbt_impact.content_impact.enabled:
+        payload["content_impact"] = dbt_impact_needed and _content_impact_authorized()
     environment = contexts[0].environment if contexts else None
     if environment:
         payload.update(environment=environment, target_branch=contexts[0].base_branch)
     if args.format == "github":
         print(f"should_run={'true' if should_run else 'false'}")
         print(f"requires_omni={'true' if requires_omni else 'false'}")
+        print(f"content_impact={'true' if payload.get('content_impact') else 'false'}")
         print(f"reason={reason}")
         print(f"model_count={len(contexts)}")
         if environment:
@@ -676,6 +698,107 @@ def _run_dbt_impact_check(*, config, output_dir: Path, changed_files: list[str] 
 def get_dbt_changed_files() -> list[str]:
     exact = pull_request_changed_files()
     return exact if exact is not None else get_changed_files()
+
+
+def _content_impact_authorized() -> bool:
+    """An opt-in does not grant a fork access to an Omni credential."""
+    if not is_pull_request_event():
+        return os.getenv("GITHUB_ACTIONS") != "true" or event_name() in {"push", "workflow_dispatch"}
+    try:
+        base, head = pull_request_revision("base"), pull_request_revision("head")
+        return bool(os.getenv("GITHUB_BASE_REF") and base and head
+                    and base[1] == head[1] == os.getenv("GITHUB_REPOSITORY"))
+    except OmniFlowError:
+        return False
+
+
+def cmd_dbt_content_impact(args: argparse.Namespace) -> int:
+    """A separate credentialed step: never turn enrichment into a merge gate."""
+    config = load_config(args.config)
+    if not (config.dbt_impact.enabled and config.dbt_impact.content_impact.enabled):
+        print("OmniFlow dbt content impact: disabled.")
+        return 0
+    if not _content_impact_authorized():
+        print("OmniFlow dbt content impact: unavailable for this untrusted context; no Omni calls made.")
+        return 0
+    # Do not call _validate_run_output_layout here: it clears the preceding
+    # validator's repository reports. Only append to that run's sealed output.
+    require_matching_report_directory(config.reporting.output_dir)
+    try:
+        original = current_validation_report(config)
+    except (OmniFlowError, OSError, ValueError):
+        print("OmniFlow dbt content impact: current validation receipt unavailable; no Omni calls made.")
+        return 0
+    try:
+        from .content_impact import collect_and_enrich_content_impact
+        from .dbt_column_impact import collect_column_impacts
+
+        changed_files = get_dbt_changed_files()
+        detail = collect_and_enrich_content_impact(
+            collect_static=lambda resolver: collect_column_impacts(
+                changed_files=changed_files, dbt_paths=config.breaking_change_hold.dbt_paths,
+                settings=config.dbt_impact, omni_yaml_paths=config.dbt_impact.omni_yaml_paths or _flow_model_paths(),
+                base_ref=_base_ref(), canonical_view_resolver=resolver,
+            ),
+            contexts=discover_published_contexts(),
+            client_factory=lambda context: _published_impact_client(context, config.omni.timeout),
+            client_verifier=_verify_published_impact_context,
+            settings=config.dbt_impact.content_impact, user_id=config.omni.user_id,
+            include_personal_folders=config.omni.include_personal_folders,
+            source_file_reader=_content_impact_source,
+        )
+    except Exception:
+        # Arbitrary API/SQL exception text is never a public diagnostic.
+        detail = {"status": "unavailable", "coverage_complete": False, "summary": {},
+                  "coverage_gaps": [{"reason_code": "content_impact_execution_unavailable"}], "impacts": []}
+    ready = publish_content_impact(config, detail, original)
+    if ready and os.getenv("GITHUB_OUTPUT"):
+        with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as stream:
+            stream.write("repository_diagnostics_ready=true\n")
+    write_artifact_manifest(output_dir=config.reporting.output_dir,
+                            restricted_artifacts_enabled=config.security.retain_restricted_artifacts,
+                            redaction_level=config.security.redaction_level)
+    print(content_impact_line({"content_impact": detail}))
+    return 0
+
+
+def _published_impact_client(context: ModelContext, timeout: int) -> OmniClient:
+    if context.environment and os.getenv("OMNIFLOW_ENVIRONMENT") != context.environment:
+        raise SecurityPolicyError("Published impact target requires its dedicated validation environment credential",
+                                  reason_code="content_impact_environment_mismatch")
+    return OmniClient(base_url=context.base_url, api_key=require_api_key(), timeout=timeout)
+
+
+def _verify_published_impact_context(context: ModelContext, client: OmniClient) -> None:
+    # Invoked inside the enrichment read budget. Do not resolve/create branches:
+    # impact discovery concerns the registered published target only.
+    if context.environment:
+        try:
+            _verify_target_git_configuration(context, client.get_git_configuration(context.model_id))
+        except ConfigError as exc:
+            raise ConfigError("Published impact target does not match the trusted Git registration",
+                              reason_code="content_impact_target_mismatch") from exc
+
+
+def _content_impact_source(context: ModelContext, view_file: str, source_revision: str) -> str:
+    from .revision_data import read_git_text, read_github_text
+
+    if source_revision not in {"base", "head"}:
+        raise ConfigError("Unknown impact source revision")
+    revision = pull_request_revision(source_revision)
+    sha = revision[0] if revision else _base_ref() if source_revision == "base" else current_sha()
+    if not sha:
+        raise ConfigError("Impact source revision unavailable")
+    path = f"{context.model_path}/{view_file}" if context.model_path != "." else view_file
+    try:
+        text = read_git_text(sha, path, root=Path("."), max_bytes=1024 * 1024)
+    except ConfigError:
+        if revision is None:
+            raise
+        text = read_github_text(revision[1], sha, path, max_bytes=1024 * 1024)
+    if text is None:
+        raise ConfigError("Impact source file unavailable")
+    return text
 
 
 def _flow_model_paths() -> list[str]:
@@ -2230,6 +2353,7 @@ def _validate_run_output_layout(output_dir: Path) -> None:
     # Routing, repair, and early standalone guards may never reach the common
     # report writer. Preflight every expected path before clearing old detail.
     clear_repository_reports(output_dir)
+    clear_content_impact(output_dir)
 
 
 def _validate_context_output_layout(output_dir: Path) -> None:

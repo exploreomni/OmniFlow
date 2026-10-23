@@ -56,7 +56,9 @@ DBT_IMPACT_KEYS = {
     "fail_on_incomplete_coverage",
     "omni_yaml_paths",
     "table_mapping",
+    "content_impact",
 }
+CONTENT_IMPACT_KEYS = {"enabled", "sql_dialect", "max_searches", "timeout_seconds"}
 TABLE_MAPPING_KEYS = {"dbt_model", "omni_view", "sql_table_name"}
 MAX_TABLE_MAPPINGS = 500
 AI_EVAL_KEYS = {
@@ -123,6 +125,7 @@ _SCHEMA_GROUPS = {
     "checks.semantic_lint": LINT_KEYS, "checks.semantic_lint.rules": SEMANTIC_LINT_RULES,
     "checks.dbt_exposures": EXPOSURE_KEYS, "checks.dbt_impact": DBT_IMPACT_KEYS,
     "checks.dbt_impact.table_mapping": TABLE_MAPPING_KEYS,
+    "checks.dbt_impact.content_impact": CONTENT_IMPACT_KEYS,
     "checks.ai_eval": AI_EVAL_KEYS, "checks.ai_eval.prompt_sets": PROMPT_SET_KEYS,
     "checks.query_validation": {"mode", "contracts", "native_qualified", "snapshot_attestation",
                                 "environment_connection_id", "user_id", "timezone", "max_queries",
@@ -317,6 +320,14 @@ class DbtExposureSettings:
 
 
 @dataclass
+class DbtContentImpactSettings:
+    enabled: bool = False
+    sql_dialect: str | None = None
+    max_searches: int = 100
+    timeout_seconds: int = 120
+
+
+@dataclass
 class DbtImpactSettings:
     enabled: bool = False
     manifest_path: str | None = None
@@ -324,6 +335,7 @@ class DbtImpactSettings:
     fail_on_incomplete_coverage: bool = True
     omni_yaml_paths: list[str] = field(default_factory=list)
     table_mapping: list[dict[str, str]] = field(default_factory=list)
+    content_impact: DbtContentImpactSettings = field(default_factory=DbtContentImpactSettings)
 
 
 @dataclass
@@ -565,6 +577,7 @@ def _to_config(raw: dict[str, Any], source: Path | None) -> OmniFlowConfig:
             dbt_impact_raw.get("omni_yaml_paths"), name="checks.dbt_impact.omni_yaml_paths"
         ),
         table_mapping=_table_mapping(dbt_impact_raw.get("table_mapping")),
+        content_impact=_content_impact_settings(dbt_impact_raw.get("content_impact")),
     )
     ai_eval = AiEvalSettings(
         enabled=parse_bool("ai_eval.enabled", ai_eval_raw.get("enabled"), False),
@@ -1009,6 +1022,11 @@ def _validate_config_schema(raw: dict[str, Any]) -> None:
         "checks.dbt_impact",
     )
     _reject_unknown_keys(
+        _mapping(_mapping(checks.get("dbt_impact"), "checks.dbt_impact").get("content_impact"),
+                 "checks.dbt_impact.content_impact"),
+        CONTENT_IMPACT_KEYS, "checks.dbt_impact.content_impact",
+    )
+    _reject_unknown_keys(
         _mapping(checks.get("ai_eval"), "checks.ai_eval"),
         AI_EVAL_KEYS,
         "checks.ai_eval",
@@ -1038,6 +1056,26 @@ def _bounded_int(name: str, value: Any, *, minimum: int, maximum: int, default: 
         raise _config_error(f"{name} must be between {minimum} and {maximum}", name, "integer",
                             reason="config_invalid_value")
     return parsed
+
+
+def _content_impact_settings(value: Any) -> DbtContentImpactSettings:
+    source = "checks.dbt_impact.content_impact"
+    raw = _mapping(value, source)
+    dialect = raw.get("sql_dialect")
+    if dialect is not None:
+        from sqlglot.dialects import Dialect
+
+        if not isinstance(dialect, str) or dialect not in Dialect.classes:
+            raise _config_error("Unsupported SQL dialect", f"{source}.sql_dialect", "enum",
+                                reason="config_invalid_value")
+    return DbtContentImpactSettings(
+        enabled=parse_bool(f"{source}.enabled", raw.get("enabled"), False),
+        sql_dialect=dialect,
+        max_searches=_bounded_int(f"{source}.max_searches", raw.get("max_searches"),
+                                 minimum=1, maximum=500, default=100),
+        timeout_seconds=_bounded_int(f"{source}.timeout_seconds", raw.get("timeout_seconds"),
+                                     minimum=5, maximum=300, default=120),
+    )
 
 
 def _lint_rules(value: Any) -> dict[str, str]:

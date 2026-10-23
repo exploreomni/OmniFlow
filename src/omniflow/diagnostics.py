@@ -213,7 +213,10 @@ def public_diagnostic(payload: dict[str, Any]) -> dict[str, Any]:
                 key = ("public_context", reference)
                 result["context_reference"] = contexts.setdefault(key, f"context-{len(contexts) + 1}")
         for key, item in value.items():
-            if key == "rule_id" and value.get("validator") == "semantic_lint":
+            if key == "content_impact" and isinstance(item, dict):
+                from .content_impact_reporting import public_content_impact
+                result[key] = public_content_impact(item)
+            elif key == "rule_id" and value.get("validator") == "semantic_lint":
                 if isinstance(item, str) and item in LINT_MESSAGES:
                     result[key] = item
             elif key in ENUMS and isinstance(item, str) and item in ENUMS[key]:

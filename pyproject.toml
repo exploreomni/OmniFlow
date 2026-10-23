@@ -27,6 +27,7 @@ dependencies = [
   "requests>=2.34.2,<3",
   "certifi>=2026.10.19",
   "urllib3>=2.8.0,<3",
+  "sqlglot==30.24.0",
 ]
 
 [project.optional-dependencies]
