@@ -168,6 +168,19 @@ jobs:
             ${{ env.OMNIFLOW_REPORT_DIR }}/repository/report.sarif
             ${{ env.OMNIFLOW_REPORT_DIR }}/repository/junit.xml
             ${{ env.OMNIFLOW_REPORT_DIR }}/repository/status.json
+          retention-days: 7
+          if-no-files-found: error
+          include-hidden-files: true
+
+      # Separate receipt: uploading ordinary diagnostics does not prove these files were delivered.
+      - name: Upload affected content
+        id: impact_upload
+        continue-on-error: true
+        if: always() && steps.diagnostic_output.outputs.ready == 'true' && steps.omniflow.outputs.content-impact-details-ready == 'true' && github.event.repository.private == true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: omniflow-column-impact
+          path: |
             ${{ env.OMNIFLOW_REPORT_DIR }}/repository/column-impact.json
             ${{ env.OMNIFLOW_REPORT_DIR }}/repository/column-impact.md
           retention-days: 7
@@ -187,6 +200,10 @@ jobs:
           REPOSITORY_ARTIFACT_ID: ${{ steps.repository_upload.outputs.artifact-id }}
           REPOSITORY_ARTIFACT_URL: ${{ steps.repository_upload.outputs.artifact-url }}
           REPOSITORY_READY: ${{ steps.omniflow.outputs.repository-diagnostics-ready }}
+          CONTENT_IMPACT_READY: ${{ steps.omniflow.outputs.content-impact-details-ready }}
+          IMPACT_UPLOAD_OUTCOME: ${{ steps.impact_upload.outcome }}
+          IMPACT_ARTIFACT_ID: ${{ steps.impact_upload.outputs.artifact-id }}
+          IMPACT_ARTIFACT_URL: ${{ steps.impact_upload.outputs.artifact-url }}
           PRIVATE_REPOSITORY: ${{ github.event.repository.private }}
         run: |
           set -euo pipefail
@@ -248,6 +265,10 @@ jobs:
           REPOSITORY_ARTIFACT_ID: ${{ steps.repository_upload.outputs.artifact-id }}
           REPOSITORY_ARTIFACT_URL: ${{ steps.repository_upload.outputs.artifact-url }}
           REPOSITORY_READY: ${{ steps.omniflow.outputs.repository-diagnostics-ready }}
+          CONTENT_IMPACT_READY: ${{ steps.omniflow.outputs.content-impact-details-ready }}
+          IMPACT_UPLOAD_OUTCOME: ${{ steps.impact_upload.outcome }}
+          IMPACT_ARTIFACT_ID: ${{ steps.impact_upload.outputs.artifact-id }}
+          IMPACT_ARTIFACT_URL: ${{ steps.impact_upload.outputs.artifact-url }}
           PRIVATE_REPOSITORY: ${{ github.event.repository.private }}
         run: |
           set -euo pipefail

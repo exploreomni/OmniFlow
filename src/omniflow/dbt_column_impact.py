@@ -430,12 +430,17 @@ def _matched_views(graph: FieldGraph, relation: str, gaps: list[dict], scope: st
     known_parts = _relation_parts(relation, graph.dialect)
     if known_parts and len(known_parts) == 1 and known_parts[0] in graph.explicit_view_aliases:
         selected = []
+        found_choices = False
         for root in {view.root for view in graph.views.values()}:
             choices = graph.aliases.get((root, known_parts[0]), set())
+            found_choices = found_choices or bool(choices)
             if len(choices) > 1:
                 _gap(gaps, "dbt_relation_ambiguous", model_path=root, relation=relation, source_revision=scope)
             elif choices:
                 selected.append(graph.views[next(iter(choices))])
+        if not found_choices:
+            _gap(gaps, "dbt_explicit_view_mapping_unresolved", configured_view=known_parts[0],
+                 source_revision=scope)
         return selected
     relation = _clean_relation(relation)
     for view in graph.views.values():

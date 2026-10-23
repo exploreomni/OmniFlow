@@ -11,6 +11,7 @@ from omniflow.cli import _content_impact_authorized, _published_impact_client, m
 from omniflow.config import load_config
 from omniflow.content_impact_reporting import (
     clear_content_impact,
+    coverage_explanations,
     current_validation_report,
     public_content_impact,
     publish_content_impact,
@@ -139,6 +140,80 @@ def test_private_links_are_scoped_and_public_links_withheld(configured):
     assert "demo.omniapp.co" not in Path(".omniflow/public/report.md").read_text()
 
 
+def test_private_content_is_deduplicated_with_source_paths_and_recovery(configured):
+    detail = _detail()
+    document = {"document_id": "doc", "name": "Affected document", "owner": {"name": "Test owner"},
+                "queries": [{"query_key": "1", "name": "Affected query", "usage": "dashboard"}]}
+    source = {"model_path": "omni", "view_file": "sales/orders.view.yaml", "field_name": "amount",
+              "relation": "SALES.ORDERS", "column": "AMOUNT", "source_revision": "base",
+              "change_kind": "modified", "confidence": "exact", "dependency_path": ["orders.amount"],
+              "documents": [document]}
+    detail["impacts"] = [source, source | {"source_revision": "head", "confidence": "potential"},
+                         source | {"view_file": "private/orders.view.yaml", "documents": []}]
+    detail["coverage_gaps"] = [{"reason_code": "content_impact_field_identity_unavailable", "impact_index": 2},
+                               {"reason_code": "content_impact_query_expression_unverified", "impact_index": 0}]
+    with patch("omniflow.content_impact_reporting.resolve_repository_policy",
+               return_value=RepositoryPolicy(True, "repository_verified")):
+        publish_content_impact(configured, detail, current_validation_report(configured))
+    text = Path(".omniflow/repository/column-impact.md").read_text()
+    assert text.count("### Affected document") == text.count("Affected query") == 1
+    assert "Test owner" in text and "SALES.ORDERS.AMOUNT" in text
+    assert "Confirmed source dependency" in text and "Potential impact" in text
+    assert "base / modified" in text and "head / modified" in text
+    assert "location: omni / private/orders.view.yaml / amount / base" in text
+    assert "matched uniquely" in text and "Saved calculations" in text
+    public = Path(".omniflow/public/report.md").read_text()
+    assert "matched uniquely" in public and "Saved calculations" in public
+    assert "private/orders" not in public and "Affected document" not in public and "Test owner" not in public
+
+
+@pytest.mark.parametrize("reason,expected", [
+    ("content_impact_field_identity_unavailable", "matched uniquely"),
+    ("dbt_explicit_view_mapping_unresolved", "checks.dbt_impact.table_mapping"),
+    ("dbt_sql_dynamic_projection", "Dynamic macros"),
+    ("content_impact_query_expression_unverified", "Saved calculations"),
+    ("content_impact_budget_exhausted", "limit was reached"),
+    ("omni_forbidden", "acting-user permissions"),
+])
+def test_coverage_recovery_prose_is_fixed_and_public_safe(reason, expected):
+    detail = _detail("unavailable")
+    detail["coverage_gaps"] = [{"reason_code": reason, "cause_code": reason,
+                                "file": "PRIVATE_PATH", "message": "SECRET_VALUE"}]
+    text = " ".join(coverage_explanations(detail))
+    assert expected in text
+    assert "PRIVATE_PATH" not in text and "SECRET_VALUE" not in text
+
+
+@pytest.mark.parametrize("gate_exit", [0, 1])
+def test_unresolved_mapping_details_remain_private_and_do_not_change_gate(configured, gate_exit):
+    original = current_validation_report(configured)
+    original.update(exit_code=gate_exit, policy_decision="fail" if gate_exit else "pass",
+                    issues=original["issues"] if gate_exit else [], summary={"errors": gate_exit})
+    detail = _detail("unavailable")
+    detail.update(impacts=[], summary={"dashboards": 0, "queries": 0}, coverage_gaps=[{
+        "reason_code": "dbt_explicit_view_mapping_unresolved",
+        "configured_view": "missing_private_view", "source_revision": "head",
+    }])
+    with patch("omniflow.content_impact_reporting.resolve_repository_policy",
+               return_value=RepositoryPolicy(True, "repository_verified")):
+        assert publish_content_impact(configured, detail, original)
+    enriched = current_validation_report(configured)
+    assert {key: value for key, value in enriched.items() if key != "content_impact"} == original
+    assert "dbt_explicit_view_mapping_unresolved" in enriched["content_impact"]["coverage_reasons"]
+    public = Path(".omniflow/public/report.md").read_text()
+    assert "checks.dbt_impact.table_mapping" in public and "affected content is unknown" in public
+    assert "missing_private_view" not in public + json.dumps(enriched)
+    assert r"missing\_private\_view" not in public
+    private = Path(".omniflow/repository/column-impact.md").read_text()
+    assert r"missing\_private\_view" in private and "location: head" in private
+    private_data = json.loads(Path(".omniflow/repository/column-impact.json").read_text())
+    assert private_data["coverage_gaps"][0]["configured_view"] == "missing_private_view"
+    assert "checks.dbt_impact.table_mapping[].omni_view" in private
+    comment = render_pr_comment(enriched, head_sha="a" * 40, run_url="https://github.com/o/r/actions/runs/1")
+    assert "affected content is unknown" in comment and "0 dashboard" not in comment
+    assert "missing_private_view" not in comment
+
+
 def test_stale_or_tampered_report_cannot_enrich(configured, monkeypatch):
     monkeypatch.setenv("GITHUB_RUN_ATTEMPT", "2")
     with pytest.raises(ConfigError):
@@ -228,3 +303,23 @@ def test_composite_separates_opt_in_credential():
     assert "steps.route.outputs.content_impact == 'true'" in steps["content_impact"]["if"]
     assert steps["content_impact"]["env"]["OMNI_API_KEY"] == "${{ inputs['omni-api-key'] }}"
     assert steps["content_impact"]["env"]["OMNIFLOW_ENVIRONMENT"] == "${{ inputs['validation-environment'] }}"
+    assert action["outputs"]["content-impact-details-ready"]["value"] == (
+        "${{ steps.content_impact.outputs.content_impact_details_ready }}")
+    for name in ("omniflow.yml", "omniflow-environments.yml"):
+        workflow = yaml.safe_load((root / ".github/workflow-examples" / name).read_text())
+        for job in workflow["jobs"].values():
+            impact_upload = next(step for step in job["steps"] if step.get("id") == "impact_upload")
+            assert impact_upload["with"]["path"].splitlines() == [
+                "${{ env.OMNIFLOW_REPORT_DIR }}/repository/column-impact.json",
+                "${{ env.OMNIFLOW_REPORT_DIR }}/repository/column-impact.md",
+            ]
+            assert "content-impact-details-ready == 'true'" in impact_upload["if"]
+            assert "github.event.repository.private == true" in impact_upload["if"]
+            assert impact_upload["continue-on-error"] is True
+            for step in job.get("steps", []):
+                if step.get("env", {}).get("REPOSITORY_READY") == (
+                        "${{ steps.omniflow.outputs.repository-diagnostics-ready }}"):
+                    assert step["env"]["CONTENT_IMPACT_READY"] == (
+                        "${{ steps.omniflow.outputs.content-impact-details-ready }}")
+                    assert step["env"]["IMPACT_UPLOAD_OUTCOME"] == "${{ steps.impact_upload.outcome }}"
+                    assert step["env"]["IMPACT_ARTIFACT_URL"] == "${{ steps.impact_upload.outputs.artifact-url }}"

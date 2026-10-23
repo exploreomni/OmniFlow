@@ -8,7 +8,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from ..content_impact_reporting import content_impact_line
+from ..content_impact_reporting import content_impact_line, coverage_explanations
 from ..diagnostics import ENUMS, public_diagnostic
 from .finding_groups import group_findings
 from .issue_policy import is_blocking
@@ -82,6 +82,19 @@ def _run_link(run_url: str, label: str = "View run") -> str:
 
 def _head_reference(head_sha: str) -> str:
     return head_sha[:7] if re.fullmatch(r"[0-9a-f]{40}", head_sha) else "unavailable"
+
+
+def _impact_details_link(run_url: str, publication: list[dict[str, str]] | None) -> str:
+    """The trusted publisher supplies post-upload receipts, not report metadata."""
+    receipt = next((item for item in publication or [] if item.get("kind") == "repository"), {})
+    if receipt.get("content_impact_details") != "generated":
+        return "Details unavailable: not generated or not authorized for this run."
+    if (receipt.get("content_impact_status") == "uploaded" and _run_link(run_url).startswith("[")
+            and re.fullmatch(re.escape(run_url) + r"/artifacts/[1-9][0-9]*", receipt.get("content_impact_url", ""))):
+        return f"[View affected content]({receipt['content_impact_url']}) (repository-only)"
+    if receipt.get("content_impact_status") == "failed":
+        return "Affected-content upload failed; check this run."
+    return "Affected-content upload unconfirmed; check this run."
 
 
 def _comparison_count(safe: dict[str, Any], validator: str) -> str:
@@ -160,9 +173,9 @@ def render_pr_comment(
 
     impact_line = content_impact_line(safe)
     if impact_line:
-        lines.append(impact_line)
-    # Only the confirmed public artifact belongs in the compact comment. The
-    # run summary retains independent private/public upload status and links.
+        lines.append(impact_line + " " + _impact_details_link(run_url, publication))
+    # Impact details use their own generated-and-uploaded receipt; the generic
+    # full-report link remains public, even if other private diagnostics exist.
     links = _run_link(run_url)
     if publication is not None:
         receipt = next((item for item in publication if item.get("kind") == "public"), {})
@@ -235,6 +248,11 @@ restricts their shape, preventing Markdown or identity injection by other caller
     lines.extend(["", f"Nonblocking findings: {len(nonblocking)} ({lint_count} lint). "
                   "Lint describes current model health; it is not proof of a new PR regression.",
                   f"**Query-result correctness:** {query_result_coverage(safe)}"])
+    impact_line = content_impact_line(safe)
+    if impact_line:
+        lines.extend(["", "### dbt content impact (advisory)", "", impact_line,
+                      _impact_details_link(run_url, publication)])
+        lines.extend(f"- {message}" for message in coverage_explanations(safe["content_impact"]))
     if publication is not None:
         lines.extend(["", "### Diagnostic publication", ""])
         for item in publication:

@@ -342,6 +342,13 @@ Without it, two dbt pull requests can rename columns, merge cleanly because neit
 
 It is disabled by default. See [dbt Impact Analysis](docs/DBT_IMPACT.md).
 
+For optional column-to-content discovery, enable `checks.dbt_impact.content_impact`
+in trusted policy and use the updated workflow example. This separate read-only
+step needs an Omni credential, follows supported field dependencies, and adds a
+short advisory count with a **View affected content** link after authorized private
+details are uploaded. It does not change the validation gate. Updating the Action
+SHA alone does not add the required artifact-upload and publication steps.
+
 ## Trust And Routing
 
 The example uses GitHub's `pull_request_target` event but never checks out or executes proposed PR code. A credential-free preflight retrieves changed filenames through GitHub's API and reads `.omni/flow.json`, `.omniflow.yml`, and the workflow itself from the trusted base branch. Only a selected Omni model context starts the validation process with `OMNI_API_KEY`; skipped PRs never inject it. This prevents a same-repository pull request from changing `base_url`, disabling gates, enabling unsafe output, replacing the action, or redirecting the token.

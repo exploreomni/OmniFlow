@@ -90,6 +90,7 @@ def test_receipt_runs_after_uploads_without_changing_privileges_or_failure_polic
     by_id = {step.get("id"): step for step in all_steps}
     assert all_steps.index(by_id["publication"]) > all_steps.index(by_id["repository_upload"])
     assert all_steps.index(by_id["publication"]) > all_steps.index(by_id["public_upload"])
+    assert all_steps.index(by_id["publication"]) > all_steps.index(by_id["impact_upload"])
     assert by_id["publication"]["if"] == "always()"
     assert all_steps.index(by_id["diagnostic_output"]) < next(
         i for i, step in enumerate(all_steps) if step["name"] == "Set up Python")
@@ -108,6 +109,16 @@ def test_receipt_runs_after_uploads_without_changing_privileges_or_failure_polic
         ".omniflow/repository/report.json", ".omniflow/repository/report.md",
         ".omniflow/repository/report.sarif", ".omniflow/repository/junit.xml",
         ".omniflow/repository/status.json",
+    ]
+    impact = by_id["impact_upload"]
+    assert impact["continue-on-error"] is True  # Advisory delivery cannot change the gate.
+    assert "steps.diagnostic_output.outputs.ready == 'true'" in impact["if"]
+    assert "content-impact-details-ready == 'true'" in impact["if"]
+    assert "github.event.repository.private == true" in impact["if"]
+    assert impact["with"]["retention-days"] == 7
+    assert impact["with"]["if-no-files-found"] == "error"
+    assert impact["with"]["include-hidden-files"] is True
+    assert impact["with"]["path"].replace("${{ env.OMNIFLOW_REPORT_DIR }}", ".omniflow").splitlines() == [
         ".omniflow/repository/column-impact.json", ".omniflow/repository/column-impact.md",
     ]
     assert not by_id["omniflow"].get("continue-on-error", False)

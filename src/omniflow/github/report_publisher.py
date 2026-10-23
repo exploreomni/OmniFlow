@@ -90,6 +90,15 @@ def publication_receipts(env: dict[str, str]) -> list[dict[str, str]]:
         item = {"kind": kind, "status": status}
         if outcome == "success" and re.fullmatch(r"[1-9][0-9]*", artifact) and url == f"{run_url}/artifacts/{artifact}":
             item.update(status="uploaded", url=url)
+        if kind == "repository" and eligible and env.get("CONTENT_IMPACT_READY") == "true":
+            item["content_impact_details"] = "generated"
+            impact_outcome = env.get("IMPACT_UPLOAD_OUTCOME", "")
+            item["content_impact_status"] = (
+                "failed" if impact_outcome in {"failure", "cancelled"} else "unconfirmed")
+            impact_id, impact_url = env.get("IMPACT_ARTIFACT_ID", ""), env.get("IMPACT_ARTIFACT_URL", "")
+            if (impact_outcome == "success" and re.fullmatch(r"[1-9][0-9]*", impact_id)
+                    and impact_url == f"{run_url}/artifacts/{impact_id}"):
+                item.update(content_impact_status="uploaded", content_impact_url=impact_url)
         receipts.append(item)
     return receipts
 

@@ -43,9 +43,18 @@ class _ImpactSession:
         self.inventories = {}
         self.failures = {}
         self.source_files = {}
+        self.correspondences = {}
+        self.require_correspondence = False
+
+    @staticmethod
+    def context_key(context):
+        return context.base_url, context.model_id, context.model_path, context.environment
+
+    def scope_key(self, context, scope):
+        return (*self.context_key(context), scope)
 
     def source_key(self, context, path, scope):
-        return context.base_url, context.model_id, context.model_path, scope, path
+        return (*self.scope_key(context, scope), path)
 
     def source(self, context, path, scope, reader):
         key = self.source_key(context, path, scope)
@@ -55,7 +64,7 @@ class _ImpactSession:
         return self.source_files[key]
 
     def inventory(self, context):
-        key = (context.base_url, context.model_id, context.model_path, context.environment)
+        key = self.context_key(context)
         self.budget.remaining()
         if key in self.failures:
             raise self.failures[key]
@@ -94,6 +103,7 @@ def collect_and_enrich_content_impact(
         return enrich_content_impact(static_report={}, contexts=contexts, client_factory=client_factory,
                                      settings=settings)
     session = _ImpactSession(contexts, client_factory, settings, client_verifier)
+    session.require_correspondence = True
     resolver_gaps = []
 
     def resolver(scope, model_root, files):
@@ -104,6 +114,10 @@ def collect_and_enrich_content_impact(
                 raise ConfigError("Canonical field scope is unavailable.",
                                   reason_code="content_impact_model_scope_ambiguous")
             context = matches[0]
+            scope_key = session.scope_key(context, scope)
+            # Failed or absent correspondence must never fall back to a smaller
+            # inventory whose basename happens to become unique.
+            session.correspondences[scope_key] = {}
             source, original_paths = {}, {}
             for path, payload in files.items():
                 if not _safe_path(path):
@@ -128,7 +142,9 @@ def collect_and_enrich_content_impact(
             _, published, names = session.inventory(context)
             pairs = match_artifacts(source, published, omni_view_names=names).pairs
             inverse = {path: name for name, path in names.items()}
-            return {original_paths[path]: inverse[target] for path, target in pairs.items() if target in inverse}
+            canonical_names = {path: inverse[target] for path, target in pairs.items() if target in inverse}
+            session.correspondences[scope_key] = canonical_names
+            return {original_paths[path]: name for path, name in canonical_names.items()}
         except (OmniFlowError, ArtifactIdentityError, ValueError, TypeError, KeyError) as exc:
             _gap(resolver_gaps, "content_impact_field_identity_unavailable", exc=exc)
             # The collector records its own graph-coverage gap; never return an
@@ -159,7 +175,9 @@ def enrich_content_impact(
 
     ``source_file_reader(context, relative_path, base_or_head)`` must read the
     trusted immutable Git revision, never the current filesystem or live branch.
-    Its text is used only for typed artifact identity and is never returned.
+    The coordinator uses its text to prove full-inventory correspondence; it is
+    never returned. Direct calls without that correspondence accept only exact
+    authored paths, not moved-view identity inferred from an individual file.
     ``client_factory(context)`` must return an OmniClient-compatible client.
     """
     result = {
@@ -182,7 +200,7 @@ def enrich_content_impact(
         for gap in static_report.get("coverage_gaps", [])[:1000]:
             if isinstance(gap, dict) and gap.get("reason_code") in _STATIC_REASONS:
                 item = {"reason_code": gap["reason_code"]}
-                for key in ("model_path", "file", "field", "relation", "dbt_model", "source_revision"):
+                for key in ("model_path", "file", "field", "relation", "dbt_model", "source_revision", "configured_view"):
                     if isinstance(gap.get(key), str):
                         item[key] = gap[key][:1024]
                 gaps.append(item)
@@ -225,13 +243,10 @@ def enrich_content_impact(
                 for index, entry in entries:
                     try:
                         budget.remaining()
-                        reader = None
-                        if (source_file_reader is not None
-                                or session.source_key(context, entry["view_file"], entry["source_revision"])
-                                in session.source_files):
-                            def reader(context, path, scope):
-                                return session.source(context, path, scope, source_file_reader)
-                        field = _canonical_field(context, entry, files, names, reader)
+                        canonical_names = (session.correspondences.get(
+                            session.scope_key(context, entry["source_revision"]), {}
+                        ) if session.require_correspondence else None)
+                        field = _canonical_field(entry, files, names, canonical_names=canonical_names)
                     except (OmniFlowError, ArtifactIdentityError, ValueError, KeyError):
                         _gap(gaps, "content_impact_field_identity_unavailable", impact_index=index)
                         continue
@@ -351,6 +366,7 @@ _STATIC_REASONS = frozenset({
     "omni_root_unavailable", "omni_view_evidence_unavailable", "dbt_source_unsupported", "dbt_manifest_only_change",
     "dbt_source_unavailable", "omni_view_identity_unavailable", "dbt_relation_context_unavailable",
     "dbt_relation_identity_unavailable", "omni_relation_identity_unavailable", "dbt_relation_case_ambiguous",
+    "dbt_explicit_view_mapping_unresolved",
 })
 
 
@@ -380,18 +396,17 @@ def _view_inventory(payload):
     return files, names
 
 
-def _canonical_field(context, entry, files, names, reader):
+def _canonical_field(entry, files, names, *, canonical_names=None):
     path = entry["view_file"]
-    if reader is not None:
-        text = reader(context, path, entry["source_revision"])
-        if not isinstance(text, str) or len(text.encode()) > MAX_YAML_FILE_BYTES:
-            raise ValueError("Unavailable source")
-        pairs = match_artifacts({path: text}, files, omni_view_names=names).pairs
-        api_path = pairs.get(path)
-    else:
-        # Without immutable source evidence, do not infer moved qualified views.
-        candidates = [name for name in files if authored_file_identity(name) == authored_file_identity(path)]
-        api_path = candidates[0] if len(candidates) == 1 else None
+    if canonical_names is not None:
+        canonical = canonical_names.get(path)
+        if canonical not in names:
+            raise ValueError("Unavailable full-inventory canonical identity")
+        return f"{canonical}.{entry['field_name']}"
+    # Direct helper calls have no full Git inventory. Preserve exact authored
+    # path/wrapper matching only; one file cannot prove global basename uniqueness.
+    candidates = [name for name in files if authored_file_identity(name) == authored_file_identity(path)]
+    api_path = candidates[0] if len(candidates) == 1 else None
     canonical = [name for name, target in names.items() if target == api_path]
     if len(canonical) != 1:
         raise ValueError("Unavailable canonical identity")

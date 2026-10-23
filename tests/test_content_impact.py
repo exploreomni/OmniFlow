@@ -4,10 +4,14 @@ import copy
 import time
 from contextlib import contextmanager
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
+import yaml
 
+from omniflow.config import DbtContentImpactSettings, DbtImpactSettings
 from omniflow.content_impact import collect_and_enrich_content_impact, enrich_content_impact
+from omniflow.dbt_column_impact import collect_column_impacts
 from omniflow.discovery import ModelContext
 from omniflow.exceptions import ConfigError, OmniAPIError, OmniAuthError
 from omniflow.omni_client import OmniClient, OmniReadBudget
@@ -98,6 +102,27 @@ def run(client=None, impacts=None, *, contexts=None, settings=None, **kwargs):
 
 def reasons(result):
     return {gap["reason_code"] for gap in result["coverage_gaps"]}
+
+
+@pytest.mark.parametrize("valid_impact", [False, True])
+def test_unresolved_explicit_mapping_is_unknown_or_partial_without_losing_valid_impacts(valid_impact):
+    client = FakeClient()
+    gap = {"reason_code": "dbt_explicit_view_mapping_unresolved",
+           "configured_view": "missing_private_view", "source_revision": "head"}
+    result = enrich_content_impact(
+        static_report={"schema_version": 1, "coverage_complete": False, "coverage_gaps": [gap],
+                       "impacts": [impact()] if valid_impact else []},
+        contexts=[CONTEXT], client_factory=lambda context: client,
+        settings=DbtContentImpactSettings(enabled=True),
+    )
+    assert result["coverage_complete"] is False
+    assert result["status"] == ("partial" if valid_impact else "unavailable")
+    assert gap in result["coverage_gaps"]
+    assert result["summary"]["dashboards"] == int(valid_impact)
+    searches = [call for call in client.calls if call[0] == "search"]
+    assert [call[2]["find"] for call in searches] == ([FIELD] if valid_impact else [])
+    if not valid_impact:
+        assert not client.calls
 
 
 def test_native_tiles_deduplicate_and_saved_tabs_are_workbook_only():
@@ -241,7 +266,7 @@ def test_missing_view_names_or_ambiguous_context_never_guesses():
     assert not client.calls
 
 
-def test_moved_duplicate_views_use_immutable_qualified_identity():
+def test_direct_helper_does_not_infer_moved_identity_from_one_file():
     client = FakeClient()
     other = VIEW.replace("PUBLIC", "OTHER")
     client.yaml = {"files": {"published/orders.view": VIEW, "elsewhere/orders.view": other},
@@ -255,9 +280,10 @@ def test_moved_duplicate_views_use_immutable_qualified_identity():
 
     assert run(client, [entry])["status"] == "unavailable"
     result = run(client, [entry], source_file_reader=reader)
-    assert result["status"] == "complete"
-    assert result["impacts"][0]["canonical_field"] == FIELD
-    assert calls == [(CONTEXT, entry["view_file"], "base")]
+    assert result["status"] == "unavailable"
+    assert result["impacts"][0]["canonical_field"] is None
+    assert result["summary"]["searches"] == 0
+    assert calls == []  # An individual source body cannot prove full-scope uniqueness.
 
 
 def test_search_budget_and_disabled_mode_do_not_scan_all_content():
@@ -521,3 +547,156 @@ def test_coordinator_parsed_payload_without_original_text_cannot_establish_ident
 
     assert coordinated(collector, client)["status"] == "unavailable"
     assert not client.calls
+
+
+def test_full_collector_missing_explicit_mapping_reaches_enrichment_as_unknown():
+    client = FakeClient()
+    settings = DbtImpactSettings(
+        table_mapping=[{"dbt_model": "orders", "omni_view": "missing_view"}],
+        content_impact=DbtContentImpactSettings(enabled=True, sql_dialect="snowflake"),
+    )
+
+    def collector(resolver):
+        return collect_column_impacts(
+            changed_files=["models/orders.sql"], dbt_paths=["models"], settings=settings,
+            omni_yaml_paths=["omni"], base_ref="base", canonical_view_resolver=resolver,
+        )
+
+    with (patch("omniflow.dbt_column_impact._manifest", return_value=({}, {})),
+          patch("omniflow.dbt_column_impact._git_show", return_value="select amount * .9 as amount from raw.orders"),
+          patch("omniflow.dbt_column_impact.read_head_text", return_value="select amount * .8 as amount from raw.orders"),
+          patch("omniflow.dbt_column_impact.pull_request_revision", side_effect=lambda scope: (scope, "org/repo")),
+          patch("omniflow.dbt_column_impact._load_omni_snapshot", return_value=(
+              {"omni/orders.view.yaml": yaml.safe_load(VIEW)}, [{"path": "omni", "status": "available"}]))):
+        result = coordinated(collector, client, reader=lambda *args: VIEW)
+
+    assert result["status"] == "unavailable" and result["coverage_complete"] is False
+    assert result["impacts"] == []
+    assert {"content_impact_static_incomplete", "dbt_explicit_view_mapping_unresolved"} == reasons(result)
+    assert {gap["source_revision"] for gap in result["coverage_gaps"] if "source_revision" in gap} == {"base", "head"}
+    assert all(gap["configured_view"] == "missing_view" for gap in result["coverage_gaps"] if "configured_view" in gap)
+    assert [call[0] for call in client.calls] == ["yaml"]  # Identity read only, never search an unrelated field.
+
+
+def test_full_collector_unmatched_private_view_never_searches_public_namesake():
+    client = FakeClient()
+    sources = {"public/orders.view.yaml": VIEW, "private/orders.view.yaml": VIEW.replace("PUBLIC", "PRIVATE")}
+    client.yaml = {"files": {"public/orders.view": VIEW}, "viewNames": {"orders": "public/orders.view"}}
+    parsed = {"omni/" + path: yaml.safe_load(text) for path, text in sources.items()}
+    settings = DbtImpactSettings(
+        table_mapping=[{"dbt_model": "orders", "sql_table_name": "PRIVATE.ORDERS"}],
+        content_impact=DbtContentImpactSettings(enabled=True, sql_dialect="snowflake"),
+    )
+
+    def collector(resolver):
+        return collect_column_impacts(
+            changed_files=["models/orders.sql"], dbt_paths=["models"], settings=settings,
+            omni_yaml_paths=["omni"], base_ref="base", canonical_view_resolver=resolver,
+        )
+
+    with (patch("omniflow.dbt_column_impact._manifest", return_value=({}, {})),
+          patch("omniflow.dbt_column_impact._git_show", return_value="select amount * .9 as amount from raw.orders"),
+          patch("omniflow.dbt_column_impact.read_head_text", return_value="select amount * .8 as amount from raw.orders"),
+          patch("omniflow.dbt_column_impact.pull_request_revision", side_effect=lambda scope: (scope, "org/repo")),
+          patch("omniflow.dbt_column_impact._load_omni_snapshot", return_value=(parsed, [{"path": "omni", "status": "available"}]))):
+        result = coordinated(collector, client, reader=lambda _, path, scope: sources[path])
+
+    assert len(result["impacts"]) == 2  # Keep both immutable static dependency records.
+    assert {entry["source_revision"] for entry in result["impacts"]} == {"base", "head"}
+    assert all(entry["view_file"] == "private/orders.view.yaml" and entry["canonical_field"] is None
+               and entry["documents"] == [] for entry in result["impacts"])
+    assert {"omni_view_identity_unavailable", "content_impact_field_identity_unavailable"} <= reasons(result)
+    assert result["status"] == "unavailable" and not result["coverage_complete"]
+    assert result["summary"]["searches"] == result["summary"]["dashboards"] == result["summary"]["queries"] == 0
+    assert [call[0] for call in client.calls] == ["yaml"]
+
+
+def test_coordinator_keeps_verified_partial_matches_without_searching_unmatched_views():
+    client = FakeClient()
+    client.yaml = {"files": {"public/orders.view": VIEW}, "viewNames": {"orders": "public/orders.view"}}
+
+    def collector(resolver):
+        assert resolver("base", "omni", {
+            "omni/public/orders.view.yaml": VIEW,
+            "omni/private/orders.view.yaml": VIEW.replace("PUBLIC", "PRIVATE"),
+        }) == {"omni/public/orders.view.yaml": "orders"}
+        return {"schema_version": 1, "coverage_complete": False,
+                "coverage_gaps": [{"reason_code": "omni_view_identity_unavailable"}],
+                "impacts": [impact(view_file="public/orders.view.yaml"), impact(view_file="private/orders.view.yaml")]}
+
+    result = coordinated(collector, client)
+    assert result["status"] == "partial"
+    assert [entry["canonical_field"] for entry in result["impacts"]] == [FIELD, None]
+    assert result["impacts"][0]["documents"] and result["impacts"][1]["documents"] == []
+    assert [call[2]["find"] for call in client.calls if call[0] == "search"] == [FIELD]
+    assert result["summary"]["dashboards"] == result["summary"]["queries"] == 1
+
+
+def test_coordinator_both_schema_views_publish_distinct_canonical_fields_after_moves():
+    client = FakeClient()
+    other = VIEW.replace("PUBLIC", "PRIVATE")
+    client.yaml = {"files": {"public/orders.view": VIEW, "private/orders.view": other},
+                   "viewNames": {"orders": "public/orders.view", "private_orders": "private/orders.view"}}
+    client.documents = []
+
+    def collector(resolver):
+        assert resolver("base", "omni", {
+            "omni/New public/orders.view.yaml": VIEW, "omni/New private/orders.view.yml": other,
+        }) == {"omni/New public/orders.view.yaml": "orders", "omni/New private/orders.view.yml": "private_orders"}
+        return {"schema_version": 1, "coverage_complete": True, "coverage_gaps": [],
+                "impacts": [impact(view_file="New public/orders.view.yaml"), impact(view_file="New private/orders.view.yml")]}
+
+    result = coordinated(collector, client)
+    assert result["status"] == "complete"
+    assert [entry["canonical_field"] for entry in result["impacts"]] == [FIELD, "private_orders.amount"]
+    assert [call[2]["find"] for call in client.calls if call[0] == "search"] == [FIELD, "private_orders.amount"]
+    assert [call[0] for call in client.calls].count("yaml") == 1
+
+
+def test_coordinator_correspondence_is_isolated_between_base_and_head():
+    client = FakeClient()
+    other = VIEW.replace("PUBLIC", "PRIVATE")
+    client.yaml = {"files": {"public/orders.view": VIEW, "private/orders.view": other},
+                   "viewNames": {"public_orders": "public/orders.view", "private_orders": "private/orders.view"}}
+    client.documents = []
+
+    def collector(resolver):
+        for scope, text, expected in (("base", VIEW, "public_orders"), ("head", other, "private_orders")):
+            assert resolver(scope, "omni", {"omni/Moved/orders.view.yaml": text}) == {"omni/Moved/orders.view.yaml": expected}
+        return {"schema_version": 1, "coverage_complete": True, "coverage_gaps": [],
+                "impacts": [impact(view_file="Moved/orders.view.yaml", source_revision=scope) for scope in ("base", "head")]}
+
+    result = coordinated(collector, client)
+    assert result["status"] == "complete"
+    assert [entry["canonical_field"] for entry in result["impacts"]] == ["public_orders.amount", "private_orders.amount"]
+
+
+def test_coordinator_never_reuses_another_revision_mapping_or_unverified_exact_path():
+    client = FakeClient()
+
+    def collector(resolver):
+        assert resolver("base", "omni", {"omni/orders.view.yaml": VIEW}) == {"omni/orders.view.yaml": "orders"}
+        return {"schema_version": 1, "coverage_complete": False, "coverage_gaps": [],
+                "impacts": [impact(source_revision="head")]}
+
+    result = coordinated(collector, client)
+    assert result["status"] == "unavailable"
+    assert result["impacts"][0]["canonical_field"] is None
+    assert [call[0] for call in client.calls] == ["yaml"]
+
+
+def test_direct_helper_retains_exact_authored_path_without_directory_inference():
+    client = FakeClient()
+    client.yaml = {"files": {"public/orders.view": VIEW}, "viewNames": {"orders": "public/orders.view"}}
+    assert run(client, [impact(view_file="public/orders.view.yml")])["status"] == "complete"
+    result = run(client, [impact(view_file="private/orders.view.yaml")], source_file_reader=lambda *_: VIEW)
+    assert result["status"] == "unavailable" and result["summary"]["searches"] == 0
+
+
+def test_disabled_coordinator_does_not_collect_source_or_call_api():
+    result = collect_and_enrich_content_impact(
+        collect_static=lambda _: pytest.fail("disabled collector"), contexts=[CONTEXT],
+        client_factory=lambda _: pytest.fail("disabled client"), settings=SimpleNamespace(enabled=False),
+    )
+    assert result["summary"]["searches"] == 0
+    assert reasons(result) == {"content_impact_disabled"}

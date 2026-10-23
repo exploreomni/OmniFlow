@@ -755,6 +755,7 @@ def cmd_dbt_content_impact(args: argparse.Namespace) -> int:
     if ready and os.getenv("GITHUB_OUTPUT"):
         with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as stream:
             stream.write("repository_diagnostics_ready=true\n")
+            stream.write("content_impact_details_ready=true\n")
     write_artifact_manifest(output_dir=config.reporting.output_dir,
                             restricted_artifacts_enabled=config.security.retain_restricted_artifacts,
                             redaction_level=config.security.redaction_level)

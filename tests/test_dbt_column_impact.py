@@ -57,11 +57,11 @@ def fixture(root, before="select id, amount * 0.9 as net from raw.orders", view=
     return commit(root)
 
 
-def collect(root, base, *, settings=None, changed=None, resolver=None):
+def collect(root, base, *, settings=None, changed=None, resolver=None, omni_paths=None):
     return collect_column_impacts(
         changed_files=changed or ["models/orders.sql"], dbt_paths=["models", "target"],
         settings=settings or DbtImpactSettings(content_impact=DbtContentImpactSettings(enabled=True)),
-        omni_yaml_paths=["omni"], base_ref=base, repo_root=root,
+        omni_yaml_paths=omni_paths or ["omni"], base_ref=base, repo_root=root,
         canonical_view_resolver=resolver,
     )
 
@@ -221,6 +221,104 @@ def test_explicit_semantic_view_mapping_does_not_invent_physical_relation_identi
     result = collect(tmp_path, base, settings=settings)
     assert result["coverage_complete"] is True and result["impacts"]
     assert {item["field_name"] for item in result["impacts"]} == {"net", "doubled", "filtered_count"}
+
+
+def test_nonexistent_explicit_view_mapping_is_not_complete_no_impact(tmp_path):
+    base = fixture(tmp_path)
+    (tmp_path / "models/orders.sql").write_text("select id, amount * 0.8 as net from raw.orders")
+    settings = DbtImpactSettings(table_mapping=[{"dbt_model": "orders", "omni_view": "missing_view"}],
+        content_impact=DbtContentImpactSettings(enabled=True))
+    result = collect(tmp_path, base, settings=settings)
+    assert result["coverage_complete"] is False
+    assert result["impacts"] == []  # Do not substitute the physical orders namesake.
+    assert result["coverage_gaps"] == [
+        {"reason_code": "dbt_explicit_view_mapping_unresolved", "configured_view": "missing_view",
+         "source_revision": scope} for scope in ("base", "head")]
+
+
+@pytest.mark.parametrize("aliases,complete", [(["orders", "missing_view"], False), (["schema.orders"], True)])
+def test_explicit_mapping_retains_valid_and_verified_dotted_aliases(tmp_path, aliases, complete):
+    base = fixture(tmp_path)
+    (tmp_path / "models/orders.sql").write_text("select id, amount * 0.8 as net from raw.orders")
+    settings = DbtImpactSettings(table_mapping=[{"dbt_model": "orders", "omni_view": name} for name in aliases],
+        content_impact=DbtContentImpactSettings(enabled=True))
+    def resolver(scope, root, files):
+        return {"omni/orders.view.yaml": "schema.orders"}
+
+    result = collect(tmp_path, base, settings=settings, resolver=resolver)
+    assert result["coverage_complete"] is complete
+    assert len(result["impacts"]) == 6
+    assert {item["field_name"] for item in result["impacts"]} == {"net", "doubled", "filtered_count"}
+    if complete:
+        assert result["coverage_gaps"] == []
+    else:
+        assert result["coverage_gaps"] == [
+            {"reason_code": "dbt_explicit_view_mapping_unresolved", "configured_view": "missing_view",
+             "source_revision": scope} for scope in ("base", "head")]
+
+
+def test_explicit_mapping_match_in_one_root_does_not_require_every_root(tmp_path):
+    base = fixture(tmp_path, extra={"other/stock.view.yaml": "sql_table_name: inventory.stock\ndimensions:\n  id: {}\n"})
+    (tmp_path / "models/orders.sql").write_text("select id, amount * 0.8 as net from raw.orders")
+    settings = DbtImpactSettings(table_mapping=[{"dbt_model": "orders", "omni_view": "orders"}],
+        content_impact=DbtContentImpactSettings(enabled=True))
+    result = collect(tmp_path, base, settings=settings, omni_paths=["omni", "other"])
+    assert result["coverage_complete"] is True and result["coverage_gaps"] == []
+    assert len(result["impacts"]) == 6
+    assert {item["model_path"] for item in result["impacts"]} == {"omni"}
+
+
+def test_ambiguous_explicit_mapping_does_not_get_missing_mapping_reason(tmp_path):
+    base = fixture(tmp_path, extra={"omni/other/orders.view.yaml": "sql_table_name: staging.orders\ndimensions:\n  net: {}\n"})
+    (tmp_path / "models/orders.sql").write_text("select id, amount * 0.8 as net from raw.orders")
+    settings = DbtImpactSettings(table_mapping=[{"dbt_model": "orders", "omni_view": "orders"}],
+        content_impact=DbtContentImpactSettings(enabled=True))
+    result = collect(tmp_path, base, settings=settings)
+    assert result["coverage_complete"] is False and result["impacts"] == []
+    assert {item["reason_code"] for item in result["coverage_gaps"]} == {"dbt_relation_ambiguous"}
+
+
+@pytest.mark.parametrize("before_name,after_name,missing_scope", [
+    ("orders", "renamed", "head"), ("renamed", "orders", "base"), ("orders", None, "head"),
+])
+def test_explicit_mapping_checks_renamed_or_removed_view_per_revision(tmp_path, before_name, after_name, missing_scope):
+    base = fixture(tmp_path, view=f"name: {before_name}\n" + VIEW,
+        extra={"omni/other.view.yaml": "sql_table_name: other\ndimensions:\n  id: {}\n"})
+    (tmp_path / "models/orders.sql").write_text("select id, amount * 0.8 as net from raw.orders")
+    if after_name is None:
+        (tmp_path / "omni/orders.view.yaml").unlink()
+    else:
+        (tmp_path / "omni/orders.view.yaml").write_text(f"name: {after_name}\n" + VIEW)
+    settings = DbtImpactSettings(table_mapping=[{"dbt_model": "orders", "omni_view": "orders"}],
+        content_impact=DbtContentImpactSettings(enabled=True))
+    result = collect(tmp_path, base, settings=settings)
+    assert result["coverage_complete"] is False
+    assert len(result["impacts"]) == 3
+    assert all(item["source_revision"] != missing_scope for item in result["impacts"])
+    assert result["coverage_gaps"] == [
+        {"reason_code": "dbt_explicit_view_mapping_unresolved", "configured_view": "orders",
+         "source_revision": missing_scope}]
+
+
+def test_unmatched_physical_mapping_remains_legitimate_no_impact(tmp_path):
+    base = fixture(tmp_path)
+    (tmp_path / "models/orders.sql").write_text("select id, amount * 0.8 as net from raw.orders")
+    settings = DbtImpactSettings(table_mapping=[{"dbt_model": "orders", "sql_table_name": "warehouse.other.orders"}],
+        content_impact=DbtContentImpactSettings(enabled=True))
+    result = collect(tmp_path, base, settings=settings)
+    assert result["coverage_complete"] is True and result["impacts"] == [] and result["coverage_gaps"] == []
+
+
+def test_noop_with_invalid_explicit_mapping_still_skips_graph_and_resolver(tmp_path):
+    base = fixture(tmp_path)
+    (tmp_path / "models/orders.sql").write_text("select id, amount * .9 as net from raw.orders -- comment\n")
+    settings = DbtImpactSettings(table_mapping=[{"dbt_model": "orders", "omni_view": "missing_view"}],
+        content_impact=DbtContentImpactSettings(enabled=True))
+    resolver = mock.Mock(side_effect=AssertionError("no API needed"))
+    with mock.patch("omniflow.dbt_column_impact._load_omni_snapshot", side_effect=AssertionError("no graph needed")):
+        result = collect(tmp_path, base, settings=settings, resolver=resolver)
+    assert result["coverage_complete"] is True and result["impacts"] == [] and result["coverage_gaps"] == []
+    resolver.assert_not_called()
 
 
 @pytest.mark.parametrize("extension,reason", [

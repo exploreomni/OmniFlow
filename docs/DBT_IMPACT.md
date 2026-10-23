@@ -213,6 +213,10 @@ For native cross-view names, the optional step uses Omni's returned view-name
 mapping only after matching it to the immutable authored files. It does not derive
 canonical names by concatenating folder or schema names. Unavailable or ambiguous
 identity metadata remains an explicit coverage gap.
+The complete authored inventory establishes uniqueness separately for base and
+head. A view missing from that mapping stays unresolved: a same-named view in
+another schema is never substituted during content lookup. Verified folder moves
+remain supported; this is an identity check, not a directory-layout requirement.
 
 Targeted Content Validator field searches find candidate documents. Query and
 document-layout metadata distinguish rendered dashboard tiles from workbook-only
@@ -226,7 +230,14 @@ references also retain explicit gaps instead of claiming full query lineage.
 A document can contribute to both dashboard and workbook counts when it contains
 both displayed tiles and affected saved tabs that are not placed on the dashboard.
 
-The PR receives only one short advisory impact line. Public
+The PR receives only one short advisory impact line, with **View affected content**
+when this run generated authorized private details and their dedicated upload succeeded.
+That link downloads `omniflow-column-impact`, a repository-only artifact; open `column-impact.md` inside
+it for a deduplicated content list, owners when returned, navigation links,
+changed columns, and dependency paths. The generic **Full report** link remains
+the public summary, not the identity-rich detail artifact. Missing authorization,
+generation, or upload evidence produces an explanation instead of a stale link.
+Public
 `.omniflow/public/content-impact.json` and the normal report contain safe counts and
 coverage status. Detailed dependency paths and document metadata are emitted only
 when the existing live private-repository diagnostic policy authorizes disclosure:
@@ -237,7 +248,12 @@ when the existing live private-repository diagnostic policy authorizes disclosur
 ```
 
 Update the consumer workflow from `.github/workflow-examples/omniflow.yml` to upload
-these new files. Updating only the Action SHA does not update upload paths. Private
+these new files and pass `CONTENT_IMPACT_READY` from the Action's
+`content-impact-details-ready` output into the summary and PR publisher steps.
+Include the dedicated `impact_upload` step and its `IMPACT_UPLOAD_OUTCOME`,
+`IMPACT_ARTIFACT_ID`, and `IMPACT_ARTIFACT_URL` receipt inputs. Uploading ordinary
+repository diagnostics alone never authorizes the affected-content link.
+Updating only the Action SHA does not update upload paths or these receipt inputs. Private
 artifacts are for repository readers, not shareable support bundles. Disable the
 feature with `content_impact.enabled: false`; use `reporting.diagnostics.mode: minimal`
 to retain counts while suppressing identity-rich private artifacts.
@@ -246,6 +262,29 @@ The advisory step cannot overwrite the earlier validation decision. Its local
 receipt binds enrichment to the unchanged report, exact revisions, configuration,
 and current Actions run/attempt. An unavailable lookup is never reported as zero
 affected dashboards.
+
+### Interpreting incomplete impact coverage
+
+| Report category | Meaning and next step |
+| --- | --- |
+| Unresolved explicit view mapping | `dbt_explicit_view_mapping_unresolved` means a configured `table_mapping[].omni_view` matched no authored view across the registered model roots in the recorded base/head revision. Check the trusted mapping and any intentional view rename/removal. It is unknown impact, not a confirmed zero; independently resolved impacts remain available. |
+| Unresolved field/view identity | Check the source database/schema and published model synchronization. The unmatched field is retained as static evidence but no other view's dashboards are attributed to it. |
+| Saved calculation or timeframe lineage | Supported direct references are still useful; inspect calculated expressions in Omni for additional dependencies. These counts are not an exhaustive content inventory. |
+| Dynamic macros, wildcard outputs, or compiled-SQL-only changes | The analyzer does not execute dbt or analyze compiled artifacts. Review generated SQL separately; this is not a clean no-impact result. |
+| Metadata unavailable | Verify the credential, acting-user permissions, and connectivity for the registered scope, then rerun. No access widening is attempted. |
+| Budget or snapshot gap | Narrow the scope, adjust bounded limits where supported, or rerun against stable published metadata. Omitted content is not confirmed unaffected. |
+
+The private report distinguishes **confirmed source dependencies** from broader
+**potential impact**, and lists unresolved source locations separately. Neither
+category proves a runtime regression. Public reports explain safe reason categories
+without copying SQL, names, source paths, or API error text.
+For an unresolved explicit mapping, authorized private details identify the configured
+view and affected revision. A match in one registered root does not require the same
+view in every root. This advisory gap does not add a blocking policy or change the
+existing orphan checks; proven comment-only SQL changes still skip impact lookup.
+
+Full saved-calculation/compiled-SQL lineage, upstream staging-to-mart propagation,
+and exposure `meta` enrichment remain separate enhancements, not release claims.
 
 ## Limitations
 

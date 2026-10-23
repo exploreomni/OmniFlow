@@ -34,6 +34,8 @@ def environment():
         "DIAGNOSTIC_OUTPUT_READY": "true", "PUBLIC_UPLOAD_OUTCOME": "success", "PUBLIC_ARTIFACT_ID": "17",
         "PUBLIC_ARTIFACT_URL": RUN_URL + "/artifacts/17", "REPOSITORY_UPLOAD_OUTCOME": "success",
         "REPOSITORY_ARTIFACT_ID": "18", "REPOSITORY_ARTIFACT_URL": RUN_URL + "/artifacts/18",
+        "IMPACT_UPLOAD_OUTCOME": "success", "IMPACT_ARTIFACT_ID": "19",
+        "IMPACT_ARTIFACT_URL": RUN_URL + "/artifacts/19",
         "REPOSITORY_READY": "true", "PRIVATE_REPOSITORY": "true",
     }
 
@@ -226,6 +228,48 @@ def test_compact_unconfirmed_or_private_artifact_never_becomes_full_report_link(
     text = render_pr_comment(report("pass"), head_sha=HEAD, run_url=RUN_URL, publication=[receipt])
     assert "[Full report]" not in text and "INJECT" not in text
     assert "Report download unavailable" in text and "Validation passed" in text
+
+
+def impact_report():
+    return report("pass") | {"content_impact": {
+        "status": "partial", "coverage_complete": False,
+        "summary": {"dashboards": 2, "workbooks": 0, "queries": 3},
+        "coverage_gaps": [{"reason_code": "content_impact_field_identity_unavailable"}],
+    }}
+
+
+def test_impact_comment_links_only_generated_uploaded_private_details_and_stays_compact():
+    receipts = publication_receipts(environment() | {"CONTENT_IMPACT_READY": "true"})
+    text = render_pr_comment(impact_report(), head_sha=HEAD, run_url=RUN_URL, publication=receipts)
+    assert len(text.splitlines()) == 5
+    assert f"[View affected content]({RUN_URL}/artifacts/19)" in text
+    assert f"[Full report]({RUN_URL}/artifacts/17)" in text
+    assert "repository-only" in text and "lower bounds" in text
+    assert "PRIVATE_" not in text
+    summary = render_notification(impact_report(), head_sha=HEAD, run_url=RUN_URL, run_attempt=1,
+                                  publication=receipts)
+    assert "View affected content" in summary and "matched uniquely" in summary
+
+
+@pytest.mark.parametrize("changes,explanation", [
+    ({}, "not generated or not authorized"),
+    ({"CONTENT_IMPACT_READY": "true", "PRIVATE_REPOSITORY": "false"}, "not generated or not authorized"),
+    ({"CONTENT_IMPACT_READY": "true", "REPOSITORY_READY": "false"}, "not generated or not authorized"),
+    ({"CONTENT_IMPACT_READY": "true", "DIAGNOSTIC_OUTPUT_READY": "false"}, "not generated or not authorized"),
+    ({"CONTENT_IMPACT_READY": "true", "IMPACT_UPLOAD_OUTCOME": "failure"}, "upload failed"),
+    ({"CONTENT_IMPACT_READY": "true", "IMPACT_UPLOAD_OUTCOME": "skipped"}, "upload unconfirmed"),
+    ({"CONTENT_IMPACT_READY": "true", "IMPACT_UPLOAD_OUTCOME": ""}, "upload unconfirmed"),
+    ({"CONTENT_IMPACT_READY": "true", "IMPACT_ARTIFACT_URL": RUN_URL.replace("123", "122") + "/artifacts/19"},
+     "upload unconfirmed"),
+])
+def test_impact_detail_link_requires_current_eligible_receipt(changes, explanation):
+    data = impact_report()
+    # Report content itself cannot authorize an artifact disclosure.
+    data["content_impact"]["content_impact_details"] = "generated"
+    text = render_pr_comment(data, head_sha=HEAD, run_url=RUN_URL,
+                             publication=publication_receipts(environment() | changes))
+    assert "View affected content" not in text and "artifacts/19" not in text
+    assert explanation in text and "Validation passed" in text
 
 
 @pytest.mark.parametrize("url", ["https://evil.invalid/data", RUN_URL + ")\nINJECT", RUN_URL + "/../123"])

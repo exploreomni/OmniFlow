@@ -146,7 +146,7 @@ def _render_minimal_diagnostic(report: dict[str, Any]) -> str:
         lines.extend(["", "## dbt Content Impact (advisory)", "", impact,
                       "Published content is observed live; branch drafts and upstream dbt column lineage are not covered. "
                       "Impact counts do not change the validation decision. Incomplete coverage is not zero impact."])
-        from ..content_impact_reporting import public_content_impact
+        from ..content_impact_reporting import coverage_explanations, public_content_impact
         detail = public_content_impact(report["content_impact"])
         if detail["coverage_reasons"]:
             lines.extend(["", "Coverage reasons: " + ", ".join(f"`{reason}`" for reason in detail["coverage_reasons"]),
@@ -155,6 +155,7 @@ def _render_minimal_diagnostic(report: dict[str, Any]) -> str:
                           "bounded lookup limits. Do not interpret omitted content as unaffected."])
         if detail["coverage_causes"]:
             lines.append("Reported cause categories: " + ", ".join(f"`{cause}`" for cause in detail["coverage_causes"]))
+        lines.extend(f"- {message}" for message in coverage_explanations(detail))
     return "\n".join(lines) + "\n"
 
 

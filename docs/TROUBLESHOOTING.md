@@ -390,6 +390,47 @@ It evaluates dbt-only and mixed pull requests. Confirm `checks.dbt_impact.enable
 
 The policy is enabled but OmniFlow could not locate the Omni YAML. Add `checks.dbt_impact.omni_yaml_paths`, or ensure `.omni/flow.json` includes a `model_path` for each model.
 
+### The PR shows impact counts but no affected-content link
+
+The short comment and public report deliberately exclude document identities.
+Adopt the current workflow example's **Upload affected content** step and its
+`CONTENT_IMPACT_READY` / `IMPACT_*` publication inputs; a successful ordinary
+diagnostics upload is not enough. The dedicated upload is permitted only after
+fresh private-repository policy verification. With minimal diagnostics, a public
+repository, a failed upload, or missing current-run receipts, the comment explains
+the missing link instead of substituting an older artifact. An upload failure does
+not change the advisory analysis into a validation failure.
+
+### Impact coverage is partial or unavailable
+
+Read **Coverage gaps and recovery** in `column-impact.md` when private details are
+available, or the safe explanation in the public report. Unmatched views are not
+substituted with same-named views from another schema. Unsupported saved
+calculations, macros/compiled SQL, permissions, and lookup limits can leave gaps;
+neither an omitted document nor a zero observed count proves it is unaffected.
+See [coverage categories](DBT_IMPACT.md#interpreting-incomplete-impact-coverage).
+
+### A configured dbt-to-Omni view mapping could not be resolved
+
+`dbt_explicit_view_mapping_unresolved` means an explicit
+`checks.dbt_impact.table_mapping[].omni_view` value matched no authored view across
+the registered model roots for the recorded base or head revision. It is not a
+confirmed zero-impact result. Other successfully resolved mappings still contribute
+their observed impacts; the unresolved part remains unknown.
+
+1. Open **Coverage gaps and recovery** in the authorized private `column-impact.md`
+   artifact to find the configured view and affected revision. Public reports omit
+   that identifier.
+2. Check the mapping in the trusted base branch's `.omniflow.yml` against the authored
+   Omni view identity, including its exact spelling. Review whether the view was
+   deliberately renamed or removed in the affected revision.
+3. Correct stale configuration through your normal reviewed workflow, then rerun.
+   Do not substitute a similarly named view or delete the mapping merely to obtain
+   a clean result. A valid mapping in one registered root need not exist in every root.
+
+The lookup remains advisory and does not change the existing validation decision.
+Proven comment-only SQL changes still skip this analysis.
+
 ## Exit Codes
 
 | Code | Meaning |
