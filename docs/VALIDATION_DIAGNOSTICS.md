@@ -82,6 +82,31 @@ Public JSON, SARIF and JUnit retain individual findings. Markdown and GitHub ann
 projections, preserve policy and context distinctions, and report omitted categories when presentation limits apply.
 No PII/PHI/PCI-bearing messages, field values, SQL, names, or resource IDs are enabled in public reports by these reporting improvements.
 
+### Compact pull-request comments
+
+The standard workflow's publisher uses a compact PR comment by default, separate from the detailed report:
+
+- **Pass:** a short status, model/content new-finding counts when the comparisons are complete, the evaluated head,
+  and current-run links. Disabled checks stay labeled disabled; missing or incomplete comparisons say to consult
+  the report rather than implying zero new findings.
+- **Failure:** the total blocking count, up to three safely grouped blockers with occurrence counts, a primary
+  next action, and the number of additional blocking occurrences when groups are omitted.
+- **Skipped, advisory or incomplete:** the actual status stays visible. A zero exit or zero recorded blockers alone
+  does not become a verified validation pass.
+
+The **Full report** link appears only after a confirmed public-artifact upload with a validated current-run link.
+When delivery is unavailable, the comment directs the reviewer to the run instead of inventing a download link.
+Detailed existing findings, check execution and query-result coverage remain in the full artifacts; the Actions
+summary retains coverage explanations and publication receipts. Repository-only diagnostics remain separately
+access-controlled and are never copied into comments. Compact presentation does not change validation policy,
+counts or privacy rules.
+
+The publisher reconciles the existing bot summary against the current PR head and authoritative run, retaining
+duplicate-notification safeguards. Failure/recovery transition notices are short links to the result, not another
+copy of the report; the first failure summary does not require a duplicate failure notice. A recovery notice
+requires a verified passing result, not an advisory or skipped run. GitHub comment publication does not establish
+that an email was delivered.
+
 ### Finding the affected code in a private repository
 
 Eligible private same-repository GitHub.com validation runs now default to a separate **repository diagnostics** artifact. It can identify the exact authored field/view/topic, source file and source-key line, alongside the fixed explanation and corrective guidance. The JSON contains all findings; Markdown prioritizes blockers and explicitly counts any omitted findings. A location labeled `base` refers to the old snapshot (for example, a deleted field), not the current PR file. No line number is invented when only a file is known.
@@ -98,6 +123,16 @@ Use the complete [validation workflow example](../.github/workflow-examples/omni
 [environment-aware example](../.github/workflow-examples/omniflow-environments.yml) when already using environments.
 Review and merge these changes on the trusted target branch; a PR-only workflow change does not update the privileged caller.
 
+First inspect how the existing workflow publishes comments:
+
+- If it already uses `omniflow.github.report_publisher` with the current fresh-output, upload and publication
+  bindings, update both OmniFlow Action pins to the same reviewed full SHA containing the compact renderer.
+  The installed publisher supplies the new presentation; no validation-policy change is needed.
+- If it builds a comment by reading `report.md` (for example, `cat .omniflow/public/report.md`), changing only the
+  Action pin will still post the full report. Adopt the complete current standard workflow example, including
+  preparation, upload/receipt and publisher steps, using the checklist below. Do not leave the legacy posting
+  step alongside the publisher or paste repository-only report contents into a comment.
+
 1. Update both OmniFlow `uses:` entries to the same reviewed full commit SHA. Preserve existing model policy, secrets,
    environment bindings and custom branch triggers; no validation gate needs to be disabled.
 2. Keep workflow `env.OMNIFLOW_REPORT_DIR` identical to trusted `reporting.output_dir` (default `.omniflow`).
@@ -112,7 +147,8 @@ Review and merge these changes on the trusted target branch; a PR-only workflow 
 5. In the standard workflow, retain the `publication` step ID and the installed
    `python -I -m omniflow.github.report_publisher --report-dir "$OMNIFLOW_REPORT_DIR"` command.
    Keep the current upload-outcome bindings. Comments consume only safe decision JSON and current-run upload
-   outputs, never checked-out receipt text or repository report contents.
+   outputs, never checked-out receipt text or repository report contents. This produces the compact PR summary;
+   **Show public diagnostic summary** retains the fuller Actions summary and publication receipts.
    The environment-aware example remains read-only and publishes its receipt to the job summary, not a new PR comment.
 6. Run a fresh test and check **Diagnostic publication** in the job summary. Verify the downloaded report belongs to
    that run and inspect both generation and publication states. Privacy-safe `public/report.json` is required

@@ -14,7 +14,13 @@ from omniflow.github.report_publisher import (
     publication_receipts,
     publish,
 )
-from omniflow.reporting.notification import query_result_coverage, render_notification
+from omniflow.reporting.notification import (
+    notification_decision,
+    query_result_coverage,
+    render_notification,
+    render_pr_comment,
+    render_transition_notice,
+)
 
 HEAD = "a" * 40
 BASE = "b" * 40
@@ -113,6 +119,122 @@ def test_short_notification_has_blockers_current_head_action_and_no_private_or_r
     assert len(text) < 2500
     assert text.count("### Diagnostic publication") == 1
     assert "unconfirmed" not in text
+
+
+def comparison_report(validator, **changes):
+    return {"validator": validator, "comparison_status": "complete", "validation_complete": True,
+            "new_issues": 0, **changes}
+
+
+def test_compact_pass_is_four_lines_even_with_large_existing_debt_and_does_not_mutate_evidence():
+    data = report("pass") | {
+        "check_reports": [comparison_report("model"), comparison_report("content")],
+        "issues": [{"validator": "model", "severity": "error", "blocking": False,
+                    "state": "existing", "message": "PRIVATE_MODEL_SENTINEL"}] * 12000,
+    }
+    before = deepcopy(data)
+    text = render_pr_comment(data, head_sha=HEAD, run_url=RUN_URL, publication=publication_receipts(environment()))
+    assert len(text.splitlines()) == 4 and len(text) < 600
+    assert "Validation passed" in text and "Model: 0 new · Content: 0 new" in text
+    assert HEAD[:7] in text and HEAD not in text
+    assert f"[Full report]({RUN_URL}/artifacts/17)" in text
+    for excluded in ("PRIVATE_", "12000", "Next action", "Diagnostic publication", "Query-result correctness",
+                     "artifacts/18", "Nonblocking findings"):
+        assert excluded not in text
+    assert data == before and notification_decision(data) == "pass"
+    # Detailed coverage/receipts remain available on the separate Actions surface.
+    summary = render_notification(data, head_sha=HEAD, run_url=RUN_URL, run_attempt=1,
+                                  publication=publication_receipts(environment()))
+    assert "12000" in summary and "Query-result correctness" in summary and "artifacts/18" in summary
+
+
+@pytest.mark.parametrize("context,expected", [
+    ({}, "Model: see report"),
+    ({"check_states": [{"validator": "model", "status": "disabled"}]}, "Model: disabled"),
+    ({"check_reports": [comparison_report("model", new_issues=2)]}, "Model: 2 new"),
+    ({"check_reports": [comparison_report("model", comparison_status="not_applicable")]}, "Model: see report"),
+    ({"check_reports": [comparison_report("model", validation_complete=False)]}, "Model: see report"),
+    ({"check_reports": [comparison_report("model", new_issues=-1)]}, "Model: see report"),
+    ({"check_reports": [comparison_report("model")],
+      "check_states": [{"validator": "model", "status": "not_run"}]}, "Model: see report"),
+])
+def test_compact_counts_require_completed_comparison_evidence(context, expected):
+    text = render_pr_comment(report("pass") | context, head_sha=HEAD, run_url=RUN_URL)
+    assert expected in text
+
+
+def test_compact_multimodel_counts_preserve_disabled_and_missing_coverage():
+    data = report("pass") | {"model_reports": [
+        {"check_reports": [comparison_report("model", new_issues=2), comparison_report("content")]},
+        {"check_states": [{"validator": "model", "status": "disabled"}]},
+    ]}
+    text = render_pr_comment(data, head_sha=HEAD, run_url=RUN_URL)
+    assert "Model: 2 new (enabled scope)" in text and "Content: see report" in text
+    data["model_reports"][1] = {"check_reports": [comparison_report("model", new_issues=3)]}
+    assert "Model: 5 new" in render_pr_comment(data, head_sha=HEAD, run_url=RUN_URL)
+
+
+@pytest.mark.parametrize("decision,complete,exit_code,title", [
+    ("pass", False, 0, "Validation incomplete"),
+    ("skipped", False, 0, "Skipped — not validated"),
+    ("advisory", False, 0, "Advisory — impact unverified"),
+    ("fail", False, 2, "Action required"),
+])
+def test_compact_nonpass_never_uses_zero_findings_as_success(decision, complete, exit_code, title):
+    data = report("pass") | {"policy_decision": decision, "validation_complete": complete, "exit_code": exit_code}
+    before = deepcopy(data)
+    text = render_pr_comment(data, head_sha=HEAD, run_url=RUN_URL)
+    assert title in text and "Validation is incomplete" in text
+    assert "Validation passed" not in text and "No blocking findings" not in text
+    assert "**Next action:**" in text and data == before
+
+
+def test_compact_failure_limits_groups_but_counts_all_blockers_and_retains_action():
+    issue = {"validator": "query_validation", "type": "query_validation_issue",
+             "reason_code": "query_contract_regression", "severity": "error", "blocking": True,
+             "query_contract_number": 1, "query_assertion_type": "group_count",
+             "message": "RAW_SQL_SENTINEL", "next_action": "PRIVATE_ACTION_SENTINEL"}
+    data = report() | {"issues": [issue | {"query_assertion_number": n} for n in range(1, 8)]}
+    before = deepcopy(data)
+    text = render_pr_comment(data, head_sha=HEAD, run_url=RUN_URL, publication=publication_receipts(environment()))
+    assert "Blocking findings: 7" in text and text.count("- **OF-") == 3
+    assert "Plus 4 additional blocking occurrence(s)" in text
+    assert "entry 1, assertion 3" in text and "assertion 4" not in text
+    assert "**Next action:**" in text and "RAW_" not in text and "PRIVATE_" not in text
+    assert len(text) < 2000 and data == before
+
+
+def test_compact_candidate_failure_is_not_described_as_a_new_model_defect():
+    data = report() | {"validation_complete": False, "exit_code": 2, "issues": [{
+        "validator": "candidate", "type": "candidate_verification_failed", "severity": "error",
+        "blocking": True, "candidate_reason": "content_mismatch",
+    }]}
+    text = render_pr_comment(data, head_sha=HEAD, run_url=RUN_URL)
+    assert "Validation is incomplete" in text and "**Next action:**" in text
+    assert "No blocking findings" not in text and "Model: 0 new" not in text
+    assert "OF-CANDIDATE" in text
+
+
+@pytest.mark.parametrize("receipt", [
+    {"kind": "public", "status": "failed", "url": RUN_URL + "/artifacts/17"},
+    {"kind": "public", "status": "skipped", "url": RUN_URL + "/artifacts/17"},
+    {"kind": "public", "status": "uploaded", "url": RUN_URL.replace("123", "122") + "/artifacts/17"},
+    {"kind": "public", "status": "uploaded", "url": RUN_URL + "/artifacts/17)\nINJECT"},
+    {"kind": "repository", "status": "uploaded", "url": RUN_URL + "/artifacts/18"},
+])
+def test_compact_unconfirmed_or_private_artifact_never_becomes_full_report_link(receipt):
+    text = render_pr_comment(report("pass"), head_sha=HEAD, run_url=RUN_URL, publication=[receipt])
+    assert "[Full report]" not in text and "INJECT" not in text
+    assert "Report download unavailable" in text and "Validation passed" in text
+
+
+@pytest.mark.parametrize("url", ["https://evil.invalid/data", RUN_URL + ")\nINJECT", RUN_URL + "/../123"])
+def test_compact_links_and_transition_notices_reject_untrusted_urls(url):
+    text = render_pr_comment(report("pass"), head_sha="HEAD_INJECT", run_url=url,
+                             publication=[{"kind": "public", "status": "uploaded", "url": url + "/artifacts/17"}])
+    text += render_transition_notice(transition="recovery", head_sha="HEAD_INJECT", run_url=url)
+    assert "Run link unavailable" in text and "INJECT" not in text and "evil.invalid" not in text
+    assert "[Full report]" not in text and "[View current result]" not in text
 
 
 @pytest.mark.parametrize("value", ["https://evil.invalid/data", RUN_URL + "/../123", RUN_URL + ")\nINJECT"])
@@ -214,6 +336,10 @@ def test_failure_rerun_is_idempotent_and_recovery_posts_one_distinct_notificatio
     assert result == {"status": "published", "transition": "recovery", "email_delivery": "unverified"}
     assert len(api.comments) == 2
     assert "Recovery notification" in api.comments[-1]["body"]
+    notice = api.comments[-1]["body"].split("-->\n", 1)[1]
+    assert len(notice.splitlines()) == 1 and len(notice) < 250
+    assert "[View current result]" in notice and "Blocking findings" not in notice
+    assert "### Diagnostic publication" not in api.comments[0]["body"]
     assert "runs/123" not in api.comments[0]["body"] + api.comments[-1]["body"]
     publish(api, report("pass"), event(), env)
     assert len(api.comments) == 2
@@ -316,6 +442,8 @@ def test_recovery_timeout_reconciles_exact_notification_without_duplicate():
     publish(api, report(), event(), environment() | {"GITHUB_RUN_ID": "125"})
     assert len(api.comments) == 3
     assert "Failure notification" in api.comments[-1]["body"]
+    notice = api.comments[-1]["body"].split("-->\n", 1)[1]
+    assert len(notice.splitlines()) == 1 and "[View current result]" in notice
 
 
 def test_existing_newer_bot_state_prevents_old_run_overwrite_even_if_run_list_lags():

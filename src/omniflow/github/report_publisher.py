@@ -19,7 +19,12 @@ from urllib.parse import quote
 from ..diagnostics import safe_exception_message
 from ..exceptions import OmniFlowError
 from ..json_evidence import reject_duplicate_keys
-from ..reporting.notification import notification_decision, render_notification
+from ..reporting.notification import (
+    notification_decision,
+    render_notification,
+    render_pr_comment,
+    render_transition_notice,
+)
 from ..reporting.output_paths import report_directory
 from .revalidation import GitHubRepository
 
@@ -214,8 +219,8 @@ def publish(api, report: dict, event: dict, env: dict[str, str]) -> dict:
     stamp = assert_current(api, event, env)
     stamp["decision"] = notification_decision(report)
     number = _positive(event.get("number"))
-    body = render_notification(report, head_sha=stamp["head"], run_url=_run_url(env),
-                               run_attempt=stamp["attempt"], publication=publication_receipts(env))
+    body = render_pr_comment(report, head_sha=stamp["head"], run_url=_run_url(env),
+                             publication=publication_receipts(env))
     comments = _bot_comments(api, number)
     stable = []
     transitions = []
@@ -266,9 +271,9 @@ def publish(api, report: dict, event: dict, env: dict[str, str]) -> dict:
         duplicate = any(data == stamp for data in transition_stamps)
         if not duplicate:
             assert_current(api, event, env, stamp)
-            label = "Failure notification" if transition == "failure" else "Recovery notification"
+            notice = render_transition_notice(transition=transition, head_sha=stamp["head"], run_url=_run_url(env))
             api.request("POST", f"/issues/{number}/comments", {
-                "body": f"{TRANSITION_PREFIX}{serialized} -->\n**{label}**\n\n{body}",
+                "body": f"{TRANSITION_PREFIX}{serialized} -->\n{notice}",
             })
     return {"status": "published", "transition": transition or "none", "email_delivery": "unverified"}
 

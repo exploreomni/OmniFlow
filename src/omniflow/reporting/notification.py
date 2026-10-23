@@ -71,11 +71,125 @@ def notification_decision(report: dict[str, Any]) -> str:
     return "incomplete"
 
 
+def _run_link(run_url: str, label: str = "View run") -> str:
+    if len(run_url) <= 512 and re.fullmatch(
+        r"https://[A-Za-z0-9.-]+/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/actions/runs/[1-9][0-9]*", run_url,
+    ):
+        return f"[{label}]({run_url})"
+    return "Run link unavailable."
+
+
+def _head_reference(head_sha: str) -> str:
+    return head_sha[:7] if re.fullmatch(r"[0-9a-f]{40}", head_sha) else "unavailable"
+
+
+def _comparison_count(safe: dict[str, Any], validator: str) -> str:
+    """Missing, disabled or strict-health checks must never imply zero regressions."""
+    total = 0
+    disabled = 0
+    contexts = safe.get("model_reports") or [safe]
+    for context in contexts:
+        checks = [check for check in context.get("check_reports", [context])
+                  if check.get("validator") == validator]
+        states = [state for state in context.get("check_states", []) if state.get("validator") == validator]
+        if checks:
+            if (any(state.get("status") != "completed" for state in states)
+                    or any(check.get("comparison_status") != "complete"
+                           or check.get("validation_complete") is not True
+                           or type(check.get("new_issues")) is not int for check in checks)):
+                return "see report"
+            total += sum(check["new_issues"] for check in checks)
+        elif states and all(state.get("status") == "disabled" for state in states):
+            disabled += 1
+        else:
+            return "see report"
+    if disabled == len(contexts):
+        return "disabled"
+    if disabled:
+        return f"{total} new (enabled scope)"
+    return f"{total} new"
+
+
+def render_pr_comment(
+    report: dict[str, Any], *, head_sha: str, run_url: str,
+    publication: list[dict[str, str]] | None = None,
+) -> str:
+    """Decision-only PR surface; full health, coverage and receipts stay in the run.
+
+    Re-project even repository-detail input. Never compare public messages or
+    infer validation success from a zero count. This changes presentation only.
+    """
+    safe = public_diagnostic(report)
+    decision = notification_decision(safe)
+    blockers = [issue for issue in safe.get("issues", []) if is_blocking(issue)]
+    title = {
+        "pass": "Validation passed", "fail": "Action required",  # nosec B105
+        "skipped": "Skipped — not validated", "advisory": "Advisory — impact unverified",
+        "incomplete": "Validation incomplete",
+    }[decision]
+    lines = [f"## OmniFlow: {title}"]
+    if decision == "pass":
+        lines.extend([
+            "No blocking findings in the evaluated scope.",
+            f"Model: {_comparison_count(safe, 'model')} · Content: {_comparison_count(safe, 'content')} "
+            f"· Head: `{_head_reference(head_sha)}`",
+        ])
+    else:
+        lines.append(f"**Blocking findings: {len(blockers)}.** Head: `{_head_reference(head_sha)}`")
+        if safe.get("validation_complete") is not True:
+            lines.append("Validation is incomplete; this is not a verified pass.")
+        groups = group_findings(blockers)
+        if groups:
+            lines.append("")
+        for issue, count in groups[:3]:
+            scope = " / ".join(issue[key] for key in ("context_reference", "validation_scope", "state") if key in issue)
+            policy = query_policy_reference(issue)
+            lines.append(f"- **{issue.get('diagnostic_code', 'OF-UNKNOWN')}**: "
+                         f"{issue.get('title', 'A blocking check needs review.')} ({count} occurrence(s))"
+                         + (f" — {scope}" if scope else "") + (f" — {policy}" if policy else ""))
+        if groups:
+            lines.append("")
+        remaining = sum(count for _, count in groups[3:])
+        if remaining:
+            lines.append(f"Plus {remaining} additional blocking occurrence(s); see the full report.")
+        primary = next(iter(blockers), None)
+        action = (primary.get("next_action", "Inspect the failed check in this run.") if primary else
+                  "Inspect this run's routing, coverage and policy before treating it as validated.")
+        lines.append(f"**Next action:** {action}")
+
+    # Only the confirmed public artifact belongs in the compact comment. The
+    # run summary retains independent private/public upload status and links.
+    links = _run_link(run_url)
+    if publication is not None:
+        receipt = next((item for item in publication if item.get("kind") == "public"), {})
+        url = receipt.get("url", "")
+        if (links.startswith("[") and receipt.get("status") == "uploaded"
+                and re.fullmatch(re.escape(run_url) + r"/artifacts/[1-9][0-9]*", url)):
+            links += f" · [Full report]({url})"
+        else:
+            links += " · Report download unavailable; check the run."
+    lines.append(links)
+    # Two-space breaks keep the short status readable in rendered GitHub Markdown.
+    return "  \n".join(lines) + "\n"
+
+
+def render_transition_notice(*, transition: str, head_sha: str, run_url: str) -> str:
+    """A notification points to the result instead of repeating the PR summary."""
+    description = {
+        "failure": "Action is required",
+        "recovery": "Validation passed",  # nosec B105
+    }[transition]
+    return (f"**{transition.capitalize()} notification:** {description} for `{_head_reference(head_sha)}`. "
+            f"{_run_link(run_url, 'View current result')}\n")
+
+
 def render_notification(
     report: dict[str, Any], *, head_sha: str, run_url: str, run_attempt: int,
     publication: list[dict[str, str]] | None = None,
 ) -> str:
-    """Re-project even a repository report; never copy caller-provided prose.
+    """Detailed Actions summary; PR comments use the separate compact renderer.
+
+Re-project even a repository report; never copy caller-provided prose.
 
 The publisher validates the run URL and publication receipts. This renderer also
 restricts their shape, preventing Markdown or identity injection by other callers.

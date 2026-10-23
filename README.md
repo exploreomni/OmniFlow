@@ -191,7 +191,7 @@ The two optional dbt policies are complements:
 4. A credential-free preflight routes non-Omni pull requests to a successful `skipped` result before the validation process receives `OMNI_API_KEY`.
 5. OmniFlow selects the changed model from trusted base-branch metadata and resolves the Omni branch from the GitHub head branch.
 6. It verifies the Git/Omni snapshots, collects each new-only validator's live-base findings before its candidate findings, computes the semantic diff and lint regressions, and searches Omni for downstream references.
-7. The pull request receives a minimal reviewer summary. Verified private-repository runs also generate source-location diagnostics; the updated validation workflow uploads those separately for repository readers, never into the PR comment.
+7. The pull request receives a compact status, relevant counts and current-run links. Failures show up to three blocking groups and a primary next action; detailed findings stay in the reports and Actions summary. Verified private-repository runs also generate source-location diagnostics, uploaded separately for repository readers and never copied into the PR comment.
 8. GitHub branch protection blocks merge when required OmniFlow checks fail.
 9. After review and approval, the pull request is merged. Omni's configured pull-request webhook promotes the Omni branch and publishes associated draft content.
 10. When the repository also deploys dbt, the protected production job can run `omniflow dbt sync --auto` after dbt succeeds, then rerun every enabled OmniFlow check against the refreshed model.
@@ -437,6 +437,22 @@ The complete workflow examples prepare fresh outputs, use that path throughout,
 and confirm uploads separately; changing only the Action pin does not install
 those workflow steps. Missing decision JSON never falls back to an older folder.
 See the [report-delivery upgrade checklist](docs/VALIDATION_DIAGNOSTICS.md#upgrade-report-delivery-in-an-existing-workflow).
+
+**Compact PR comments:** passing results show the status, model/content new-finding counts when comparison is complete,
+and links to the verified run and successfully uploaded public report. Failures show at most three blocking groups,
+their occurrence counts, a primary next action and the number of additional blocking occurrences. Skipped, advisory
+and incomplete results remain explicitly labeled; an absent comparison is not displayed as zero new findings.
+Existing findings and detailed check/query-result coverage remain in the full artifacts; the Actions summary
+retains coverage explanations and publication receipts. Short failure/recovery notices link to the result without
+repeating the report. Current-head checks, notification deduplication and privacy controls still apply; posting a
+comment does not verify email delivery.
+See [compact comment behavior](docs/VALIDATION_DIAGNOSTICS.md#compact-pull-request-comments).
+
+If your trusted workflow already invokes `omniflow.github.report_publisher` with the current fresh-output and upload
+bindings, adopt the reviewed Action SHA in both OmniFlow `uses:` entries. A legacy step that posts
+`cat .omniflow/public/report.md` will still post the full report after a pin-only update. For that workflow, adopt the
+complete [validation workflow example](.github/workflow-examples/omniflow.yml), preserving your triggers, secrets and
+policy; follow the upgrade checklist above rather than replacing only the comment command.
 
 Public outputs are constructed from fixed diagnostic codes, statuses, bounded counts, booleans, anonymous context references and a random run reference. They do not copy customer messages, names, resource IDs, paths, URLs, Git identities, raw responses or runner details. Both legacy `standard` and `strict` settings use this minimal public schema; neither re-enables detailed public output. Automation consuming the old identity-rich schema must migrate. Deployment readiness uses private, in-memory evidence instead of public artifacts. See [Diagnostic Privacy](docs/DIAGNOSTIC_PRIVACY.md).
 
