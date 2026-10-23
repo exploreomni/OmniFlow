@@ -509,3 +509,80 @@ def test_model_metadata_alone_cannot_prove_zero_authored_dependencies(tmp_path):
     result = collect(tmp_path, base)
     assert result["coverage_complete"] is False
     assert "omni_view_evidence_unavailable" in {gap["reason_code"] for gap in result["coverage_gaps"]}
+
+
+JAFFLE_STYLE = """with orders as (select * from {{ ref('stg_orders') }})
+select orders.id, orders.amount * 0.9 as net from orders"""
+
+
+def test_import_cte_wildcards_keep_column_precision(tmp_path):
+    base = fixture(tmp_path, before=JAFFLE_STYLE)
+    (tmp_path / "models/orders.sql").write_text(JAFFLE_STYLE.replace("0.9", "0.8"))
+    result = collect(tmp_path, base)
+    assert result["coverage_complete"] is True
+    assert {item["field_name"] for item in result["impacts"]} == {"net", "doubled", "filtered_count"}
+    assert all(item["change_kind"] == "modified" for item in result["impacts"])
+
+
+def test_import_cte_wildcard_comment_change_is_no_impact(tmp_path):
+    base = fixture(tmp_path, before=JAFFLE_STYLE)
+    (tmp_path / "models/orders.sql").write_text("-- reworded\n" + JAFFLE_STYLE)
+    result = collect(tmp_path, base)
+    assert result == {"schema_version": 1, "coverage_complete": True, "coverage_gaps": [], "impacts": []}
+
+
+def test_changed_import_cte_wildcard_is_wider_potential(tmp_path):
+    base = fixture(tmp_path, before=JAFFLE_STYLE)
+    (tmp_path / "models/orders.sql").write_text(JAFFLE_STYLE.replace("stg_orders", "stg_orders_v2"))
+    result = collect(tmp_path, base)
+    assert {item["field_name"] for item in result["impacts"]} == {"id", "net", "doubled", "constant", "filtered_count"}
+    assert all(item["change_kind"] == "potential" for item in result["impacts"])
+
+
+def test_aliased_constant_macro_is_compared_per_column(tmp_path):
+    before = "select id, {{ cents_to_dollars('amount') }} as net from raw.orders"
+    base = fixture(tmp_path, before=before)
+    (tmp_path / "models/orders.sql").write_text(before.replace("'amount'", "'subtotal'"))
+    result = collect(tmp_path, base)
+    assert result["coverage_complete"] is True
+    assert {(item["column"], item["change_kind"]) for item in result["impacts"]} == {("net", "modified")}
+
+
+@pytest.mark.parametrize("candidate", [
+    "select {{ dbt_utils.star(from=ref('x')) }} from {{ ref('x') }}",
+    "select {{ cents_to_dollars('amount') }}, id from raw.orders",
+    "select {{ var('rate') }} as net, id from raw.orders",
+    "select id, net from {{ my_relation('orders') }}",
+])
+def test_macros_that_can_change_output_identity_remain_gaps(tmp_path, candidate):
+    base = fixture(tmp_path)
+    (tmp_path / "models/orders.sql").write_text(candidate)
+    result = collect(tmp_path, base)
+    assert "dbt_sql_dynamic_projection" in {gap["reason_code"] for gap in result["coverage_gaps"]}
+
+
+def test_changed_model_with_dbt_children_reports_downstream_gap(tmp_path):
+    base = fixture(tmp_path, extra={"models/fct_orders.sql": "select id from {{ ref('orders') }}",
+                                    "models/unrelated.sql": "select id from {{ ref('orders_archive') }}"})
+    (tmp_path / "models/orders.sql").write_text("select id, amount * 0.8 as net from raw.orders")
+    result = collect(tmp_path, base)
+    assert result["coverage_complete"] is False
+    gaps = [gap for gap in result["coverage_gaps"] if gap["reason_code"] == "dbt_downstream_models_not_analyzed"]
+    assert gaps == [{"reason_code": "dbt_downstream_models_not_analyzed", "file": "models/orders.sql",
+                     "downstream_model_count": 1, "downstream_files": ["models/fct_orders.sql"]}]
+    assert result["impacts"]
+
+
+def test_comment_only_change_with_dbt_children_has_no_downstream_gap(tmp_path):
+    base = fixture(tmp_path, extra={"models/fct_orders.sql": "select id from {{ ref('orders') }}"})
+    (tmp_path / "models/orders.sql").write_text("-- note\nselect id, amount * 0.9 as net from raw.orders")
+    result = collect(tmp_path, base)
+    assert result["coverage_complete"] is True and result["coverage_gaps"] == []
+
+
+def test_unreadable_downstream_inventory_is_a_gap_not_zero(tmp_path):
+    base = fixture(tmp_path)
+    (tmp_path / "models/orders.sql").write_text("select id, amount * 0.8 as net from raw.orders")
+    with mock.patch("omniflow.dbt_column_impact._list_revision_files", return_value=None):
+        result = collect(tmp_path, base)
+    assert "dbt_downstream_models_unavailable" in {gap["reason_code"] for gap in result["coverage_gaps"]}

@@ -366,7 +366,7 @@ _STATIC_REASONS = frozenset({
     "omni_root_unavailable", "omni_view_evidence_unavailable", "dbt_source_unsupported", "dbt_manifest_only_change",
     "dbt_source_unavailable", "omni_view_identity_unavailable", "dbt_relation_context_unavailable",
     "dbt_relation_identity_unavailable", "omni_relation_identity_unavailable", "dbt_relation_case_ambiguous",
-    "dbt_explicit_view_mapping_unresolved",
+    "dbt_explicit_view_mapping_unresolved", "dbt_downstream_models_not_analyzed", "dbt_downstream_models_unavailable",
 })
 
 

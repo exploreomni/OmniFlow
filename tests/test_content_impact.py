@@ -564,6 +564,7 @@ def test_full_collector_missing_explicit_mapping_reaches_enrichment_as_unknown()
 
     with (patch("omniflow.dbt_column_impact._manifest", return_value=({}, {})),
           patch("omniflow.dbt_column_impact._git_show", return_value="select amount * .9 as amount from raw.orders"),
+          patch("omniflow.dbt_column_impact._list_revision_files", return_value=[]),
           patch("omniflow.dbt_column_impact.read_head_text", return_value="select amount * .8 as amount from raw.orders"),
           patch("omniflow.dbt_column_impact.pull_request_revision", side_effect=lambda scope: (scope, "org/repo")),
           patch("omniflow.dbt_column_impact._load_omni_snapshot", return_value=(

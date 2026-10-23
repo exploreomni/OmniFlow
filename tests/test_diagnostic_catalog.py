@@ -213,3 +213,31 @@ def test_saved_public_report_reanonymizes_contexts_without_merging(tmp_path):
     assert_no_private_markers("\n".join(annotation_lines(rerendered["issues"])))
     again = write_public_reports(rerendered, output_dir=tmp_path / "again", formats=["json"], redaction_level="strict")
     assert len({issue["context_reference"] for issue in again["issues"]}) == 2
+
+
+@pytest.mark.parametrize("rule,code", [
+    ("dbt_column_removal_orphans_omni_field", "OF-DBT-IMPACT-ORPHANED-COLUMN"),
+    ("dbt_model_removal_orphans_omni_view", "OF-DBT-IMPACT-ORPHANED-MODEL"),
+])
+def test_dbt_orphan_findings_get_fixed_specific_guidance(rule, code):
+    issue = public_diagnostic({"issues": [{
+        "validator": "dbt_impact", "rule": rule, "reason_code": rule, "severity": "error",
+        "message": PRIVATE, "dbt_relation": PRIVATE, "column": PRIVATE,
+    }]})["issues"][0]
+    assert issue["diagnostic_code"] == code
+    assert issue["category"] == "validation"
+    assert "No recognized diagnostic category" not in issue["message"]
+    assert "Omni" in issue["message"] and "migrat" in issue["next_action"]
+    assert_no_private_markers(json.dumps(issue))
+
+
+def test_missing_model_identity_explains_the_fix():
+    from omniflow.diagnostics import safe_exception_message
+    from omniflow.discovery import discover_contexts
+    from omniflow.exceptions import ConfigError
+
+    with pytest.raises(ConfigError) as caught:
+        discover_contexts(auto=False)
+    message = safe_exception_message(caught.value)
+    assert message.startswith("OF-SETUP-MODEL-IDENTITY:")
+    assert "--auto" in message and "--model-id" in message

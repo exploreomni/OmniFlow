@@ -38,7 +38,7 @@ GAP_REASONS = frozenset({
     "dbt_base_revision_unavailable", "dbt_manifest_unavailable", "dbt_manifest_only_change",
     "dbt_model_identity_ambiguous", "dbt_relation_ambiguous", "dbt_relation_context_unavailable",
     "dbt_relation_case_ambiguous", "dbt_relation_identity_unavailable", "dbt_source_unsupported",
-    "dbt_explicit_view_mapping_unresolved",
+    "dbt_explicit_view_mapping_unresolved", "dbt_downstream_models_not_analyzed", "dbt_downstream_models_unavailable",
     "dbt_sql_unsupported", "dbt_sql_dynamic_projection", "dbt_sql_wildcard", "dbt_sql_output_identity_unavailable",
     "dbt_sql_duplicate_output", "dbt_manifest_contract_unavailable", "dbt_source_unavailable",
     "omni_root_unavailable", "omni_model_scope_ambiguous", "omni_query_view_unsupported",
@@ -117,6 +117,10 @@ def coverage_explanations(report: dict) -> list[str]:
          "A configured dbt-to-Omni view mapping could not be resolved. Impact coverage is incomplete. "
          "Check checks.dbt_impact.table_mapping against the authored views for the recorded revision; "
          "no other view is substituted."),
+        ({"dbt_downstream_models_not_analyzed", "dbt_downstream_models_unavailable"},
+         "A changed dbt model feeds other dbt models, or that inventory could not be read. Column lineage through "
+         "downstream models is not analyzed, so Omni content built on them is not counted. Treat the totals as a "
+         "lower bound and check the downstream marts' Omni views."),
         ({"content_impact_field_identity_unavailable", "omni_view_identity_unavailable",
           "omni_field_reference_ambiguous", "omni_field_reference_unresolved",
           "dbt_relation_ambiguous", "dbt_relation_identity_unavailable", "dbt_relation_case_ambiguous"},

@@ -269,6 +269,19 @@ for _reason in (
          "Use the operation, reason code and run reference to investigate the response contract. "
          "Do not treat missing or malformed entries as a clean validation result.")
 
+_add("missing_model_identity", "OF-SETUP-MODEL-IDENTITY", "No Omni model was selected for this run.",
+     "Pass --auto to read the trusted .omni/flow.json, or provide --base-url and --model-id.", "configuration")
+# A gate decision, not missing evidence: the candidate Omni YAML still uses
+# what the dbt change removes.
+_add("dbt_column_removal_orphans_omni_field", "OF-DBT-IMPACT-ORPHANED-COLUMN",
+     "This dbt change removes a warehouse column that Omni model fields still reference.",
+     "Update or remove the referencing Omni fields in the same deployment sequence, or keep the old column "
+     "until Omni and its content are migrated (expand, migrate, then contract).", "validation")
+_add("dbt_model_removal_orphans_omni_view", "OF-DBT-IMPACT-ORPHANED-MODEL",
+     "This dbt change removes or moves a relation that Omni views still reference.",
+     "Repoint or remove the referencing Omni views in the same deployment sequence, or keep the old relation "
+     "until Omni and its content are migrated.", "validation")
+
 for _reason, _check in (
     ("dependency_search_unavailable", "downstream dependency search"),
     ("relationship_endpoints_unavailable", "relationship dependency mapping"),

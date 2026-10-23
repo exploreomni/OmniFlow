@@ -365,6 +365,10 @@ Successful `omniflow dbt sync` and a recorded commit do not automatically releas
 
 ## dbt Impact Analysis
 
+### A blocking `OF-DBT-IMPACT-ORPHANED-COLUMN` or `OF-DBT-IMPACT-ORPHANED-MODEL` finding
+
+The dbt change removes a column, or removes or moves a relation, that the candidate Omni YAML still references. Update the referencing Omni fields or views in the same deployment sequence, or keep the old name until Omni and its content are migrated (expand, migrate, then contract). The private repository report and `dbt-impact.json` list the affected fields.
+
 ### The finding is marked `ambiguous_relation_match`
 
 The dbt model name was unqualified and matched several Omni relations with the same table name in different schemas. OmniFlow lists every candidate in `candidate_relations` and reports all their orphaned fields rather than guessing which schema changed. Commit a dbt manifest so the exact `relation_name` is available, or add a `checks.dbt_impact.table_mapping` entry pinning the model to one relation.

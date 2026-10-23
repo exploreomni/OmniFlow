@@ -117,7 +117,8 @@ def discover_contexts(
         context.branch_id = branch_id
         return [context]
     if not auto:
-        raise ConfigError("Missing model identity. Use --auto or provide --base-url and --model-id.")
+        raise ConfigError("Missing model identity. Use --auto or provide --base-url and --model-id.",
+                          reason_code="missing_model_identity")
 
     marker = load_pr_marker()
     if marker.get("base_url"):

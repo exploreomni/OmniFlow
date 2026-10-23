@@ -626,6 +626,7 @@ def _column_issues(
                 issue = {
                     "validator": VALIDATOR,
                     "rule": ORPHANED_COLUMN_RULE,
+                    "reason_code": ORPHANED_COLUMN_RULE,
                     "severity": severity,
                     "analysis_mode": mode,
                     "message": message,
@@ -670,6 +671,7 @@ def _model_issues(
             grouped[key] = {
                 "validator": VALIDATOR,
                 "rule": ORPHANED_MODEL_RULE,
+                "reason_code": ORPHANED_MODEL_RULE,
                 "severity": severity,
                 "analysis_mode": mode,
                 "message": (

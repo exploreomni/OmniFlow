@@ -18,6 +18,7 @@ from __future__ import annotations
 import ast
 import hashlib
 import re
+import subprocess  # nosec B404
 from collections import defaultdict, deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -44,8 +45,10 @@ from .dbt_impact import (
 )
 from .dbt_manifest import MAX_MANIFEST_BYTES, DbtModel, parse_manifest
 from .dbt_sql_diff import JINJA_RE, MAX_SQL_BYTES, model_name_from_path, sql_reference_text
-from .exceptions import SecurityPolicyError
+from .exceptions import ConfigError, SecurityPolicyError
+from .git import git_executable
 from .revision_data import pull_request_revision, read_head_text
+from .trust import SAFE_GIT_REF_RE
 
 MAX_GRAPH_FIELDS = 20_000
 MAX_GRAPH_EDGES = 100_000
@@ -126,36 +129,60 @@ def analyze_projection(sql: str, *, dialect: str | None = None) -> Projection:
     if len(sql.encode()) > MAX_SQL_BYTES:
         raise SecurityPolicyError("dbt model SQL exceeds the 5 MiB safety limit")
     replacements: dict[int, str] = {}
+    macro_tokens: set[str] = set()
     reference_text = _reference_text(sql, dialect)
     for match in JINJA_RE.finditer(sql):
         if reference_text[match.start():match.start() + 2] not in {"{{", "{%", "{#"}:
             continue
-        if (not re.fullmatch(r"\{\{\s*(?:ref|source)\s*\([^{}]*\)\s*\}\}", match.group(), re.DOTALL)
-                or not re.search(r"\b(?:FROM|JOIN)\s*$", sql[:match.start()], re.IGNORECASE)):
+        source_position = bool(re.search(r"\b(?:FROM|JOIN)\s*$", sql[:match.start()], re.IGNORECASE))
+        if not re.fullmatch(r"\{\{[^{}]*\}\}", match.group(), re.DOTALL):
             return Projection(reason="dbt_sql_dynamic_projection")
         try:
             call = ast.parse(match.group()[2:-2].strip(), mode="eval").body
-            if (not isinstance(call, ast.Call) or not isinstance(call.func, ast.Name)
-                    or call.func.id not in {"ref", "source"}
-                    or not all(isinstance(item, ast.Constant) and type(item.value) in {str, int}
-                               for item in (*call.args, *(keyword.value for keyword in call.keywords)))):
-                return Projection(reason="dbt_sql_dynamic_projection")
         except (SyntaxError, ValueError):
             return Projection(reason="dbt_sql_dynamic_projection")
+        if not isinstance(call, ast.Call) or not all(
+                isinstance(item, ast.Constant) and type(item.value) in {str, int, float, bool}
+                for item in (*call.args, *(keyword.value for keyword in call.keywords))):
+            return Projection(reason="dbt_sql_dynamic_projection")
+        name = call.func.id if isinstance(call.func, ast.Name) else None
         token = hashlib.sha256(ast.dump(call, include_attributes=False).encode()).hexdigest()
-        replacements[match.start()] = f"omniflow_dbt_source_{token}"
+        if name in {"ref", "source"} and source_position:
+            if any(type(item.value) not in {str, int} for item in (*call.args, *(k.value for k in call.keywords))):
+                return Projection(reason="dbt_sql_dynamic_projection")
+            replacements[match.start()] = f"omniflow_dbt_source_{token}"
+            continue
+        # A constant-argument macro call outside a source position is compared as
+        # an opaque expression: the same call renders the same SQL while the macro
+        # source is unchanged, and a macro file change is its own coverage gap.
+        # It may only appear inside an aliased output, checked after parsing.
+        root_name = call.func
+        while isinstance(root_name, ast.Attribute):
+            root_name = root_name.value
+        if (source_position or not isinstance(root_name, ast.Name)
+                or name in {"ref", "source", "var", "env_var", "config", "this", "adapter"}
+                or root_name.id in {"adapter", "this", "target", "env_var", "var"}):
+            return Projection(reason="dbt_sql_dynamic_projection")
+        replacements[match.start()] = f"omniflow_dbt_macro_{token}"
+        macro_tokens.add(replacements[match.start()])
     candidate = JINJA_RE.sub(lambda match: replacements.get(match.start(), match.group()), sql)
     try:
         statements = sqlglot.parse(candidate, read=dialect, error_level=sqlglot.ErrorLevel.RAISE)
         if len(statements) != 1 or not isinstance(statements[0], exp.Select):
             return Projection()
         tree = statements[0]
-        # A wildcard in a CTE also hides dependencies. COUNT(*) is not a wildcard
-        # output projection and remains supported.
+        # A wildcard in the final projection hides output columns. A wildcard
+        # in a CTE only hides upstream origins: the CTE stays in the compared
+        # context, so changing it still broadens impact. COUNT(*) is supported.
+        for item in tree.expressions:
+            if isinstance(item, exp.Star) or (isinstance(item, exp.Column) and item.is_star):
+                return Projection(reason="dbt_sql_wildcard")
+        # An unaliased macro may expand to several columns (e.g. a star macro).
         for select in tree.find_all(exp.Select):
             for item in select.expressions:
-                if isinstance(item, exp.Star) or (isinstance(item, exp.Column) and item.is_star):
-                    return Projection(reason="dbt_sql_wildcard")
+                if not isinstance(item, exp.Alias) and any(
+                        column.name in macro_tokens for column in item.find_all(exp.Column)):
+                    return Projection(reason="dbt_sql_dynamic_projection")
         columns = {}
         for item in tree.expressions:
             if isinstance(item, exp.Alias):
@@ -532,6 +559,57 @@ def _manifest_deltas(manifests: dict[str, dict[str, DbtModel]], settings: DbtImp
                     pending.append(dict(model=identity, relation=relation, column=key, kind=kind, scope=scope))
 
 
+def _list_revision_files(ref: str, prefixes: list[str], *, root: Path) -> list[str] | None:
+    """Regular-file paths under prefixes at an immutable revision; None if unreadable."""
+    cleaned = [prefix.strip().strip("/") for prefix in prefixes if prefix.strip().strip("/")]
+    if not cleaned or not SAFE_GIT_REF_RE.fullmatch(ref) or ".." in ref or "@{" in ref:
+        return None
+    try:
+        # Arguments are passed directly to Git, never through a shell.
+        return subprocess.run(  # nosec B603
+            [git_executable(), "ls-tree", "-r", "--name-only", ref, "--", *cleaned],
+            cwd=root, check=True, capture_output=True, text=True, timeout=10,
+        ).stdout.splitlines()
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def _downstream_models(base_ref: str, changed: dict[str, str], dbt_paths: list[str], *, root: Path,
+                       budget: int) -> dict[str, list[str]] | None:
+    """dbt models that ref() a changed model, read at the immutable base revision.
+
+    Column lineage through those children is not analyzed, so their existence
+    is reported as a gap instead of letting an upstream change read as zero.
+    Returns None when the bounded inventory cannot be read.
+    """
+    if not changed:
+        return {}
+    listing = _list_revision_files(base_ref, dbt_paths, root=root)
+    if listing is None:
+        return None
+    candidates = sorted(path for path in listing if path.lower().endswith(".sql")
+                        and "macros" not in Path(path).parts and path not in changed.values())
+    if len(candidates) > MAX_DBT_FILES:
+        return None
+    patterns = {name: re.compile(rf"\{{\{{\s*ref\(\s*(?:['\"][^'\"]+['\"]\s*,\s*)?['\"]{re.escape(name)}['\"]",
+                                 re.IGNORECASE) for name in changed}
+    children: dict[str, list[str]] = defaultdict(list)
+    for path in candidates:
+        try:
+            text = _git_show(base_ref, path, root=root, max_bytes=MAX_SQL_BYTES)
+        except (ConfigError, SecurityPolicyError):
+            return None
+        if text is None:
+            continue
+        budget -= len(text.encode())
+        if budget < 0:
+            return None
+        for name, pattern in patterns.items():
+            if pattern.search(text):
+                children[name].append(path)
+    return dict(children)
+
+
 def collect_column_impacts(
     *, changed_files: list[str], dbt_paths: list[str], settings: DbtImpactSettings,
     omni_yaml_paths: list[str], base_ref: str | None, repo_root: Path | None = None,
@@ -566,6 +644,7 @@ def collect_column_impacts(
     if not any(item["reason_code"] == "dbt_manifest_unavailable" for item in gaps):
         _manifest_deltas(manifests, settings, gaps, pending, dialect)
     total_bytes = 0
+    upstream: dict[str, str] = {}
     for path in dbt_files:
         if not path.lower().endswith(".sql") or "macros" in Path(path).parts:
             if path != settings.manifest_path:
@@ -607,11 +686,23 @@ def collect_column_impacts(
                           if before.columns[column] != after.columns[column])
             if before.context != after.context or identities["base"] != identities["head"]:
                 deltas.append(("", "potential", ("base", "head")))
+        if any(kind != "added" for _column, kind, _scopes in deltas):
+            upstream[model_name_from_path(path)] = path
         for column, kind, scopes in deltas:
             for scope in scopes:
                 model, relations = identities[scope]
                 for relation in sorted(relations):
                     pending.append(dict(model=model, relation=relation, column=column, kind=kind, scope=scope))
+    # Upstream column lineage is out of scope. Say so whenever a meaningfully
+    # changed model feeds other dbt models, so it never reads as zero impact.
+    children = _downstream_models(base_ref, upstream, dbt_paths, root=root,
+                                  budget=MAX_SQL_TOTAL_BYTES - total_bytes)
+    if children is None:
+        _gap(gaps, "dbt_downstream_models_unavailable")
+    else:
+        for name, paths in sorted(children.items()):
+            _gap(gaps, "dbt_downstream_models_not_analyzed", file=upstream[name],
+                 downstream_model_count=len(paths), downstream_files=paths[:20])
     # Determine dbt semantic changes first. Unrelated unsupported Omni files must
     # not turn a proven formatting/comment-only change into incomplete evidence.
     # Unsupported dbt SQL still has its explicit gap and potential work above.

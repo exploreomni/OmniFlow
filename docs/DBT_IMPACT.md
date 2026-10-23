@@ -206,9 +206,18 @@ credential and verified Git-target requirements; the lookup never creates a bran
 The analysis compares immutable base/head SQL projections, including same-name
 expression changes, and follows supported Omni field references into derived fields
 and filtered measures. Comments and formatting do not create column changes.
-WHERE/JOIN/grouping changes can broaden potential impact. Unsupported macros,
-wildcards, ambiguous identities, inheritance, or dependency cycles remain explicit
-coverage gaps rather than guessed lineage. Upstream dbt column lineage is not included.
+WHERE/JOIN/grouping changes can broaden potential impact. Import CTEs such as
+`with orders as (select * from {{ ref('orders') }})` keep column precision: the CTE
+is part of the compared context, so changing it broadens impact to every field on
+the model. A star in the final projection remains a gap. A constant-argument macro
+call inside an aliased output, such as `{{ cents_to_dollars('amount') }} as amount`,
+is compared per column; a changed macro file, unaliased macros (which can expand to
+several columns), `var()`/`env_var()`, and Jinja blocks remain gaps. Ambiguous
+identities, inheritance, or dependency cycles also remain explicit coverage gaps
+rather than guessed lineage. Upstream dbt column lineage is not included: when a
+changed model is `ref()`'d by other dbt models (read at the base revision), the
+report adds `dbt_downstream_models_not_analyzed` so the totals read as a lower bound,
+not zero.
 For native cross-view names, the optional step uses Omni's returned view-name
 mapping only after matching it to the immutable authored files. It does not derive
 canonical names by concatenating folder or schema names. Unavailable or ambiguous
@@ -270,6 +279,7 @@ affected dashboards.
 | Unresolved explicit view mapping | `dbt_explicit_view_mapping_unresolved` means a configured `table_mapping[].omni_view` matched no authored view across the registered model roots in the recorded base/head revision. Check the trusted mapping and any intentional view rename/removal. It is unknown impact, not a confirmed zero; independently resolved impacts remain available. |
 | Unresolved field/view identity | Check the source database/schema and published model synchronization. The unmatched field is retained as static evidence but no other view's dashboards are attributed to it. |
 | Saved calculation or timeframe lineage | Supported direct references are still useful; inspect calculated expressions in Omni for additional dependencies. These counts are not an exhaustive content inventory. |
+| Downstream dbt models not analyzed | `dbt_downstream_models_not_analyzed` means another dbt model `ref()`s the changed one. Content built on those downstream models is not counted; check their Omni views. `dbt_downstream_models_unavailable` means that inventory could not be read. Neither is zero impact. |
 | Dynamic macros, wildcard outputs, or compiled-SQL-only changes | The analyzer does not execute dbt or analyze compiled artifacts. Review generated SQL separately; this is not a clean no-impact result. |
 | Metadata unavailable | Verify the credential, acting-user permissions, and connectivity for the registered scope, then rerun. No access widening is attempted. |
 | Budget or snapshot gap | Narrow the scope, adjust bounded limits where supported, or rerun against stable published metadata. Omitted content is not confirmed unaffected. |

@@ -68,6 +68,7 @@ TYPES = frozenset({
     "omniflow_finding", *CHANGE_MESSAGES,
 })
 REASONS = frozenset({
+    "dbt_column_removal_orphans_omni_field", "dbt_model_removal_orphans_omni_view", "missing_model_identity",
     "invalid_issue_container", "invalid_issue_entry", "missing_issue_message",
     "invalid_issue_message", "unsupported_issue_shape", "invalid_message_type", "blank_issue_message",
     "invalid_filter_identity", "empty_api_response", "invalid_json_response",

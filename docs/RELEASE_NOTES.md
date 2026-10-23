@@ -2,6 +2,14 @@
 
 ## Unreleased — verified relocation, source locations and result-quality probes
 
+- dbt column-to-content impact keeps column precision for dbt-style import CTEs
+  (`select * from {{ ref(...) }}`) and compares aliased constant-argument macro
+  outputs per column. A changed model with downstream dbt children now reports
+  `dbt_downstream_models_not_analyzed` instead of reading as zero impact.
+- Blocking dbt orphan findings now have specific codes and guidance
+  (`OF-DBT-IMPACT-ORPHANED-COLUMN`, `OF-DBT-IMPACT-ORPHANED-MODEL`) instead of the
+  generic fallback, and a run without a selected model reports
+  `OF-SETUP-MODEL-IDENTITY` with the fix.
 - Legitimate numeric/date repository paths no longer lose all private source
   locations. Unsafe or sensitive-looking path values remain withheld; original
   mapping failure categories are preserved.
