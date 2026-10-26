@@ -6,6 +6,10 @@
   checks: a bare model name is Omni's default `omni/<model-name>` folder, and a
   leading `/` marks a path from the repository root. Two-repo content impact no
   longer reports `omni_repository_target_mismatch` for default-path models.
+- The downstream dbt model inventory no longer becomes unavailable because a
+  model calls `config()`, a `dbt.*`/`dbt_utils.*` macro, or a ref-free project
+  macro with literal arguments. Typical dbt projects now get
+  `dbt_downstream_models_not_analyzed` only for models that really have children.
 - Repairs the PR #57 CI fixture without changing production metadata trust.
   Downstream `ref` detection handles whitespace, package/version arguments and
   comments, including children edited in the same PR. Arbitrary macro expansion

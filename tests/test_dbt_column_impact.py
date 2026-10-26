@@ -653,3 +653,45 @@ def test_unreadable_downstream_inventory_is_a_gap_not_zero(tmp_path):
     with mock.patch("omniflow.dbt_column_impact._list_revision_files", return_value=None):
         result = collect(tmp_path, base)
     assert "dbt_downstream_models_unavailable" in {gap["reason_code"] for gap in result["coverage_gaps"]}
+
+
+@pytest.mark.parametrize("child,dependent", [
+    ("{{ config(materialized='table', tags=['daily']) }}\nselect id from raw.other", False),
+    ("select {{ dbt.date_trunc('day', 'ordered_at') }} as day from raw.other", False),
+    ("select {{ dbt_utils.generate_surrogate_key(['id', 'sku']) }} as k from raw.other", False),
+    ("select {{ cents_to_dollars('cost') }} as cost from raw.other", False),
+    ("{{ config(materialized='view') }}\nselect {{ cents_to_dollars('net') }} from {{ ref('orders') }}", True),
+    ("select {{ dbt_utils.star(ref('orders')) }} from {{ ref('orders') }}", True),
+])
+def test_ref_free_macros_keep_downstream_inventory_readable(tmp_path, child, dependent):
+    macro = "{% macro cents_to_dollars(column_name) -%}\n({{ column_name }} / 100)::numeric(16, 2)\n{%- endmacro %}"
+    base = fixture(tmp_path, extra={"models/fct_orders.sql": child, "models/macros/cents.sql": macro})
+    (tmp_path / "models/orders.sql").write_text("select id, amount * 0.8 as net from raw.orders")
+    result = collect(tmp_path, base)
+    codes = {gap["reason_code"] for gap in result["coverage_gaps"]}
+    assert "dbt_downstream_models_unavailable" not in codes
+    assert ("dbt_downstream_models_not_analyzed" in codes) is dependent
+    assert result["coverage_complete"] is not dependent
+
+
+@pytest.mark.parametrize("child,macro", [
+    # A project macro that can reach a model hides dependencies of its callers.
+    ("select {{ cents_to_dollars('cost') }} from raw.other",
+     "{% macro cents_to_dollars(c) %}(select max(x) from {{ ref('orders') }}){% endmacro %}"),
+    ("select {{ cents_to_dollars('cost') }} from raw.other",
+     "{% macro cents_to_dollars(c) %}{{ run_query('select 1') }}{% endmacro %}"),
+    # Undefined macros and other packages are not known to be ref-free.
+    ("select {{ undefined_macro('cost') }} from raw.other", ""),
+    ("select {{ other_pkg.helper('cost') }} from raw.other", ""),
+    # Dynamic arguments are not literal.
+    ("select {{ dbt.date_trunc(var('grain'), 'ordered_at') }} from raw.other", ""),
+])
+def test_unprovable_macros_keep_downstream_inventory_unavailable(tmp_path, child, macro):
+    extra = {"models/fct_orders.sql": child}
+    if macro:
+        extra["models/macros/cents.sql"] = macro
+    base = fixture(tmp_path, extra=extra)
+    (tmp_path / "models/orders.sql").write_text("select id, amount * 0.8 as net from raw.orders")
+    result = collect(tmp_path, base)
+    assert result["coverage_complete"] is False
+    assert "dbt_downstream_models_unavailable" in {gap["reason_code"] for gap in result["coverage_gaps"]}

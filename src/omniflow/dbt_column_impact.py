@@ -147,12 +147,52 @@ def _literal_source_call(call: ast.AST) -> bool:
                and type(keyword.value.value) in {str, int} for keyword in call.keywords)
 
 
-def _dbt_ref_names(sql: str) -> set[str] | None:
+# dbt's own adapter macros and dbt_utils never ref() a model by themselves, so a
+# call with literal arguments cannot hide a dependency. Other packages can.
+REF_FREE_MACRO_NAMESPACES = frozenset({"dbt", "dbt_utils"})
+MACRO_DEFINITION_RE = re.compile(r"{%-?\s*macro\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(")
+MACRO_DEPENDENCY_RE = re.compile(r"\b(?:ref|source|run_query|graph)\b")
+
+
+def _literal_argument(node: ast.AST) -> bool:
+    if _literal_source_call(node):
+        return True
+    try:
+        ast.literal_eval(node)
+    except (ValueError, TypeError, SyntaxError, RecursionError):
+        return False
+    return True
+
+
+def _ref_free_call(call: ast.AST, project_macros: frozenset[str]) -> bool:
+    """A literal-argument call that cannot add a model dependency of its own."""
+    if not isinstance(call, ast.Call):
+        return False
+    if not all(_literal_argument(arg) for arg in call.args) or not all(
+            keyword.arg is not None and _literal_argument(keyword.value) for keyword in call.keywords):
+        return False
+    func = call.func
+    if isinstance(func, ast.Name):
+        return func.id == "config" or func.id in project_macros
+    return (isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name)
+            and func.value.id in REF_FREE_MACRO_NAMESPACES)
+
+
+def _ref_free_project_macros(macro_texts: list[str]) -> frozenset[str]:
+    """Project macro names, only when no project macro can reach a model itself."""
+    if any(MACRO_DEPENDENCY_RE.search(text) for text in macro_texts):
+        return frozenset()
+    return frozenset(name for text in macro_texts for name in MACRO_DEFINITION_RE.findall(text))
+
+
+def _dbt_ref_names(sql: str, project_macros: frozenset[str] = frozenset()) -> set[str] | None:
     """Extract literal refs, including SQL-comment dependencies, without rendering.
 
     Jinja comments are inert; SQL comments are not, because dbt uses comments
-    containing ref() to declare dependencies. Unsupported/dynamic template code
-    cannot prove that no upstream dependency exists and returns None.
+    containing ref() to declare dependencies. config(), dbt/dbt_utils macros and
+    ref-free project macros with literal arguments add no dependency. Other
+    unsupported/dynamic template code cannot prove that no upstream dependency
+    exists and returns None.
     """
     names: set[str] = set()
     cursor = 0
@@ -170,6 +210,8 @@ def _dbt_ref_names(sql: str) -> set[str] | None:
             if not isinstance(node, ast.Call):
                 continue
             if not _literal_source_call(node):
+                if _ref_free_call(node, project_macros):
+                    continue
                 return None
             if node.func.id == "ref":
                 names.add(node.args[-1].value.lower())
@@ -624,8 +666,23 @@ def _downstream_models(base_ref: str, changed: dict[str, str], dbt_paths: list[s
         return None
     candidates = sorted(path for path in listing if path.lower().endswith(".sql")
                         and "macros" not in Path(path).parts)
-    if len(candidates) > MAX_DBT_FILES:
+    macro_files = sorted(path for path in listing if path.lower().endswith(".sql")
+                         and "macros" in Path(path).parts)
+    if len(candidates) + len(macro_files) > MAX_DBT_FILES:
         return None
+    macro_texts = []
+    for path in macro_files:
+        try:
+            text = _git_show(base_ref, path, root=root, max_bytes=MAX_SQL_BYTES)
+        except (ConfigError, SecurityPolicyError):
+            return None
+        if text is None:
+            return None
+        budget -= len(text.encode())
+        if budget < 0:
+            return None
+        macro_texts.append(text)
+    project_macros = _ref_free_project_macros(macro_texts)
     children: dict[str, list[str]] = defaultdict(list)
     for path in candidates:
         try:
@@ -637,7 +694,7 @@ def _downstream_models(base_ref: str, changed: dict[str, str], dbt_paths: list[s
         budget -= len(text.encode())
         if budget < 0:
             return None
-        references = _dbt_ref_names(text)
+        references = _dbt_ref_names(text, project_macros)
         if references is None:
             return None
         for name, source_path in changed.items():
