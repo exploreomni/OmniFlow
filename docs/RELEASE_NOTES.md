@@ -2,6 +2,10 @@
 
 ## Unreleased — dbt comparison precision and external Omni snapshots
 
+- Omni Git `modelPath` values now map to repository folders before identity
+  checks: a bare model name is Omni's default `omni/<model-name>` folder, and a
+  leading `/` marks a path from the repository root. Two-repo content impact no
+  longer reports `omni_repository_target_mismatch` for default-path models.
 - Repairs the PR #57 CI fixture without changing production metadata trust.
   Downstream `ref` detection handles whitespace, package/version arguments and
   comments, including children edited in the same PR. Arbitrary macro expansion

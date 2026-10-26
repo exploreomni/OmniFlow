@@ -862,7 +862,7 @@ def _verify_external_impact_context(context, client, external):
         if context.environment:
             _verify_target_git_configuration(context, actual, expected_repository=external.repository)
             return
-        path = actual.get("modelPath") or "."
+        paths = _omni_git_model_paths(actual.get("modelPath"))
         expected_url = str(context.web_url).rstrip("/").removesuffix(".git")
         urls = set()
         for value in (actual.get("webUrl"), actual.get("cloneUrl")):
@@ -872,7 +872,7 @@ def _verify_external_impact_context(context, client, external):
                 host, repo = value[4:].split(":", 1)
                 value = f"https://{host}/{repo}"
             urls.add(value.rstrip("/").removesuffix(".git"))
-        if (path != context.model_path or actual.get("baseBranch") != external.ref
+        if (context.model_path not in paths or actual.get("baseBranch") != external.ref
                 or actual.get("gitServiceProvider") != "github" or expected_url not in urls):
             raise ConfigError("Git source identity differs")
     except ConfigError as exc:
@@ -2364,8 +2364,8 @@ def _verify_target_git_configuration(context: ModelContext, git_config: dict[str
     }
     for key, value in expected.items():
         actual = git_config.get(key)
-        if key == "modelPath" and context.model_path == "." and actual in {None, ""}:
-            actual = "."
+        if key == "modelPath" and context.model_path in _omni_git_model_paths(actual):
+            actual = context.model_path
         if actual != value or (key == "gitFollower" and type(actual) is not bool):
             raise ConfigError(f"Selected environment's Omni Git configuration does not match trusted {key}",
                               reason_code="git_configuration_mismatch")
@@ -2392,6 +2392,25 @@ def _verify_target_git_configuration(context: ModelContext, git_config: dict[str
                               reason_code="git_configuration_mismatch")
 
 
+def _omni_git_model_paths(value: Any) -> set[str]:
+    """Repository folders an Omni Git ``modelPath`` value can denote.
+
+    Omni reports an explicit path with a leading slash (``/bi/sales``) and the
+    default as the bare model folder name (``jaffle``), which it writes under
+    ``omni/``. The literal value stays accepted for existing registrations.
+    """
+    if value in {None, ""}:
+        return {"."}
+    if not isinstance(value, str):
+        return set()
+    paths = {value.rstrip("/")}
+    if value.startswith("/"):
+        paths.add(value.strip("/") or ".")
+    elif "/" not in value.strip("/"):
+        paths.add(f"omni/{value.strip('/')}")
+    return paths
+
+
 def _git_configuration_issues(context: ModelContext, git_config: dict[str, Any]) -> list[str]:
     checks = [
         ("model_path", context.model_path, git_config.get("modelPath")),
@@ -2406,6 +2425,8 @@ def _git_configuration_issues(context: ModelContext, git_config: dict[str, Any])
         normalize = (lambda value: str(value).rstrip("/")) if label == "model_path" else (
             str if label == "base_branch" else _normalize_git_config_value
         )
+        if label == "model_path" and normalize(expected) in _omni_git_model_paths(actual):
+            continue
         if normalize(expected) != normalize(actual):
             issues.append(f"{label} expected {expected!r} but Omni reports {actual!r}")
     return issues

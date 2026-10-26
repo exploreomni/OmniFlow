@@ -320,3 +320,37 @@ def test_native_source_identity_mismatches_are_not_normalized_away(override):
     with pytest.raises(ConfigError) as caught:
         cli._verify_external_impact_context(context, client, external)
     assert caught.value.reason_code == "omni_repository_target_mismatch"
+
+
+@pytest.mark.parametrize("model_path,registered", [
+    ("jaffle", "omni/jaffle"),          # Omni default: bare folder name under omni/
+    ("/omni/jaffle", "omni/jaffle"),    # explicit path, reported with a leading slash
+    ("/bi/models/sales/", "bi/models/sales"),
+    ("omni", "omni"),                   # literal match stays accepted
+])
+def test_native_source_model_path_forms_map_to_repository_folders(model_path, registered):
+    context = ModelContext(base_url="https://fixture.omniapp.co", model_id=MODEL_ID, model_path=registered,
+                           base_branch="release/stable", git_provider="github", web_url=f"https://github.com/{SOURCE}")
+    external = OmniRepositorySettings(SOURCE, "release/stable", [registered])
+    actual = {"modelPath": model_path, "baseBranch": "release/stable", "gitServiceProvider": "github",
+              "cloneUrl": f"git@github.com:{SOURCE}.git"}
+    client = SimpleNamespace(get_git_configuration=lambda model_id: actual)
+    cli._verify_external_impact_context(context, client, external)
+
+
+@pytest.mark.parametrize("model_path,registered", [
+    ("jaffle", "omni/other"),
+    ("jaffle", "models/jaffle"),        # the default folder is omni/, nowhere else
+    ("/jaffle", "omni/jaffle"),         # an explicit path is not re-rooted under omni/
+    ("a/b", "omni/a/b"),
+])
+def test_native_source_model_path_forms_do_not_widen_to_other_folders(model_path, registered):
+    context = ModelContext(base_url="https://fixture.omniapp.co", model_id=MODEL_ID, model_path=registered,
+                           base_branch="release/stable", git_provider="github", web_url=f"https://github.com/{SOURCE}")
+    external = OmniRepositorySettings(SOURCE, "release/stable", [registered])
+    actual = {"modelPath": model_path, "baseBranch": "release/stable", "gitServiceProvider": "github",
+              "cloneUrl": f"git@github.com:{SOURCE}.git"}
+    client = SimpleNamespace(get_git_configuration=lambda model_id: actual)
+    with pytest.raises(ConfigError) as caught:
+        cli._verify_external_impact_context(context, client, external)
+    assert caught.value.reason_code == "omni_repository_target_mismatch"
