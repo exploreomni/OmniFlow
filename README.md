@@ -587,7 +587,7 @@ Exit codes are `0` success, intentional skip, or explicitly nonblocking onboardi
 ```bash
 python3.11 -m venv .venv
 . .venv/bin/activate
-python -m pip install --upgrade "pip==26.2" "setuptools==84.0.0"
+python -m pip install --upgrade "pip==26.2" "setuptools==84.1.0"
 python -m pip install -e ".[dev]"
 pytest --cov=omniflow
 ruff check .
