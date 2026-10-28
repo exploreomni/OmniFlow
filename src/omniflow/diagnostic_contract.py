@@ -16,6 +16,51 @@ def _add(reason: str, code: str, title: str, action: str, category: str = "incom
     REASON_DETAILS[reason] = (code, title, action, category)
 
 
+DOCUMENT_IDENTITY_REASONS = frozenset({
+    "document_identity_unavailable", "document_identity_permission_denied", "document_identity_not_found",
+    "document_identity_transport_unavailable", "document_identity_invalid_response", "document_identity_scope_unsupported",
+    "document_identity_wrong_branch", "ambiguous_document_identity", "stale_document_draft",
+    "document_identity_changed", "document_identity_limit_exceeded", "query_identity_unavailable",
+})
+for _reason, _title, _action in (
+    ("document_identity_unavailable", "A branch document could not be matched to its published parent.",
+     "Use the opaque document reference and run reference to investigate draft-to-published identity evidence. "
+     "Verify the selected branch and the validation credential's document access; this is not proof of a new content defect."),
+    ("document_identity_permission_denied", "The API denied a document identity lookup.",
+     "Check the recorded HTTP status and operation, and this credential's document/draft read access in the same actor scope. "
+     "Do not substitute a broader identity or assume which permission is missing from the status alone."),
+    ("document_identity_not_found", "A document identity lookup returned not found or inaccessible.",
+     "Verify the selected draft and published parent still exist and are readable by the validation identity. "
+     "A 404 does not distinguish deletion from access restrictions; it is not a clean baseline."),
+    ("document_identity_transport_unavailable", "Document identity lookup could not complete because API evidence was unavailable.",
+     "Review the safe transport reason, HTTP status and retry attempts. Check runner connectivity or service health, "
+     "then rerun the same branch comparison; do not disable the identity check."),
+    ("document_identity_invalid_response", "Document identity metadata was missing, malformed or inconsistent.",
+     "Share the operation, opaque document reference and run reference with the OmniFlow maintainer to verify the API contract. "
+     "Do not share raw document bodies or rename model files to work around this response."),
+    ("document_identity_scope_unsupported", "Document identity could not be verified in the requested actor scope.",
+     "Use a documented supported identity scope consistently across validation and document reads. "
+     "Do not silently drop an acting-user setting or widen access; ask the maintainer to qualify the supported credential mode."),
+    ("document_identity_wrong_branch", "The selected draft does not belong to the branch being validated.",
+     "Verify the draft's model branch matches the PR's selected Omni branch, then rerun. "
+     "Do not match a different branch's draft by document name."),
+    ("ambiguous_document_identity", "Document identity evidence has duplicate or conflicting mappings.",
+     "Reconcile the selected draft, published parent and branch metadata in Omni using the run reference. "
+     "Do not choose an arbitrary mapping or suppress unmatched findings."),
+    ("stale_document_draft", "The selected draft is out of date with its published document.",
+     "Update the selected draft against its published document in Omni, review the intended changes, and rerun validation."),
+    ("document_identity_changed", "The selected document or draft identity changed during validation.",
+     "Rerun against an unchanged draft and published base. Concurrent publication, archiving or edits invalidate this comparison."),
+    ("document_identity_limit_exceeded", "The bounded document identity lookup budget was exhausted.",
+     "Review lookup counts and the supported targeted lookup with the maintainer. "
+     "Do not treat unexamined documents as new, existing or clean."),
+    ("query_identity_unavailable", "A draft query could not be matched safely to its published query.",
+     "Verify the stable query/tile map keys for the selected draft and parent using the run reference. "
+     "Missing or duplicate keys must not waive new or increased findings."),
+):
+    _add(_reason, "OF-" + _reason.upper().replace("_", "-"), _title, _action)
+
+
 for _reason, _title, _action in (
     ("omni_repository_configuration_invalid", "The external Omni source configuration is unsupported.",
      "Use a named source branch and nonoverlapping model_paths with enabled dbt impact. Do not combine this mode "
@@ -372,9 +417,11 @@ def diagnostic_descriptor(issue: dict) -> dict[str, str]:
                            "folders to work around malformed API metadata. Do not share raw response bodies.",
             "category": "incomplete_evidence",
         }
-    # A write with unknown outcome must retain reconciliation guidance even if
-    # its underlying HTTP failure also has a useful catalog entry.
-    reason = (issue.get("reason_code") if issue.get("reason_code") in {"dbt_refresh_status_unknown", "ai_repair_timeout"}
+    # Keep write-reconciliation and document-identity recovery guidance even
+    # when an underlying HTTP failure also has a catalog entry. Transport
+    # evidence remains separately visible instead of erasing the failing phase.
+    reason = (issue.get("reason_code") if issue.get("reason_code") in {
+                  "dbt_refresh_status_unknown", "ai_repair_timeout", *DOCUMENT_IDENTITY_REASONS}
               else next((issue.get(key) for key in ("cause_code", "reason_code", "candidate_reason")
                          if issue.get(key) in REASON_DETAILS), None))
     detail = REASON_DETAILS.get(reason) if isinstance(reason, str) else None

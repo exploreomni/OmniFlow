@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from ..content_impact_reporting import content_impact_line
+from ..repository_policy import PRIVACY_REASON_MESSAGES
 from ..security import redact, secure_write_text
 from .diagnostic_fields import DIAGNOSTIC_FACTS
 from .finding_groups import group_findings
@@ -44,6 +45,9 @@ def _render_minimal_diagnostic(report: dict[str, Any]) -> str:
     if isinstance(availability, dict) and availability.get("status"):
         lines.extend(["", f"- Repository diagnostic detail: `{_safe_code(availability['status'])}` "
                       f"(`{_safe_code(availability.get('diagnostics_reason', 'unknown'))}`)."])
+        privacy_message = PRIVACY_REASON_MESSAGES.get(availability.get("diagnostics_reason"))
+        if privacy_message:
+            lines.append(f"- {privacy_message} Validation decisions are unchanged.")
         if availability["status"] in {"generated", "available"}:
             # 'available' is the older runner-local status, not an upload receipt.
             lines.append("- Pre-upload snapshot: diagnostics were generated on the runner. "
@@ -253,7 +257,7 @@ def _state_detail(state: dict[str, Any]) -> str:
     details = []
     if type(state.get("elapsed_ms")) is int and state["elapsed_ms"] >= 0:
         details.append(f"elapsed `{state['elapsed_ms']}` ms")
-    for key in ("blocked_by", "skipped_reason"):
+    for key in ("blocked_by", "skipped_reason", "incomplete_reason"):
         if isinstance(state.get(key), str):
             details.append(f"{key.replace('_', ' ')} `{_safe_code(state[key])}`")
     return " — " + "; ".join(details) if details else ""
