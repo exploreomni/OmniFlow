@@ -42,7 +42,7 @@ During development, run the focused regression for each fix once, then run this 
 ```bash
 python3.11 -m venv .venv
 . .venv/bin/activate
-python -m pip install --upgrade "pip==26.2" "setuptools==84.0.0"
+python -m pip install --upgrade "pip==26.2" "setuptools==84.1.0"
 python -m pip install -e ".[dev]"
 pytest --cov=omniflow
 ruff check .
@@ -75,6 +75,35 @@ For the content-identity adapter, use synthetic transport fixtures for negative 
 - Version-4 standalone history must reject older identity assumptions and mismatched actor scope. Regenerate an authorized baseline rather than relabeling old evidence; a missing usable baseline remains incomplete, not a clean comparison. Live PR comparisons continue to read their base fresh.
 
 Do not classify every HTTP 404 as this adapter issue. Record its safe operation/status and investigate the selected model and scope. A controlled same-account comparison can qualify a particular endpoint and credential, not all tenants, credential types or private-content visibility.
+
+## Draft Identity Regression Acceptance
+
+Use a disposable non-production branch and dashboard for hosted acceptance. Do
+not alter permissions or content on shared/customer dashboards to induce errors.
+
+1. Verify one direct draft-state read returns its expected `draftOf.identifier`,
+   and the parent's draft metadata confirms the selected branch, active status,
+   freshness, and version. Keep only sanitized results, not raw document bodies.
+2. Run a comment-only PR with existing model/content debt. Existing matched
+   findings must remain nonblocking. Add one controlled new content defect in a
+   separate PR; it must block. Repair it and confirm recovery.
+3. Include many unrelated documents and a valid unrelated stale/archived draft.
+   Only unknown identifiers returned by the validator may cause draft lookups;
+   unrelated documents must not be searched or cause lookup failures.
+4. Simulate a denied required identity read, timeout, malformed response and
+   missing parent at the test transport boundary without changing tenant-wide
+   access. Each must remain incomplete with its specific identity code, safe
+   operation/status/cause, and no raw text in any public artifact.
+5. Change or archive the selected disposable draft between discovery and recheck.
+   The run must not reuse the earlier mapping or waive findings. Check final
+   execution states: content failed, candidate partial/final recheck not run,
+   and subsequent checks not run. No final state may remain running.
+6. Inspect the actual PR comment, full report and download artifacts. Verify the
+   separately eligible private tier, public privacy reasons, and same-actor
+   constraints. Restore/clean up only owned fixtures and retain safe receipts.
+
+Unit tests and a read-only live identity probe qualify narrower paths; neither
+substitutes for hosted Action acceptance or the original customer PR rerun.
 
 ## Live dbt Exposure Gate
 

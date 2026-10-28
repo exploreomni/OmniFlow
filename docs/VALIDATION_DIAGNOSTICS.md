@@ -50,7 +50,7 @@ registered `model_path` is not an in-scope organizational move.
 | Content validation / Dashboard filter or Query | Omni returned a readable validation issue. | Inspect that document/query in the same model and branch before changing a filter or field. |
 | Content validation / coverage unavailable | OmniFlow could not read the issue details. This is incomplete evidence, not proof of a particular content defect. | Keep the gate blocked; gather sanitized original evidence privately. |
 | `empty_api_response` / `invalid_json_response` | The API returned an empty body or bytes that could not be decoded as JSON. This is not a dashboard-filter finding. | Check the API/service response through authorized support, then rerun; do not infer a clean baseline. |
-| `document_identity_unavailable` | A branch document could not be established as a published document or an exact active draft of one. | Check Viewer-or-higher access to the published document and its draft metadata, then rerun. An absent lookup does not prove a new document. |
+| `document_identity_unavailable` | The required draft could not be matched to an active published parent. | Check whether that draft still exists on the selected branch. An absent lookup does not prove a new document. |
 | `ambiguous_document_identity` | Duplicate or conflicting document/draft identity evidence prevents safe comparison. | Resolve conflicting evidence in the same model and branch; do not match using names or messages. |
 | `stale_document_draft` | A mapped draft is out of date with its published document. | Update the draft in Omni and rerun. |
 | `document_identity_changed` | Validator evidence, selected labels, or draft version changed between observations. | Rerun after edits/publication finish; the interrupted comparison is not a new-defect conclusion. |
@@ -63,6 +63,43 @@ registered `model_path` is not an in-scope organizational move.
 | `policy_decision: advisory` with exit `0` | Explicit onboarding policy made an eligible synchronization gap nonblocking, not complete. | Read `validation_complete: false`; restore strict mode after onboarding. Do not treat unexecuted checks as passed. |
 
 No returned references is not proof of no consumers when coverage is unavailable. Content history counts (new/existing/resolved) describe content validation only; they are not the total blocking count across model, lint, contract and other checks. Missing optional results do not establish that those checks ran successfully.
+
+### Dashboard draft identity failures
+
+Unknown branch document identifiers are resolved directly through the documented
+[document-state API](https://docs.omni.co/api/documents-v2/get-document-state), then
+verified against that published parent's active draft list. OmniFlow no longer
+searches every dashboard's drafts. A valid unrelated stale or archived draft does
+not invalidate the selected mapping. Conflicts involving the selected draft or
+another active draft on the same branch still block.
+
+These are **incomplete comparisons**, not findings that a PR broke a dashboard:
+
+| Reason | Safe next action |
+| --- | --- |
+| `document_identity_permission_denied` | Check the recorded HTTP status and the same credential's access to the required document and draft. Do not switch to admin merely to obtain a pass. |
+| `document_identity_not_found` | Check whether the required draft/document was archived, deleted, or became inaccessible. A 404 does not distinguish those causes. |
+| `document_identity_transport_unavailable` | Read `transport_reason` and HTTP status. Resolve connectivity/TLS configuration, rate limiting or service availability, then rerun. Never disable TLS verification. |
+| `document_identity_invalid_response` | The response was empty, malformed, oversized, or lacked an authoritative draft parent. Give support the run reference and safe operation/reason; do not share a raw document response. |
+| `document_identity_scope_unsupported` | The document-state endpoint does not document acting-user scope. Use the intended user's PAT with `omni.user_id`, `OMNI_USER_ID`, and `--user-id` unset. Do not silently widen the selected scope. |
+| `document_identity_wrong_branch` | Confirm the dashboard draft is attached to the intended model branch, then rerun. |
+
+For example, `OF-DOCUMENT-IDENTITY-PERMISSION-DENIED`, `document_state`, HTTP `403`,
+`transport_reason: omni_forbidden`, and `document_reference: document-1` describes
+an identity-read denial, not a query error. The reference is a run-local anonymous
+ordinal, not a dashboard name, ID, or stable cross-run identifier. Reads are bounded
+and raw document content is not retained by identity lookup.
+
+If content validation aborts while candidate verification awaits its final recheck,
+the final report marks candidate `partial`, `blocked_by: content`, with
+`incomplete_reason: final_recheck_not_run`. A final report must not imply a check is
+still running. Later checks remain `not_run`; these are not passes.
+
+Repository diagnostic detail remains limited to independently verified private
+repositories. `repository_public`, `repository_internal`, and
+`repository_privacy_unverified` explain why it was withheld; missing metadata is
+not evidence a repository is public. This disclosure decision does not change
+validation policy or cause the draft comparison failure.
 
 ### Reading an actionable report
 
