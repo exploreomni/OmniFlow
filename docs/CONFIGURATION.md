@@ -27,6 +27,17 @@ There is no `authentication` or `credential_type` configuration setting. Unknown
 
 An HTTP 404 alone does not establish an identity-mapping bug. Check the recorded operation, target/model and supported request scope through an authorized channel. Do not publish raw identity responses, API bodies or credentials to diagnose it. After an upgrade, rerun against the same intended scope; do not disable personal-folder checks or change actors merely to obtain a pass.
 
+**Branch dashboard draft identity has an additional scope limitation.** Unknown
+draft identifiers require the document-state API to resolve `draftOf.identifier`.
+That endpoint does not document an acting-user parameter. OmniFlow will stop with
+`document_identity_scope_unsupported` if an explicit `user_id` is configured and
+this lookup is required; it will not silently ignore the actor. Use the intended
+user's PAT without an actor override for that same scope. Organization keys
+without an actor override work for shared-scope identity lookup. The normal
+Content Validator actor support above does not establish support for every
+document endpoint. The direct identity read and parent draft-list verification
+are read-only; no write permission or new policy switch is required.
+
 Credential breadth does not change the registered model list or enabled checks. Empty results and completed checks do not establish whole-instance coverage. Review the known-content acceptance checks in [Testing](TESTING.md#credential-and-content-scope-acceptance).
 
 ## Trusted Model Identity

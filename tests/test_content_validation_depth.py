@@ -79,6 +79,7 @@ def test_verified_draft_evidence_rereads_preserve_depth(tmp_path, full):
             "content": [document("draft" if branch_id else "published")]
         }),
         list_content=lambda **kw: [{"identifier": "published"}],
+        get_document_identity=lambda identifier, **kw: {"identifier": identifier, "publishedIdentifier": "published"},
         list_document_drafts=lambda parent: [{
             "identifier": "draft", "publishedIdentifier": "published", "branch": {"id": "branch"},
             "status": "active", "draftOutOfDate": False, "updatedAt": "2026-10-15T12:00:00.000Z",

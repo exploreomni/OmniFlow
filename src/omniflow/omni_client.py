@@ -5,7 +5,7 @@ import json
 import logging
 import time
 from collections.abc import Mapping
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from typing import Any
 from uuid import UUID
@@ -13,7 +13,7 @@ from uuid import UUID
 import requests
 
 from . import __version__
-from .exceptions import ConfigError, OmniAPIError, OmniAuthError, OmniResponseError
+from .exceptions import ConfigError, OmniAPIError, OmniAuthError, OmniResponseError, SecurityPolicyError
 from .json_evidence import reject_duplicate_keys
 from .model_response import normalize_model_response
 from .model_yaml import validate_editable_yaml_file_name
@@ -311,6 +311,63 @@ class OmniClient:
                                reason_code="content_impact_draft_document")
         return payload
 
+    def get_document_identity(
+        self, document_id: str, *, user_id: str | None = None,
+        include_personal_folders: bool = False,
+    ) -> dict[str, str]:
+        """Resolve one draft's published parent without retaining document state.
+
+        The documented v2 read accepts a draft identifier and supplies
+        ``draftOf.identifier``. It does not return a top-level document ID, so
+        the result's identifier is bound to the requested path. The caller must
+        independently verify that draft in its published parent's draft list.
+        Missing parent metadata is not evidence of a new published document.
+        """
+        if not isinstance(document_id, str) or not document_id:
+            raise ConfigError("Document identifier must be a non-empty string")
+        document_id = validate_path_segment(document_id, name="document_id")
+        context = {"service": "omni", "api_operation": "document_state"}
+        if user_id is not None:
+            raise ConfigError(
+                "The document identity API does not document acting-user scope. "
+                "Use the selected user's PAT without user_id; OmniFlow will not substitute another scope.",
+                reason_code="document_identity_scope_unsupported", diagnostic_context=context,
+            )
+        # Share a caller's total identity-lookup budget when present. A direct
+        # use remains bounded too: at most whoami plus the document read, with
+        # no transient retries. The shared streaming reader caps response size.
+        scope = (nullcontext() if self._read_budget is not None else self.bounded_reads(
+            OmniReadBudget(deadline=time.monotonic() + min(self.timeout, 60), max_requests=2)
+        ))
+        try:
+            with scope:
+                self._resolve_content_actor(user_id, include_personal_folders=include_personal_folders)
+                payload = self._request("GET", f"/api/v2/documents/{document_id}")
+        except OmniAuthError as exc:
+            exc.args = ("Document identity lookup was not authorized.",)
+            raise exc from None
+        except OmniAPIError as exc:
+            # Retain typed status/retry/transport evidence, not the API path or
+            # response body. Shared-budget failures have no request context.
+            exc.args = ("Document identity lookup failed.",)
+            for key, value in context.items():
+                exc.diagnostic_context.setdefault(key, value)
+            raise exc from None
+        parent = payload.get("draftOf") if isinstance(payload, dict) else None
+        published_identifier = parent.get("identifier") if isinstance(parent, dict) else None
+        try:
+            if not isinstance(published_identifier, str) or published_identifier == document_id:
+                raise ValueError("missing or contradictory draft parent")
+            published_identifier = validate_path_segment(published_identifier, name="published_identifier")
+        except (ValueError, SecurityPolicyError):
+            raise OmniAPIError(
+                "Document identity lookup did not return a usable draft-to-published mapping.",
+                reason_code="document_identity_invalid_response", diagnostic_context=context,
+            ) from None
+        # Discard all names, query state, filters, layout and other content at
+        # this boundary. The published-layout reader deliberately stays separate.
+        return {"identifier": document_id, "publishedIdentifier": published_identifier}
+
     def get_dbt_exposures(self, model_id: str, branch_id: str | None = None) -> dict[str, Any]:
         model_id = validate_path_segment(model_id, name="model_id")
         params = {"branch_id": branch_id} if branch_id else {}
@@ -477,7 +534,11 @@ class OmniClient:
             exc.args = ("Document draft lookup failed",)
             raise exc from None
         if not isinstance(payload, list):
-            raise OmniAPIError("Document draft lookup returned an invalid response shape")
+            raise OmniAPIError(
+                "Document draft lookup returned an invalid response shape",
+                reason_code="document_identity_invalid_response",
+                diagnostic_context={"service": "omni", "api_operation": "document_drafts"},
+            )
         return [_document_draft_metadata(record) for record in payload]
 
     def create_ai_job(self, model_id: str, *, branch_id: str, prompt: str) -> dict[str, str]:
@@ -897,19 +958,26 @@ def _retry_after_seconds(value: str | None) -> int | None:
 
 
 def _document_draft_metadata(record: Any) -> dict[str, Any]:
+    def invalid_metadata() -> OmniAPIError:
+        return OmniAPIError(
+            "Document draft lookup returned invalid metadata",
+            reason_code="document_identity_invalid_response",
+            diagnostic_context={"service": "omni", "api_operation": "document_drafts"},
+        )
+
     required = {"identifier", "publishedIdentifier", "branch", "status", "draftOutOfDate", "updatedAt"}
     if not isinstance(record, Mapping) or not required.issubset(record):
-        raise OmniAPIError("Document draft lookup returned invalid metadata")
+        raise invalid_metadata()
     if any(not isinstance(record[key], str) or not record[key].strip()
            for key in ("identifier", "publishedIdentifier", "updatedAt")):
-        raise OmniAPIError("Document draft lookup returned invalid metadata")
+        raise invalid_metadata()
     if record["status"] not in ("active", "archived") or type(record["draftOutOfDate"]) is not bool:
-        raise OmniAPIError("Document draft lookup returned invalid metadata")
+        raise invalid_metadata()
     branch = record["branch"]
     if branch is not None and (
         not isinstance(branch, Mapping) or not isinstance(branch.get("id"), str) or not branch["id"].strip()
     ):
-        raise OmniAPIError("Document draft lookup returned invalid metadata")
+        raise invalid_metadata()
     return {
         "identifier": record["identifier"],
         "publishedIdentifier": record["publishedIdentifier"],

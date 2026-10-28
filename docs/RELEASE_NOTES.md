@@ -5,7 +5,10 @@
 - Omni Git `modelPath` values now map to repository folders before identity
   checks: a bare model name is Omni's default `omni/<model-name>` folder, and a
   leading `/` marks a path from the repository root. Two-repo content impact no
-  longer reports `omni_repository_target_mismatch` for default-path models.
+  longer reports `omni_repository_target_mismatch` for supported default-path
+  models. Malformed API path values produce configuration diagnostics instead
+  of an internal exception or a string-coerced match. Repository, branch,
+  follower and case-sensitive path checks remain enforced.
 - The downstream dbt model inventory no longer becomes unavailable because a
   model calls `config()`, a `dbt.*`/`dbt_utils.*` macro, or a ref-free project
   macro with literal arguments. Typical dbt projects now get

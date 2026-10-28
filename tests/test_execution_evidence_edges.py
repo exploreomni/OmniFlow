@@ -12,7 +12,33 @@ from omniflow.config import _to_config
 from omniflow.diagnostics import capture_private_reports
 from omniflow.discovery import ModelContext
 from omniflow.exceptions import OmniAPIError, OmniFlowError
+from omniflow.execution import ValidationProgress
 from omniflow.security import secure_write_text
+
+
+@pytest.mark.parametrize("suspended", ["candidate", "ai_eval"])
+def test_terminal_failure_closes_suspended_running_checks(suspended):
+    progress = ValidationProgress(_to_config({}, None), branch_id="branch-a", enforce_breaking_hold=False)
+    progress.complete("context")
+    progress.begin(suspended)
+    progress.begin("content")
+    progress.fail(OmniAPIError("synthetic evidence failure"))
+    evidence = progress.evidence()
+    states = {state["validator"]: state for state in evidence["check_states"]}
+    assert not evidence["validation_complete"]
+    assert all(state["status"] != "running" for state in states.values())
+    assert states["content"]["status"] == "failed"
+    assert states[suspended]["status"] == "partial"
+    assert states[suspended]["blocked_by"] == "content"
+    assert states[suspended]["incomplete_reason"] == (
+        "final_recheck_not_run" if suspended == "candidate" else "check_interrupted"
+    )
+    assert states["model"]["status"] == "not_run"
+    assert states["model"]["blocked_by"] == "content"
+    # The failing current operation must not accidentally become partial.
+    progress.begin("candidate")
+    progress.fail(OmniAPIError("synthetic final verification failure"))
+    assert progress.states["candidate"]["status"] == "failed"
 
 
 def configured_run(monkeypatch, tmp_path, client, *, two_models=False):

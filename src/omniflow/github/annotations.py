@@ -17,7 +17,7 @@ def public_annotation_lines(issues: list[dict[str, Any]], *, limit: int) -> list
         context = " / ".join(str(value) for value in qualifiers if value)
         message = f"{context}: {count} occurrence{'s' if count != 1 else ''}. {finding.get('message', '')}"
         facts = [f"{key}={finding[key]}" for key in (
-            "reason_code", "cause_code", "candidate_reason", "api_operation", "http_status",
+            "reason_code", "cause_code", "transport_reason", "document_reference", "candidate_reason", "api_operation", "http_status",
             "attempt_count", "max_attempts", "config_key", "expected_type", "source_kind",
             "source_line", "source_column", "metadata_stage", "metadata_reason",
         ) if key in finding]

@@ -25,10 +25,19 @@ from .yaml_security import parse_secure_yaml
 POLICY_REASONS = frozenset({
     "repository_verified", "minimal_requested", "not_github_actions", "unsupported_event",
     "unsupported_github_origin", "repository_unverified", "repository_not_private", "fork_pull_request",
+    "repository_public", "repository_internal", "repository_privacy_unverified",
     "revision_unverified", "stale_revision", "policy_unavailable", "policy_invalid", "unsafe_policy_path",
     "github_lookup_unavailable",
 })
 MAX_METADATA_BYTES = 256 * 1024
+PRIVACY_REASON_MESSAGES = {
+    "repository_public": "Detailed diagnostics are withheld because GitHub identifies this repository as public.",
+    "repository_internal": "Detailed diagnostics require a verified private repository; GitHub reports internal visibility.",
+    "repository_privacy_unverified": (
+        "Detailed diagnostics are withheld because GitHub's privacy metadata is missing or inconsistent. "
+        "This does not establish that the repository is public."
+    ),
+}
 
 
 @dataclass(frozen=True)
@@ -98,7 +107,11 @@ def _resolve(config: OmniFlowConfig) -> RepositoryPolicy:
     if not _same_repository(metadata, repository, identifier):
         raise _Ineligible("repository_unverified")
     if metadata.get("private") is not True or metadata.get("visibility") != "private":
-        raise _Ineligible("repository_not_private")
+        if metadata.get("private") is False and metadata.get("visibility") == "public":
+            raise _Ineligible("repository_public")
+        if metadata.get("private") is True and metadata.get("visibility") == "internal":
+            raise _Ineligible("repository_internal")
+        raise _Ineligible("repository_privacy_unverified")
     if event_name in {"pull_request", "pull_request_target"}:
         head, base = _pull_request_revisions(api, event, repository, identifier)
     else:
