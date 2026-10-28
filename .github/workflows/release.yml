@@ -81,7 +81,7 @@ jobs:
         run: sha256sum omniflow_ci-*.whl omniflow_ci-*.tar.gz omniflow.spdx.json release-evidence.json > SHA256SUMS
 
       - name: Upload release artifacts
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: omniflow-release-artifacts
           path: dist/
@@ -109,7 +109,7 @@ jobs:
           inputs: ./dist/*
 
       - name: Upload signed preflight bundle
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: omniflow-signed-release-preflight-${{ github.sha }}
           path: dist/
