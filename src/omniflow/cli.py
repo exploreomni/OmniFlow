@@ -2399,10 +2399,12 @@ def _omni_git_model_paths(value: Any) -> set[str]:
     default as the bare model folder name (``jaffle``), which it writes under
     ``omni/``. The literal value stays accepted for existing registrations.
     """
-    if value in {None, ""}:
+    if value is None:
         return {"."}
     if not isinstance(value, str):
         return set()
+    if value == "":
+        return {"."}
     paths = {value.rstrip("/")}
     if value.startswith("/"):
         paths.add(value.strip("/") or ".")
@@ -2425,9 +2427,13 @@ def _git_configuration_issues(context: ModelContext, git_config: dict[str, Any])
         normalize = (lambda value: str(value).rstrip("/")) if label == "model_path" else (
             str if label == "base_branch" else _normalize_git_config_value
         )
-        if label == "model_path" and normalize(expected) in _omni_git_model_paths(actual):
-            continue
-        if normalize(expected) != normalize(actual):
+        if label == "model_path":
+            # API values must remain typed evidence. Stringifying a list/dict
+            # or scalar can otherwise accidentally match a literal folder name.
+            matches = normalize(expected) in _omni_git_model_paths(actual)
+        else:
+            matches = normalize(expected) == normalize(actual)
+        if not matches:
             issues.append(f"{label} expected {expected!r} but Omni reports {actual!r}")
     return issues
 
