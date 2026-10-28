@@ -105,6 +105,9 @@ def test_drift_during_evidence_reads_cannot_write_reports_or_history(tmp_path, m
             return [{"identifier": "published"}]
         client.list_content.side_effect = catalog
     elif phase in {"document_mapping", "document_recheck"}:
+        client.get_document_identity = lambda identifier, **kwargs: {
+            "identifier": identifier, "publishedIdentifier": "published",
+        }
         client.validate_content.side_effect = lambda *a, branch_id=None, **kw: {
             "content": [document(identifier="draft" if branch_id else "published")],
         }

@@ -39,6 +39,8 @@ class ValidationProgress:
     def begin(self, name: str) -> None:
         self.current = name
         self.states.setdefault(name, {"validator": name})["status"] = "running"
+        self.states[name].pop("blocked_by", None)
+        self.states[name].pop("incomplete_reason", None)
         self._started[name] = time.monotonic()
         print(f"OmniFlow: starting {name} check.", file=sys.stderr, flush=True)
 
@@ -51,6 +53,7 @@ class ValidationProgress:
             status=status, exit_code=exit_code, elapsed_ms=self._elapsed(name),
         )
         self.states[name].pop("blocked_by", None)
+        self.states[name].pop("incomplete_reason", None)
         if skipped_reason in {"no_branch", "no_matching_prompt_set"}:
             self.states[name]["skipped_reason"] = skipped_reason
         print(f"OmniFlow: {name} check {status} ({self.states[name]['elapsed_ms']} ms).",
@@ -67,6 +70,15 @@ class ValidationProgress:
         for state in self.states.values():
             if state["status"] == "not_run":
                 state["blocked_by"] = self.current
+            elif state["status"] == "running":
+                # Candidate verification deliberately spans the other checks:
+                # an initial sample is not complete until its final recheck.
+                # A terminal failure must not leave that suspended check looking
+                # like a job that is still running in a downloaded report.
+                state.update(status="partial", blocked_by=self.current,
+                             elapsed_ms=self._elapsed(state["validator"]),
+                             incomplete_reason=("final_recheck_not_run" if state["validator"] == "candidate"
+                                                else "check_interrupted"))
 
     def evidence(self) -> dict[str, Any]:
         return {

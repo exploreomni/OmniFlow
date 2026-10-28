@@ -197,6 +197,9 @@ def test_cli_unverified_draft_is_safe_operational_failure_not_new_content_defect
             current if branch_id else payload("Synthetic private field missing")
         ),
         list_content=lambda **kwargs: [{"identifier": "doc-short"}],
+        get_document_identity=lambda identifier, **kwargs: {
+            "identifier": "synthetic-draft", "publishedIdentifier": "doc-short",
+        },
         list_document_drafts=lambda parent: [{
             "identifier": "synthetic-draft", "publishedIdentifier": "doc-short",
             "branch": {"id": "wrong-private-branch"}, "status": "active", "draftOutOfDate": False,
@@ -216,7 +219,7 @@ def test_cli_unverified_draft_is_safe_operational_failure_not_new_content_defect
     assert report["diagnostic_schema_version"] == 2
     finding = report["issues"][0]
     assert finding["type"] == "content_evidence_unavailable"
-    assert finding["reason_code"] == "document_identity_unavailable"
+    assert finding["reason_code"] == "document_identity_wrong_branch"
     assert finding["validation_scope"] == "branch"
     assert finding["comparison_mode"] == "new_only"
     assert finding["comparison_status"] == "unavailable"

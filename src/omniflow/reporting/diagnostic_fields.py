@@ -6,7 +6,7 @@ repository-only locations are added separately by the authorized projection.
 
 DIAGNOSTIC_FACTS = (
     "context_reference", "validation_scope", "state", "reason_code", "candidate_reason",
-    "cause_code", "service", "api_operation", "http_status", "attempt_count", "max_attempts",
+    "cause_code", "transport_reason", "document_reference", "service", "api_operation", "http_status", "attempt_count", "max_attempts",
     "operation_phase", "retryable", "config_key", "expected_type", "source_kind", "source_line",
     "source_column", "entry_index", "contents_comparison", "compared_file_count",
     "git_file_count", "omni_file_count", "git_only_count", "omni_only_count",

@@ -51,6 +51,9 @@ def client_for(current=None, baseline=None, *, records=None, drafts=None):
         )),
         list_content=Mock(side_effect=lambda **kwargs: copy.deepcopy(records)),
         list_document_drafts=Mock(side_effect=lambda parent: copy.deepcopy(drafts)),
+        get_document_identity=Mock(side_effect=lambda identifier, **kwargs: {
+            "identifier": identifier, "publishedIdentifier": PUBLISHED,
+        }),
     )
 
 
@@ -132,9 +135,9 @@ def test_labels_select_only_verified_published_identity(tmp_path, selected, expe
 @pytest.mark.parametrize("problem,reason", [
     ("unknown", "document_identity_unavailable"),
     ("unpublished", "document_identity_unavailable"),
-    ("denied", "document_identity_unavailable"),
-    ("wrong_branch", "document_identity_unavailable"),
-    ("unattached", "document_identity_unavailable"),
+    ("denied", "document_identity_permission_denied"),
+    ("wrong_branch", "document_identity_wrong_branch"),
+    ("unattached", "document_identity_wrong_branch"),
     ("archived", "document_identity_unavailable"),
     ("stale", "stale_document_draft"),
     ("duplicate_draft", "ambiguous_document_identity"),
@@ -299,15 +302,16 @@ def test_malformed_recheck_preserves_the_actual_failing_scope(tmp_path, scope):
 
 @pytest.mark.parametrize("limit", ["count", "time"])
 def test_lookup_search_is_bounded_and_never_treats_limit_as_no_new_errors(tmp_path, monkeypatch, limit):
-    client = client_for(baseline=[], records=[{"identifier": f"parent-{index}"} for index in range(3)], drafts=[])
+    client = client_for(current=[document(f"draft-{index}") for index in range(3)], baseline=[], records=[])
     if limit == "count":
         monkeypatch.setattr(content_identity, "MAX_DRAFT_LOOKUPS", 2)
     else:
-        monkeypatch.setattr(content_identity, "monotonic", Mock(side_effect=[0, 0, 61]))
+        monkeypatch.setattr(content_identity, "monotonic", Mock(side_effect=[0, 61]))
     with pytest.raises(ContentEvidenceError) as caught:
         validate(tmp_path, client)
     assert caught.value.reason_code == "document_identity_limit_exceeded"
-    assert client.list_document_drafts.call_count == (2 if limit == "count" else 1)
+    client.list_document_drafts.assert_not_called()
+    client.get_document_identity.assert_not_called()
 
 
 def test_draft_lookup_is_per_document_not_per_error_and_not_cached_between_runs(tmp_path):
