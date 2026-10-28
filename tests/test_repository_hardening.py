@@ -170,16 +170,18 @@ class RepositoryHardeningTests(unittest.TestCase):
         locked = next(entry for entry in locked_requirements(lock) if entry.startswith("setuptools=="))
         pin = Requirement(locked.split(" --hash=", 1)[0])
         locked_version = Version(next(iter(pin.specifier)).version)
-        self.assertGreaterEqual(locked_version, Version("83.0.0"))
+        security_floor = Version("84.1.0")
+        self.assertGreaterEqual(locked_version, security_floor)
         self.assertIsNone(setuptools.url)
         self.assertIsNone(setuptools.marker)
         self.assertFalse(setuptools.extras)
-        # The reviewed hash-lock pin is authoritative; allow only its approved major.
+        # Keep the patched floor even for non-locked builds and restrict the approved major.
         self.assertEqual(
             {(bound.operator, Version(bound.version)) for bound in setuptools.specifier},
-            {(">=", Version(str(locked_version.major))), ("<", Version(str(locked_version.major + 1)))},
+            {(">=", security_floor), ("<", Version(str(locked_version.major + 1)))},
         )
         self.assertIn(locked_version, setuptools.specifier)
+        self.assertNotIn(Version("84.0.0"), setuptools.specifier)
 
         for relative in (
             ".github/workflows/dependency-scan.yml",

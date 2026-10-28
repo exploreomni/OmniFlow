@@ -14,7 +14,7 @@ from typing import Any
 from uuid import uuid4
 
 from .diagnostic_catalog import CHANGE_MESSAGES, CHECK_GUIDANCE, LINT_MESSAGES
-from .diagnostic_contract import CATALOG_VERSION, REASON_DETAILS, diagnostic_descriptor
+from .diagnostic_contract import CATALOG_VERSION, DOCUMENT_IDENTITY_REASONS, REASON_DETAILS, diagnostic_descriptor
 from .exceptions import API_OPERATIONS, TRANSPORT_REASON_CODES, MissingPolicyError, exception_diagnostic
 from .repository_policy import POLICY_REASONS
 from .validators.content_identity import IDENTITY_MESSAGES
@@ -119,6 +119,7 @@ ENUMS = {
     "service": {"omni", "github", "git"},
     "api_operation": API_OPERATIONS,
     "cause_code": REASONS,
+    "transport_reason": TRANSPORT_REASON_CODES,
     "local_git_reason": TRANSPORT_REASON_CODES,
     "expected_type": {"mapping", "non_empty_mapping", "list", "non_empty_list", "string", "non_empty_string",
                       "boolean", "integer", "enum", "repository_path", "https_url"},
@@ -127,6 +128,7 @@ ENUMS = {
                         "prompt_set_preflight", "run_creation", "run_polling", "run_cleanup"},
     "last_observed_status": {"RUNNING", "COMPLETED", "FAILED", "UNKNOWN"},
     "skipped_reason": {"no_branch", "no_matching_prompt_set"},
+    "incomplete_reason": {"final_recheck_not_run", "check_interrupted"},
     "contents_comparison": {"not_compared", "different", "equal", "partial"},
     "blocked_by": VALIDATORS,
     "diagnostics_reason": POLICY_REASONS | {"no_trusted_run_context", "snapshot_evidence_unavailable", "repository_report_unavailable"},
@@ -227,6 +229,8 @@ def public_diagnostic(payload: dict[str, Any]) -> dict[str, Any]:
                 result[key] = item
             elif key == "http_status" and type(item) is int and 100 <= item <= 599:
                 result[key] = item
+            elif key == "document_reference" and isinstance(item, str) and re.fullmatch(r"document-[1-9][0-9]{0,5}", item):
+                result[key] = item
             elif key in COUNTS - {"http_status"} and type(item) is int and 0 <= item <= 2**31 - 1:
                 result[key] = item
             elif key == "baseline_issues" and item is None:
@@ -269,7 +273,8 @@ def _finding_message(issue: dict[str, Any]) -> str:
     if descriptor["diagnostic_code"] == "OF-CANDIDATE-VIEW-METADATA":
         return descriptor["title"] + " Validation is incomplete; this does not establish a model or content defect."
     noun = "model" if issue.get("validator") == "model" else "content"
-    reason = (issue.get("reason_code") if issue.get("reason_code") in {"dbt_refresh_status_unknown", "ai_repair_timeout"}
+    reason = (issue.get("reason_code") if issue.get("reason_code") in {
+                  "dbt_refresh_status_unknown", "ai_repair_timeout", *DOCUMENT_IDENTITY_REASONS}
               else issue.get("cause_code") or issue.get("reason_code"))
     if reason in REASON_DETAILS and reason not in {"empty_api_response", "invalid_json_response"}:
         return REASON_DETAILS[reason][1]

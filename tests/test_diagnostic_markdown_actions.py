@@ -1,3 +1,5 @@
+import pytest
+
 from omniflow.reporting.markdown_report import render_markdown_report
 
 
@@ -59,6 +61,35 @@ def test_public_report_explains_repository_detail_unavailability_without_names()
         "status": "unavailable", "diagnostics_reason": "repository_not_private",
     }))
     assert "Repository diagnostic detail: `unavailable` (`repository_not_private`)" in markdown
+
+
+@pytest.mark.parametrize("reason,explanation", [
+    ("repository_public", "GitHub identifies this repository as public"),
+    ("repository_internal", "GitHub reports internal visibility"),
+    ("repository_privacy_unverified", "does not establish that the repository is public"),
+])
+def test_privacy_reason_explains_observation_without_changing_gate(reason, explanation):
+    from omniflow.diagnostics import public_diagnostic
+
+    source = report(repository_diagnostics={"status": "unavailable", "diagnostics_reason": reason})
+    safe = public_diagnostic(source)
+    assert safe["repository_diagnostics"]["diagnostics_reason"] == reason
+    assert safe["exit_code"] == source["exit_code"] and safe["validation_complete"] is False
+    markdown = render_markdown_report(safe)
+    assert explanation in markdown and "Validation decisions are unchanged" in markdown
+
+
+def test_final_candidate_recheck_interruption_survives_public_projection():
+    from omniflow.diagnostics import public_diagnostic
+
+    markdown = render_markdown_report(public_diagnostic(report(check_states=[{
+        "validator": "candidate", "status": "partial", "blocked_by": "content",
+        "incomplete_reason": "final_recheck_not_run", "elapsed_ms": 42,
+    }])))
+    assert "`candidate`: `partial`" in markdown
+    assert "incomplete reason `final_recheck_not_run`" in markdown
+    assert "blocked by `content`" in markdown
+    assert "`running`" not in markdown
 
 
 def test_generated_or_legacy_available_detail_does_not_claim_downloadable_artifact():

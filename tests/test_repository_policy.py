@@ -237,11 +237,23 @@ def test_unverified_environment_falls_back_before_network(context, monkeypatch, 
     assert context.calls == []
 
 
-@pytest.mark.parametrize("private,visibility", [(False, "public"), (True, "internal"), (True, None), (None, "private")])
-def test_live_private_metadata_is_required_despite_event_private_claim(context, private, visibility):
+@pytest.mark.parametrize("private,visibility,reason", [
+    (False, "public", "repository_public"), (True, "internal", "repository_internal"),
+    (True, None, "repository_privacy_unverified"), (None, "private", "repository_privacy_unverified"),
+    (True, "public", "repository_privacy_unverified"), (False, "private", "repository_privacy_unverified"),
+    (1, "private", "repository_privacy_unverified"), (True, "PRIVATE", "repository_privacy_unverified"),
+])
+def test_live_private_metadata_is_required_despite_event_private_claim(context, private, visibility, reason):
     context.event["repository"]["private"] = True
     context.metadata.update(private=private, visibility=visibility)
-    assert_minimal(resolve_repository_policy(context.config), "repository_not_private")
+    assert_minimal(resolve_repository_policy(context.config), reason)
+    assert context.policy_reads == []
+
+
+@pytest.mark.parametrize("missing", ["private", "visibility"])
+def test_missing_live_privacy_field_does_not_claim_public_visibility(context, missing):
+    context.metadata.pop(missing)
+    assert_minimal(resolve_repository_policy(context.config), "repository_privacy_unverified")
     assert context.policy_reads == []
 
 

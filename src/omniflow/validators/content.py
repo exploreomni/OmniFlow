@@ -82,6 +82,7 @@ class ContentEvidenceError(OmniAPIError):
     def __init__(
         self, *, issue_type: str = "content", document: dict[str, Any] | None = None,
         query: dict[str, Any] | None = None, reason_code: str = "unsupported_issue_shape",
+        diagnostic_context: dict[str, Any] | None = None,
     ) -> None:
         self.reason_code = (
             reason_code if isinstance(reason_code, str) and reason_code in CONTENT_EVIDENCE_REASON_CODES
@@ -92,7 +93,7 @@ class ContentEvidenceError(OmniAPIError):
             f"Content Validator response contains unreadable {category} issue details. "
             "Validation evidence is incomplete; a specific content defect cannot be determined. "
             f"Reason code: {self.reason_code}."
-        ))
+        ), diagnostic_context=diagnostic_context)
         self.issue_type = issue_type if issue_type in {"dashboard_filter", "query"} else "content"
         self.validation_scope: str | None = None
         self.comparison_mode = "unknown"
@@ -114,6 +115,7 @@ class ContentEvidenceError(OmniAPIError):
                 if key in context:
                     context[key] = "[REDACTED]"
         return {
+            **self.diagnostic_context,
             **context,
             "validator": "content",
             "type": "content_evidence_unavailable",
@@ -816,6 +818,7 @@ def run_content_validation(
                     current, base, proof = resolve_documents(
                         client=client, branch_id=branch_id, current=current_docs, baseline=base_docs,
                         records=identity_records,
+                        user_id=user_id, include_personal_folders=include_personal_folders,
                     )
                 finally:
                     check_identity()
@@ -840,7 +843,7 @@ def run_content_validation(
                 payload = {**payload, "content": current}
                 baseline_payload = {**baseline_payload, "content": base}
             except DocumentIdentityError as exc:
-                error = ContentEvidenceError(reason_code=exc.reason_code)
+                error = ContentEvidenceError(reason_code=exc.reason_code, diagnostic_context=exc.diagnostic_context)
                 error.validation_scope = "branch"
                 error.comparison_mode = comparison_mode
                 error.requested_validation_depth = requested_depth
