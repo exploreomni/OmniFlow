@@ -301,12 +301,15 @@ For this downstream inventory only, literal `config()` calls and simple local
 macros whose bodies are proven to contain only parameter interpolation and scalar
 SQL arithmetic/casts can be inspected without execution. Local qualification
 requires readable immutable root `dbt_project.yml` metadata and the standard
-root `models/` and `macros/` layout. Macro files and project metadata are read
+root `models/` and `macros/` layout, without active `.dbtignore` rules. Macro files and project metadata are read
 lazily when local resolution is needed. Namespaces such as `dbt`
 and `dbt_utils` are not inherently dependency-free: package calls, dispatch,
 SQL-executing helpers, recursive calls, runtime expressions and ambiguous macro
 definitions remain incomplete evidence. Custom or unverified project layouts
 do not qualify local macros; they are not guessed from similarly named files.
+dbt supports [custom macro paths](https://docs.getdbt.com/reference/project-configs/macro-paths)
+and [ignored files](https://docs.getdbt.com/reference/dbtignore), but this static
+qualification does not resolve those implementation-selection rules.
 This does not qualify a macro's output projection in a changed model or establish
 query-result correctness; unsupported changed-model macros remain partial.
 For native cross-view names, the optional step uses Omni's returned view-name
