@@ -5,7 +5,10 @@
 - Omni Git `modelPath` values now map to repository folders before identity
   checks: a bare model name is Omni's default `omni/<model-name>` folder, and a
   leading `/` marks a path from the repository root. Two-repo content impact no
-  longer reports `omni_repository_target_mismatch` for default-path models.
+  longer reports `omni_repository_target_mismatch` for supported default-path
+  models. Malformed API path values produce configuration diagnostics instead
+  of an internal exception or a string-coerced match. Repository, branch,
+  follower and case-sensitive path checks remain enforced.
 - Repairs the PR #57 CI fixture without changing production metadata trust.
   Downstream `ref` detection handles whitespace, package/version arguments and
   comments, including children edited in the same PR. Arbitrary macro expansion
