@@ -42,7 +42,7 @@ During development, run the focused regression for each fix once, then run this 
 ```bash
 python3.11 -m venv .venv
 . .venv/bin/activate
-python -m pip install --upgrade "pip==26.2" "setuptools==84.0.0"
+python -m pip install --upgrade "pip==26.2" "setuptools==84.1.0"
 python -m pip install -e ".[dev]"
 pytest --cov=omniflow
 ruff check .
