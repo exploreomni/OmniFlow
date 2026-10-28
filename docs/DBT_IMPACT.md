@@ -297,6 +297,15 @@ calls support whitespace, Jinja whitespace-control delimiters, package arguments
 and version keywords. Jinja comments are ignored; SQL-comment `ref` dependencies
 are retained because dbt evaluates them. Dynamic or unreadable dependency syntax
 is reported as unavailable, not zero downstream dependencies.
+For this downstream inventory only, literal `config()` calls and simple local
+macros whose bodies are proven to contain only parameter interpolation and scalar
+SQL arithmetic/casts can be inspected without execution. Standard `macros/`
+files are read lazily when local resolution is needed. Namespaces such as `dbt`
+and `dbt_utils` are not inherently dependency-free: package calls, dispatch,
+SQL-executing helpers, recursive calls, runtime expressions and ambiguous macro
+definitions remain incomplete evidence. Custom dbt `macro-paths` are not resolved.
+This does not qualify a macro's output projection in a changed model or establish
+query-result correctness; unsupported changed-model macros remain partial.
 For native cross-view names, the optional step uses Omni's returned view-name
 mapping only after matching it to the immutable authored files. It does not derive
 canonical names by concatenating folder or schema names. Unavailable or ambiguous

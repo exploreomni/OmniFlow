@@ -9,10 +9,13 @@
   models. Malformed API path values produce configuration diagnostics instead
   of an internal exception or a string-coerced match. Repository, branch,
   follower and case-sensitive path checks remain enforced.
-- The downstream dbt model inventory no longer becomes unavailable because a
-  model calls `config()`, a `dbt.*`/`dbt_utils.*` macro, or a ref-free project
-  macro with literal arguments. Typical dbt projects now get
-  `dbt_downstream_models_not_analyzed` only for models that really have children.
+- The downstream dbt dependency inventory accepts literal `config()` calls and
+  structurally qualified local scalar macros without executing dbt or Jinja.
+  Macro files are read only when local resolution is needed; unrelated unreadable
+  macros no longer invalidate plain-SQL inventory. Package calls, dispatch,
+  query execution, recursive/dynamic code and ambiguous definitions remain
+  incomplete evidence, never a complete zero-impact result. This improves
+  downstream dependency detection, not changed-model macro projection analysis.
 - Repairs the PR #57 CI fixture without changing production metadata trust.
   Downstream `ref` detection handles whitespace, package/version arguments and
   comments, including children edited in the same PR. Arbitrary macro expansion
