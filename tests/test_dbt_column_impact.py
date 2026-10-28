@@ -6,6 +6,7 @@ from unittest import mock
 
 import pytest
 
+from omniflow import dbt_column_impact
 from omniflow.config import DbtContentImpactSettings, DbtImpactSettings
 from omniflow.dbt_column_impact import analyze_projection, collect_column_impacts
 from omniflow.dbt_impact import COVERAGE_RULE, ORPHANED_COLUMN_RULE, evaluate_dbt_impact
@@ -49,7 +50,8 @@ def fixture(root, before="select id, amount * 0.9 as net from raw.orders", view=
     git(root, "init", "-q", "-b", "main")
     git(root, "config", "user.email", "test@example.invalid")
     git(root, "config", "user.name", "Test")
-    files = {"models/orders.sql": before, "omni/orders.view.yaml": view, **(extra or {})}
+    files = {"models/orders.sql": before, "omni/orders.view.yaml": view,
+             "dbt_project.yml": "name: fixture\nconfig-version: 2\n", **(extra or {})}
     for name, text in files.items():
         path = root / name
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -57,9 +59,9 @@ def fixture(root, before="select id, amount * 0.9 as net from raw.orders", view=
     return commit(root)
 
 
-def collect(root, base, *, settings=None, changed=None, resolver=None, omni_paths=None):
+def collect(root, base, *, settings=None, changed=None, resolver=None, omni_paths=None, dbt_paths=None):
     return collect_column_impacts(
-        changed_files=changed or ["models/orders.sql"], dbt_paths=["models", "target"],
+        changed_files=changed or ["models/orders.sql"], dbt_paths=dbt_paths or ["models", "macros", "target"],
         settings=settings or DbtImpactSettings(content_impact=DbtContentImpactSettings(enabled=True)),
         omni_yaml_paths=omni_paths or ["omni"], base_ref=base, repo_root=root,
         canonical_view_resolver=resolver,
@@ -657,15 +659,14 @@ def test_unreadable_downstream_inventory_is_a_gap_not_zero(tmp_path):
 
 @pytest.mark.parametrize("child,dependent", [
     ("{{ config(materialized='table', tags=['daily']) }}\nselect id from raw.other", False),
-    ("select {{ dbt.date_trunc('day', 'ordered_at') }} as day from raw.other", False),
-    ("select {{ dbt_utils.generate_surrogate_key(['id', 'sku']) }} as k from raw.other", False),
     ("select {{ cents_to_dollars('cost') }} as cost from raw.other", False),
+    ("select {{ cents_to_dollars(column_name='cost') }} as cost from raw.other", False),
     ("{{ config(materialized='view') }}\nselect {{ cents_to_dollars('net') }} from {{ ref('orders') }}", True),
-    ("select {{ dbt_utils.star(ref('orders')) }} from {{ ref('orders') }}", True),
+    ("select {{ cents_to_dollars(ref('pkg', 'orders', version=2)) }} from raw.other", True),
 ])
 def test_ref_free_macros_keep_downstream_inventory_readable(tmp_path, child, dependent):
     macro = "{% macro cents_to_dollars(column_name) -%}\n({{ column_name }} / 100)::numeric(16, 2)\n{%- endmacro %}"
-    base = fixture(tmp_path, extra={"models/fct_orders.sql": child, "models/macros/cents.sql": macro})
+    base = fixture(tmp_path, extra={"models/fct_orders.sql": child, "macros/cents.sql": macro})
     (tmp_path / "models/orders.sql").write_text("select id, amount * 0.8 as net from raw.orders")
     result = collect(tmp_path, base)
     codes = {gap["reason_code"] for gap in result["coverage_gaps"]}
@@ -680,18 +681,157 @@ def test_ref_free_macros_keep_downstream_inventory_readable(tmp_path, child, dep
      "{% macro cents_to_dollars(c) %}(select max(x) from {{ ref('orders') }}){% endmacro %}"),
     ("select {{ cents_to_dollars('cost') }} from raw.other",
      "{% macro cents_to_dollars(c) %}{{ run_query('select 1') }}{% endmacro %}"),
+    # Local wrappers cannot bless unresolved package, dispatch or recursive calls.
+    ("select {{ cents_to_dollars('cost') }} from raw.other",
+     "{% macro cents_to_dollars(c) %}{{ other_pkg.helper(c) }}{% endmacro %}"),
+    ("select {{ cents_to_dollars('cost') }} from raw.other",
+     "{% macro cents_to_dollars(c) %}{{ adapter.dispatch('helper')(c) }}{% endmacro %}"),
+    ("select {{ cents_to_dollars('cost') }} from raw.other",
+     "{% macro cents_to_dollars(c) %}{{ cents_to_dollars(c) }}{% endmacro %}"),
+    # A dependency-free name is not proof that its SQL body is a scalar leaf.
+    ("select {{ cents_to_dollars('cost') }} from raw.other",
+     "{% macro cents_to_dollars(c) %}(select max(amount) from orders){% endmacro %}"),
+    ("select {{ cents_to_dollars('cost') }} from raw.other",
+     "{% macro cents_to_dollars(c) %}{{ target.schema }}{% endmacro %}"),
     # Undefined macros and other packages are not known to be ref-free.
     ("select {{ undefined_macro('cost') }} from raw.other", ""),
     ("select {{ other_pkg.helper('cost') }} from raw.other", ""),
+    ("select {{ dbt.date_trunc('day', 'ordered_at') }} from raw.other", ""),
+    ("select {{ dbt_utils.generate_surrogate_key(['id']) }} from raw.other", ""),
+    ("select {{ dbt_utils.star(ref('orders')) }} from {{ ref('orders') }}", ""),
+    # This built-in executes SQL even with literal arguments.
+    ("select {{ dbt_utils.get_single_value('select max(amount) from orders') }} from raw.other", ""),
+    # dbt's dispatch configuration may route an otherwise familiar name here.
+    ("select {{ dbt_utils.generate_surrogate_key(['id']) }} from raw.other",
+     "{% macro default__generate_surrogate_key(fields) %}(select max(id) from {{ ref('orders') }}){% endmacro %}"),
     # Dynamic arguments are not literal.
     ("select {{ dbt.date_trunc(var('grain'), 'ordered_at') }} from raw.other", ""),
+    ("select {{ runtime_sql }} from raw.other", ""),
+    ("select {{ target.schema }} from raw.other", ""),
+    ("select {{ context['sql'] }} from raw.other", ""),
 ])
 def test_unprovable_macros_keep_downstream_inventory_unavailable(tmp_path, child, macro):
     extra = {"models/fct_orders.sql": child}
     if macro:
-        extra["models/macros/cents.sql"] = macro
+        extra["macros/cents.sql"] = macro
     base = fixture(tmp_path, extra=extra)
     (tmp_path / "models/orders.sql").write_text("select id, amount * 0.8 as net from raw.orders")
     result = collect(tmp_path, base)
     assert result["coverage_complete"] is False
     assert "dbt_downstream_models_unavailable" in {gap["reason_code"] for gap in result["coverage_gaps"]}
+
+
+def test_unused_unreadable_macro_does_not_invalidate_plain_sql_inventory(tmp_path):
+    base = fixture(tmp_path, extra={"macros/unused.sql": "{% macro unused() %}{{ ref('other') }}{% endmacro %}"})
+    (tmp_path / "models/orders.sql").write_text("select id, amount * 0.8 as net from raw.orders")
+    original = dbt_column_impact._git_show
+
+    def read(ref, path, **kwargs):
+        assert path not in {"macros/unused.sql", "dbt_project.yml", ".dbtignore"}, "Unused metadata must not be read"
+        return original(ref, path, **kwargs)
+
+    with mock.patch.object(dbt_column_impact, "_git_show", side_effect=read):
+        result = collect(tmp_path, base)
+    assert result["coverage_complete"] is True
+
+
+def test_unrelated_unsafe_macro_does_not_disqualify_pure_local_leaf(tmp_path):
+    base = fixture(tmp_path, extra={
+        "models/child.sql": "select {{ cents_to_dollars('cost') }} from raw.other",
+        "macros/cents.sql": "{% macro cents_to_dollars(c) %}({{ c }} / 100){% endmacro %}",
+        "macros/unrelated.sql": "{% macro unrelated() %}{{ ref('other') }}{% endmacro %}",
+    })
+    (tmp_path / "models/orders.sql").write_text("select id, amount * 0.8 as net from raw.orders")
+    assert collect(tmp_path, base)["coverage_complete"] is True
+
+
+@pytest.mark.parametrize("call", [
+    "cents_to_dollars('(select max(amount) from orders)')",
+    "cents_to_dollars('amount; select * from orders')",
+    "cents_to_dollars(var('column'))",
+    "cents_to_dollars('cost', c='other')",
+    "cents_to_dollars()",
+])
+def test_pure_macro_call_arguments_cannot_hide_sql_dependencies(call):
+    macros = dbt_column_impact._ref_free_project_macros([
+        "{% macro cents_to_dollars(c) %}({{ c }} / 100){% endmacro %}",
+    ])
+    assert macros
+    assert dbt_column_impact._dbt_ref_names("select {{ " + call + " }}", resolve_macros=lambda: macros) is None
+
+
+def test_invalid_builtin_signature_cannot_fall_back_to_local_macro():
+    resolver = mock.Mock(return_value={"ref": ((), "1")})
+    assert dbt_column_impact._dbt_ref_names("select {{ ref() }}", resolve_macros=resolver) is None
+    resolver.assert_not_called()
+
+
+@pytest.mark.parametrize("metadata", [
+    None, "", "[]", "[", SecurityPolicyError("unreadable project fixture"),
+    "name: fixture\nmacro-paths: [custom_macros]\n",
+    "name: fixture\nmacro-paths: \"{{ var('macro_root') }}\"\n",
+    "name: fixture\nmodel-paths: [custom_models]\n",
+])
+def test_local_macro_qualification_requires_standard_readable_root_project(tmp_path, metadata):
+    base = fixture(tmp_path, extra={
+        "models/child.sql": "select {{ cents_to_dollars('cost') }} from raw.other",
+        # This harmless file may be stale and outside the real macro search path.
+        "macros/cents.sql": "{% macro cents_to_dollars(c) %}({{ c }} / 100){% endmacro %}",
+        "custom_macros/cents.sql": "{% macro cents_to_dollars(c) %}{{ other_pkg.hidden(c) }}{% endmacro %}",
+    })
+    (tmp_path / "models/orders.sql").write_text("select id, amount * 0.8 as net from raw.orders")
+    original = dbt_column_impact._git_show
+
+    def read(ref, path, **kwargs):
+        if path == "dbt_project.yml":
+            if isinstance(metadata, Exception):
+                raise metadata
+            return metadata
+        return original(ref, path, **kwargs)
+
+    with mock.patch.object(dbt_column_impact, "_git_show", side_effect=read):
+        result = collect(tmp_path, base)
+    assert result["coverage_complete"] is False
+    assert "dbt_downstream_models_unavailable" in {gap["reason_code"] for gap in result["coverage_gaps"]}
+
+
+@pytest.mark.parametrize("ignore,complete", [
+    ("# documentation only\n\n", True), ("macros/cents.sql\n", False), ("  # literal pattern\n", False),
+])
+def test_active_dbtignore_rules_make_local_macro_selection_unavailable(tmp_path, ignore, complete):
+    base = fixture(tmp_path, extra={
+        "models/child.sql": "select {{ cents_to_dollars('cost') }} from raw.other",
+        "macros/cents.sql": "{% macro cents_to_dollars(c) %}({{ c }} / 100){% endmacro %}",
+        ".dbtignore": ignore,
+        "dbt_project.yml": "name: fixture\nconfig-version: 2\nmacro-paths: [macros]\nmodel-paths: [models]\n",
+    })
+    (tmp_path / "models/orders.sql").write_text("select id, amount * 0.8 as net from raw.orders")
+    assert collect(tmp_path, base)["coverage_complete"] is complete
+
+
+def test_nested_project_cannot_borrow_root_macro_implementation(tmp_path):
+    base = fixture(tmp_path, extra={
+        "other/models/child.sql": "select {{ cents_to_dollars('cost') }} from raw.other",
+        "macros/cents.sql": "{% macro cents_to_dollars(c) %}({{ c }} / 100){% endmacro %}",
+    })
+    (tmp_path / "models/orders.sql").write_text("select id, amount * 0.8 as net from raw.orders")
+    assert collect(tmp_path, base, dbt_paths=["models", "macros", "other"])["coverage_complete"] is False
+
+
+def test_local_macro_resolution_is_lazy_cached_and_bounded(tmp_path):
+    base = fixture(tmp_path, extra={
+        "models/child.sql": "select {{ cents_to_dollars('cost') }}, {{ cents_to_dollars('net') }} from raw.other",
+        "macros/cents.sql": "{% macro cents_to_dollars(c) %}({{ c }} / 100){% endmacro %}",
+    })
+    original = dbt_column_impact._git_show
+    with mock.patch.object(dbt_column_impact, "_git_show", wraps=original) as read:
+        result = dbt_column_impact._downstream_models(
+            base, {"orders": "models/orders.sql"}, ["models", "macros"], root=tmp_path, budget=10_000,
+        )
+    assert result == {}
+    assert sum(call.args[1] == "macros/cents.sql" for call in read.call_args_list) == 1
+    # Enough bytes for the first model and project, but not for the required macro proof.
+    budget = len((tmp_path / "models/child.sql").read_bytes()) + len((tmp_path / "dbt_project.yml").read_bytes())
+    assert dbt_column_impact._downstream_models(
+        base, {"orders": "models/orders.sql"}, ["models", "macros"], root=tmp_path, budget=budget,
+    ) is None

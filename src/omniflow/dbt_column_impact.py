@@ -49,6 +49,7 @@ from .exceptions import ConfigError, SecurityPolicyError
 from .git import git_executable
 from .revision_data import pull_request_revision, read_head_text
 from .trust import SAFE_GIT_REF_RE
+from .yaml_security import parse_secure_yaml
 
 MAX_GRAPH_FIELDS = 20_000
 MAX_GRAPH_EDGES = 100_000
@@ -147,11 +148,77 @@ def _literal_source_call(call: ast.AST) -> bool:
                and type(keyword.value.value) in {str, int} for keyword in call.keywords)
 
 
-# dbt's own adapter macros and dbt_utils never ref() a model by themselves, so a
-# call with literal arguments cannot hide a dependency. Other packages can.
-REF_FREE_MACRO_NAMESPACES = frozenset({"dbt", "dbt_utils"})
-MACRO_DEFINITION_RE = re.compile(r"{%-?\s*macro\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(")
-MACRO_DEPENDENCY_RE = re.compile(r"\b(?:ref|source|run_query|graph)\b")
+# This is deliberately not a Jinja interpreter. Only simple local macro blocks
+# whose output is scalar arithmetic/casts may qualify; packages can dispatch to
+# arbitrary project code and never qualify merely because of their namespace.
+MACRO_BLOCK_RE = re.compile(
+    r"{%-?\s*macro\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(([^()]*)\)\s*-?%}"
+    r"(.*?){%-?\s*endmacro\s*-?%}", re.DOTALL,
+)
+PURE_MACRO_SQL_NODES = frozenset({
+    exp.Add, exp.Sub, exp.Mul, exp.Div, exp.Mod, exp.Neg, exp.Paren,
+    exp.Cast, exp.DataType, exp.DataTypeParam, exp.Column, exp.Identifier, exp.Literal,
+})
+MAX_PURE_MACRO_BYTES = 16_384
+PureMacro = tuple[tuple[str, ...], str]
+
+
+def _pure_scalar_sql(sql: str) -> bool:
+    if len(sql.encode()) > MAX_PURE_MACRO_BYTES:
+        return False
+    try:
+        statements = sqlglot.parse(sql, error_level=sqlglot.ErrorLevel.RAISE)
+        return (len(statements) == 1 and statements[0] is not None
+                and all(type(node) in PURE_MACRO_SQL_NODES
+                        and not (isinstance(node, exp.DataType) and node.this == exp.DataType.Type.USERDEFINED)
+                        for node in statements[0].walk()))
+    except (SqlglotError, ValueError, TypeError, RecursionError):
+        return False
+
+
+def _macro_scalar_sql(body: str, arguments: dict[str, str]) -> str | None:
+    if len(body.encode()) > MAX_PURE_MACRO_BYTES:
+        return None
+    parts, cursor, size = [], 0, 0
+    for match in JINJA_RE.finditer(body):
+        expression = _jinja_expression(match.group())
+        if not isinstance(expression, ast.Name) or expression.id not in arguments:
+            return None
+        fragment = body[cursor:match.start()] + f"({arguments[expression.id]})"
+        size += len(fragment.encode())
+        if size > MAX_PURE_MACRO_BYTES:
+            return None
+        parts.append(fragment)
+        cursor = match.end()
+    sql = "".join((*parts, body[cursor:]))
+    if any(marker in sql for marker in ("{{", "{%", "{#")):
+        return None
+    return sql if _pure_scalar_sql(sql) else None
+
+
+def _ref_free_project_macros(macro_texts: list[str]) -> dict[str, PureMacro]:
+    """Qualify pure local leaves structurally, never by a dependency blacklist."""
+    macros, seen = {}, set()
+    for text in macro_texts:
+        text = re.sub(r"{#.*?#}", "", text, flags=re.DOTALL)
+        cursor = 0
+        for match in MACRO_BLOCK_RE.finditer(text):
+            if text[cursor:match.start()].strip():
+                return {}
+            cursor = match.end()
+            name, signature, body = match.groups()
+            if name in seen:
+                return {}  # Ambiguous definitions cannot establish a selected implementation.
+            seen.add(name)
+            parameters = tuple(part.strip() for part in signature.split(",")) if signature.strip() else ()
+            if (len(set(parameters)) != len(parameters)
+                    or any(not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", part) for part in parameters)):
+                continue
+            if _macro_scalar_sql(body, dict.fromkeys(parameters, "omniflow_parameter")) is not None:
+                macros[name] = (parameters, body)
+        if text[cursor:].strip():
+            return {}
+    return macros
 
 
 def _literal_argument(node: ast.AST) -> bool:
@@ -164,33 +231,46 @@ def _literal_argument(node: ast.AST) -> bool:
     return True
 
 
-def _ref_free_call(call: ast.AST, project_macros: frozenset[str]) -> bool:
+def _ref_free_call(call: ast.AST, project_macros: dict[str, PureMacro]) -> bool:
     """A literal-argument call that cannot add a model dependency of its own."""
-    if not isinstance(call, ast.Call):
+    if not isinstance(call, ast.Call) or not isinstance(call.func, ast.Name):
         return False
     if not all(_literal_argument(arg) for arg in call.args) or not all(
             keyword.arg is not None and _literal_argument(keyword.value) for keyword in call.keywords):
         return False
-    func = call.func
-    if isinstance(func, ast.Name):
-        return func.id == "config" or func.id in project_macros
-    return (isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name)
-            and func.value.id in REF_FREE_MACRO_NAMESPACES)
+    if call.func.id == "config":
+        return True
+    if call.func.id not in project_macros:
+        return False
+    parameters, body = project_macros[call.func.id]
+    if len(call.args) > len(parameters):
+        return False
+    values = dict(zip(parameters, call.args, strict=False))
+    for keyword in call.keywords:
+        if keyword.arg in values or keyword.arg not in parameters:
+            return False
+        values[keyword.arg] = keyword.value
+    if set(values) != set(parameters):
+        return False
+    arguments = {}
+    for name, value in values.items():
+        if _literal_source_call(value):
+            arguments[name] = "omniflow_source"  # Its nested ref is still collected below.
+        elif isinstance(value, ast.Constant) and type(value.value) in {str, int, float}:
+            arguments[name] = str(value.value)
+            if not _pure_scalar_sql(arguments[name]):
+                return False
+        else:
+            return False
+    return _macro_scalar_sql(body, arguments) is not None
 
 
-def _ref_free_project_macros(macro_texts: list[str]) -> frozenset[str]:
-    """Project macro names, only when no project macro can reach a model itself."""
-    if any(MACRO_DEPENDENCY_RE.search(text) for text in macro_texts):
-        return frozenset()
-    return frozenset(name for text in macro_texts for name in MACRO_DEFINITION_RE.findall(text))
-
-
-def _dbt_ref_names(sql: str, project_macros: frozenset[str] = frozenset()) -> set[str] | None:
+def _dbt_ref_names(sql: str, *, resolve_macros: Callable[[], dict[str, PureMacro]] | None = None) -> set[str] | None:
     """Extract literal refs, including SQL-comment dependencies, without rendering.
 
     Jinja comments are inert; SQL comments are not, because dbt uses comments
-    containing ref() to declare dependencies. config(), dbt/dbt_utils macros and
-    ref-free project macros with literal arguments add no dependency. Other
+    containing ref() to declare dependencies. Literal config() and structurally
+    qualified local scalar leaves add no hidden dependency. Other
     unsupported/dynamic template code cannot prove that no upstream dependency
     exists and returns None.
     """
@@ -204,13 +284,20 @@ def _dbt_ref_names(sql: str, project_macros: frozenset[str] = frozenset()) -> se
         if block.startswith("{#"):
             continue
         expression = _jinja_expression(block)
-        if expression is None:
+        if not isinstance(expression, ast.Call):
             return None
         for node in ast.walk(expression):
             if not isinstance(node, ast.Call):
                 continue
             if not _literal_source_call(node):
-                if _ref_free_call(node, project_macros):
+                if _ref_free_call(node, {}):
+                    continue
+                if (resolve_macros is not None and isinstance(node.func, ast.Name)
+                        and node.func.id not in {"ref", "source", "config"}
+                        and all(_literal_argument(arg) for arg in node.args)
+                        and all(keyword.arg is not None and _literal_argument(keyword.value)
+                                for keyword in node.keywords)
+                        and _ref_free_call(node, resolve_macros())):
                     continue
                 return None
             if node.func.id == "ref":
@@ -666,23 +753,56 @@ def _downstream_models(base_ref: str, changed: dict[str, str], dbt_paths: list[s
         return None
     candidates = sorted(path for path in listing if path.lower().endswith(".sql")
                         and "macros" not in Path(path).parts)
-    macro_files = sorted(path for path in listing if path.lower().endswith(".sql")
-                         and "macros" in Path(path).parts)
-    if len(candidates) + len(macro_files) > MAX_DBT_FILES:
+    macro_files = sorted(path for path in listing if path.lower().endswith(".sql") and path.startswith("macros/"))
+    if len(candidates) > MAX_DBT_FILES:
         return None
-    macro_texts = []
-    for path in macro_files:
+    project_macros: dict[str, PureMacro] | None = None
+
+    def resolve_macros() -> dict[str, PureMacro]:
+        nonlocal budget, project_macros
+        if project_macros is not None:
+            return project_macros
+        project_macros = {}
+        if len(candidates) + len(macro_files) > MAX_DBT_FILES:
+            return project_macros
+        # A pure-looking file is not evidence of the selected implementation
+        # unless the immutable root project actually uses these standard paths.
         try:
-            text = _git_show(base_ref, path, root=root, max_bytes=MAX_SQL_BYTES)
+            text = _git_show(base_ref, "dbt_project.yml", root=root, max_bytes=MAX_SQL_BYTES)
+            if text is None:
+                return project_macros
+            budget -= len(text.encode())
+            if budget < 0:
+                return project_macros
+            project = parse_secure_yaml(text, source="dbt_project.yml")
+            if (not isinstance(project, dict) or not isinstance(project.get("name"), str)
+                    or not project["name"] or project.get("config-version", 2) != 2
+                    or project.get("macro-paths", ["macros"]) != ["macros"]
+                    or project.get("model-paths", ["models"]) != ["models"] or "source-paths" in project):
+                return project_macros
+            ignore = _git_show(base_ref, ".dbtignore", root=root, max_bytes=MAX_SQL_BYTES)
+            if ignore is not None:
+                budget -= len(ignore.encode())
+                if budget < 0 or any(line.strip() and not line.startswith("#")
+                                     for line in ignore.splitlines()):
+                    return project_macros
         except (ConfigError, SecurityPolicyError):
-            return None
-        if text is None:
-            return None
-        budget -= len(text.encode())
-        if budget < 0:
-            return None
-        macro_texts.append(text)
-    project_macros = _ref_free_project_macros(macro_texts)
+            return project_macros
+        macro_texts = []
+        for path in macro_files:
+            try:
+                text = _git_show(base_ref, path, root=root, max_bytes=MAX_SQL_BYTES)
+            except (ConfigError, SecurityPolicyError):
+                return project_macros
+            if text is None:
+                return project_macros
+            budget -= len(text.encode())
+            if budget < 0:
+                return project_macros
+            macro_texts.append(text)
+        project_macros = _ref_free_project_macros(macro_texts)
+        return project_macros
+
     children: dict[str, list[str]] = defaultdict(list)
     for path in candidates:
         try:
@@ -694,7 +814,7 @@ def _downstream_models(base_ref: str, changed: dict[str, str], dbt_paths: list[s
         budget -= len(text.encode())
         if budget < 0:
             return None
-        references = _dbt_ref_names(text, project_macros)
+        references = _dbt_ref_names(text, resolve_macros=resolve_macros if path.startswith("models/") else None)
         if references is None:
             return None
         for name, source_path in changed.items():
