@@ -91,7 +91,7 @@ CANDIDATE_REASONS = frozenset({
     "invalid_git_inventory", "invalid_pr_revision", "invalid_snapshot_encoding", "missing_candidate_branch",
     "missing_pr_revision", "snapshot_limit_exceeded", "unsafe_git_entry", "unsafe_snapshot_path",
     "changed_during_validation", "verification_unavailable", "ambiguous_file_identity",
-    "non_omni_source_conflict", "non_omni_rule_conflict",
+    "non_omni_source_conflict", "non_omni_rule_conflict", "pr_change_not_synchronized",
 })
 ENUMS = {
     "validator": VALIDATORS, "type": TYPES, "issue_type": {"content", "dashboard_filter", "query"},
@@ -110,8 +110,9 @@ ENUMS = {
     },
     "operation": {"validation", "dbt_impact", "dbt_sync", "ai_repair", "ai_repair_beta"},
     "validation_scope": {"branch", "base"}, "state": {"new", "existing", "resolved", "improved"},
+    "method": {"pr_changed_files", "authored_yaml_snapshot"},
     "status": {"completed", "failed", "not_run", "disabled", "skipped", "passed", "unknown",
-               "verified", "unverified", "pending_recheck", "not_applicable", "success", "refused",
+               "verified", "unverified", "scope_empty", "pending_recheck", "not_applicable", "success", "refused",
                "proposed", "rolled_back", "manual_review_required", "available", "unavailable", "committed",
                "not_needed", "rollback_failed", "partial", "status_unknown", "timed_out", "running", "generated"},
     # Uploaded status/URLs belong to the workflow's current-run receipt, never
@@ -137,7 +138,7 @@ ENUMS = {
     "git_line_ending": LINE_ENDING_STYLES,
     "omni_line_ending": LINE_ENDING_STYLES,
     "blocked_by": VALIDATORS,
-    "diagnostics_reason": POLICY_REASONS | {"no_trusted_run_context", "snapshot_evidence_unavailable", "repository_report_unavailable"},
+    "diagnostics_reason": POLICY_REASONS | {"no_trusted_run_context", "snapshot_evidence_unavailable", "repository_report_unavailable", "no_findings_to_locate"},
     "validation_status": {"passed", "failed", "skipped", "incomplete"},
     "query_validation_status": {"disabled", "passed", "regression", "inconclusive"},
     "query_validation_mode": {"off", "report", "enforce"},
@@ -169,7 +170,7 @@ COUNTS = frozenset({
     "total_records", "total_exposures", "unmapped_dashboards", "coverage_gaps", "checks_completed",
     "checks_failed", "checks_not_run", "checks_disabled", "file_count", "changed_lines",
     "git_file_count", "omni_file_count", "git_only_count", "omni_only_count",
-    "excluded_file_count", "case_only_count", "directory_only_count", "suffix_only_count",
+    "excluded_file_count", "changed_file_count", "absent_file_count", "case_only_count", "directory_only_count", "suffix_only_count",
     "content_selector_count",
     "modified_file_count", "regressed_count", "improved_count", "unchanged_count", "prompt_set_count",
     "refreshes_completed", "refreshes_failed", "post_sync_validations_failed", "refreshed_models", "models_requested",
@@ -301,6 +302,10 @@ def _finding_message(issue: dict[str, Any]) -> str:
         return f"Omni API returned invalid JSON; validation could not complete. This is not a {noun} finding."
     if issue.get("type") == "candidate_verification_failed":
         reasons = {
+            "pr_change_not_synchronized": (
+                "A changed definition could not be matched to the corresponding Git revision. Check for an unsaved edit, "
+                "an unapplied addition or deletion, or YAML whose equivalence could not be established. PR impact is incomplete."
+            ),
             "non_omni_source_conflict": (
                 "A non-Omni file rule matches an authored Omni source. Narrow the trusted files.non_omni "
                 "rule; deployed model files and their dependencies cannot be excluded."

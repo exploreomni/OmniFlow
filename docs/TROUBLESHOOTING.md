@@ -40,6 +40,13 @@ For configuration failures, use the safe `config_key`, `expected_type`, `source_
 
 ### Candidate Verification: Git and Omni Snapshots Differ
 
+For an ordinary model/content PR, the starter checks the files the PR touched.
+The base commit corresponds to the shared model; the PR head corresponds to its
+Omni branch. An unrelated authored file outside that change does not by itself
+block this check. The validators still evaluate both live scopes. See
+[Source verification](CONFIGURATION.md#source-verification) for stronger checks
+that require the entire model.
+
 In default strict mode, `candidate_verification_failed` with exit code `2` means OmniFlow could not establish
 that it is validating the proposed Git revision. It does **not** establish a model
 or dashboard defect. Check **Check Execution**: checks marked `not_run` have not
@@ -56,9 +63,10 @@ for reviewed ancillary files. No mismatch paths or rule text are made public.
 
 | Reason | What to check |
 | --- | --- |
+| `pr_change_not_synchronized` | **The changed Omni file is not synchronized.** Check whether the report names the base or branch scope. Confirm the saved Omni version has the intended edit, addition, or deletion for that Git revision. On the PR branch, check the shared model's **Model → Advanced → Webhook Deliveries** for that commit. Resolve a failed sync, wait for one in progress, then rerun the PR. This is an incomplete comparison. |
 | `file_inventory_mismatch` | Check the exact trusted `model_path`, initial model export, and Git/Omni synchronization for that scope. Git-only generic YAML is ignored automatically; recognized Omni sources and generic YAML returned by Omni still require matching Git counterparts. |
 | `ambiguous_file_identity` | Inspect the private path examples. Repeated view basenames across databases/schemas are valid; retain canonical view identity or authored `catalog`/`schema`/`table_name` qualification. Resolve duplicate topic names, model/global relationships definitions, or duplicate export copies. Do not rename valid schema-scoped views. Identical bytes cannot disambiguate identity. |
-| `content_mismatch` | File identities match, but bytes differ. Save/synchronize the intended Omni branch or base and its corresponding PR Git revision. Comments and whitespace still count as byte differences. |
+| `content_mismatch` | A required pair differs under whole-model verification. Follow the difference and fix in the report, then synchronize the intended Git and Omni versions. The ordinary changed-file check accepts safe representation differences when equivalence is proven. |
 | `changed_during_validation` | The snapshot changed during the checks. Let synchronization finish, then rerun against the current PR revision. |
 | `api_snapshot_unavailable` / `git_snapshot_unavailable` | Restore API/repository access or availability and complete Git history before rerunning. |
 | `non_omni_source_conflict` | A classification rule covers a known Omni/control file or a source returned by Omni. Narrow/remove the trusted rule; do not suppress the source. |
@@ -71,8 +79,8 @@ For example, Git `SCHEMA/orders.view.yaml` can match API `Reporting/orders.view`
 when the typed name is unique in both complete inventories. Repeated view filenames
 can match exact authored paths, canonical view filenames, or unambiguous matching
 catalog/schema/table qualification. A directory label alone is not assumed to be a
-database or schema. Filename capitalization and spaces stay significant; all authored
-source contents must still match exactly.
+database or schema. Filename capitalization and spaces stay significant. Source
+contents are compared within the effective verification scope.
 Generic API-authored filenames require exact basename counterparts;
 unknown names and repeated suffixes do not acquire guessed aliases.
 

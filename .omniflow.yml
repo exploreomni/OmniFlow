@@ -11,11 +11,14 @@ validation:
   # NOT a verified pass. Security, malformed evidence and other blockers remain;
   # an enabled breaking-change hold prevents advisory downgrade.
   mode: strict
+  # For model/content regression checks, verify the Omni files touched by this
+  # PR against Git. Use full_model to require the whole authored model.
+  source_verification: pr_changes
 
 # Optional reviewed ancillary classification; NOT required for ordinary tooling
 # YAML. Automatic routing uses recognized Omni source families, and candidate
 # verification ignores Git-only generic YAML. Generic YAML returned by Omni's
-# authored API is still a source and must match its Git counterpart exactly.
+# authored API remains an Omni source.
 # Patterns are repository-relative, not relative to model_path. A rule cannot
 # exclude a known Omni source, an API-returned source, or a control/policy file.
 # Matching files must be absent from the corresponding Omni snapshot on each side.
@@ -26,7 +29,7 @@ validation:
 #       reason: Build metadata not authored by Omni
 
 contracts:
-  enabled: true
+  enabled: false  # Set true to add downstream contract checks to the starter gate.
   # Optional overrides: these safety gates already default to true.
   # fail_on:
   #   deleted_referenced_fields: true
@@ -67,7 +70,7 @@ checks:
     # fail_on_warnings: true
 
   semantic_lint:
-    enabled: true
+    enabled: false  # Set true to add lint rules to the starter gate.
     # Verified regression PRs compare ordinary lint debt with the base too.
     # New/additional findings follow rule severity; security-scope rules never
     # receive an existing-debt waiver. Non-PR health checks remain strict.

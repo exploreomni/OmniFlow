@@ -5,7 +5,13 @@ from typing import Any
 from ..git import tool_revision
 from ..reporting.finding_groups import group_findings
 from ..reporting.issue_policy import is_blocking
-from ..reporting.recovery import diagnostic_guide, first_step, mismatch_description
+from ..reporting.recovery import (
+    SOURCE_SYNC_REASONS,
+    diagnostic_guide,
+    first_step,
+    has_matched_difference,
+    mismatch_description,
+)
 from ..repository_diagnostics import repository_diagnostic_availability
 
 
@@ -15,15 +21,18 @@ def public_annotation_lines(issues: list[dict[str, Any]], *, limit: int) -> list
     selected = []
     source = {"tool_revision": tool_revision()}
     for finding, count in groups[:limit]:
-        if finding.get("candidate_reason") == "content_mismatch":
+        reason = finding.get("candidate_reason")
+        if reason in SOURCE_SYNC_REASONS:
             guide = diagnostic_guide(finding, source)
-            message = f"Content mismatch. {mismatch_description(finding)} Fix: {first_step(finding)} [OF-CANDIDATE-CONTENT]"
-            if repository_diagnostic_availability().get("candidate_summary_written") is True:
-                message += " Open this run’s Summary for the filename and line."
+            title = finding["title"].rstrip(".")
+            message = f"{title}. {mismatch_description(finding)} Fix: {first_step(finding)} [{finding['diagnostic_code']}]"
+            if has_matched_difference(finding) and repository_diagnostic_availability().get("candidate_summary_written") is True:
+                message += " Open this run’s Summary for available file and line details."
             elif guide:
-                message += f" Find the filename and line: {guide}"
+                label = "Find the filename and line" if reason == "content_mismatch" else "Troubleshoot the changed files"
+                message += f" {label}: {guide}"
             selected.append({"severity": finding.get("severity"), "blocking": is_blocking(finding),
-                             "candidate_reason": "content_mismatch", "message": message})
+                             "candidate_reason": reason, "message": message})
             continue
         qualifiers = [finding.get(key) for key in (
             "diagnostic_code", "context_reference", "validator", "rule_id", "validation_scope", "state",
@@ -74,7 +83,7 @@ def annotation_lines(issues: list[dict[str, Any]]) -> list[str]:
             if type(issue.get("line")) is int and issue["line"] > 0:
                 properties.append(f"line={issue['line']}")
         message = _escape_data(issue.get("message") or issue.get("summary") or "OmniFlow issue")
-        if is_blocking(issue) and issue.get("candidate_reason") != "content_mismatch":
+        if is_blocking(issue) and issue.get("candidate_reason") not in SOURCE_SYNC_REASONS:
             message = f"Blocks under configured policy: {message}"
         elif issue.get("blocking") is False:
             message = f"Does not block under configured policy: {message}"

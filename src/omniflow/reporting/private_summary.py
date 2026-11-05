@@ -27,7 +27,8 @@ def write_private_candidate_summary(projected: dict) -> bool:
         for finding in projected.get("issues", []):
             location = candidate_location_lines(finding, projected)
             if location:
-                cards.extend([*location, "", mismatch_description(finding), "", "**Fix:** " + first_step(finding), ""])
+                heading = "PR change not synchronized" if finding.get("candidate_reason") == "pr_change_not_synchronized" else "Content mismatch"
+                cards.extend([f"## {heading}", "", *location, "", mismatch_description(finding), "", "**Fix:** " + first_step(finding), ""])
                 if len(cards) >= 30:
                     break
         if not cards:
@@ -39,7 +40,7 @@ def write_private_candidate_summary(projected: dict) -> bool:
             info = os.fstat(stream.fileno())
             if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
                 return False
-            stream.write("\n".join(["## Content mismatch", "", *cards, ""]))
+            stream.write("\n".join([*cards, ""]))
         return True
     except (OSError, RuntimeError):
         # Summary delivery is optional and cannot affect the validation result.

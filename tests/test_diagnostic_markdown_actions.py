@@ -89,6 +89,25 @@ def test_final_candidate_recheck_interruption_survives_public_projection():
     assert "`candidate`: `partial`" in markdown
     assert "incomplete reason `final_recheck_not_run`" in markdown
     assert "blocked by `content`" in markdown
+
+
+@pytest.mark.parametrize("proof,expected", [
+    ({"method": "pr_changed_files", "status": "verified", "changed_file_count": 2,
+      "file_count": 1, "absent_file_count": 1}, ["changed PR files only", "Changed files: `2`", "expected absent: `1`"]),
+    ({"method": "pr_changed_files", "status": "scope_empty", "changed_file_count": 0, "file_count": 0,
+      "absent_file_count": 0}, ["zero Omni files in this model", "live validator results"]),
+    ({"method": "authored_yaml_snapshot", "status": "verified", "file_count": 1253},
+     ["full authored model", "evaluated side: `1253`"]),
+])
+def test_report_explains_only_the_evaluated_source_scope(proof, expected):
+    from omniflow.diagnostics import public_diagnostic
+
+    safe = public_diagnostic(report(model_reports=[{"candidate_verification": {
+        **proof, "snapshot_digest": "PRIVATE", "private_path": "PRIVATE",
+    }}]))
+    assert safe["model_reports"][0]["candidate_verification"] == proof
+    markdown = render_markdown_report(safe)
+    assert all(text in markdown for text in expected) and "PRIVATE" not in markdown
     assert "`running`" not in markdown
 
 
@@ -269,3 +288,34 @@ def test_mismatch_names_and_lines_are_private_but_the_actual_fix_is_shared(monke
     monkeypatch.setattr(annotations, "repository_diagnostic_availability",
                         lambda: dict(metadata, candidate_summary_written=True))
     assert "Open this run’s Summary" in "\n".join(annotations.public_annotation_lines(image["issues"], limit=5))
+
+
+@pytest.mark.parametrize("evidence,detail,fix,paired", [
+    ({"contents_comparison": "different", "difference_class": "authored_text_changed",
+      "git_only_count": 0, "omni_only_count": 0}, "beyond comments", "Confirm the intended definition", True),
+    ({"contents_comparison": "not_compared", "git_only_count": 1, "omni_only_count": 0},
+     "no matching file in the Omni branch", "added or renamed files", False),
+    ({"contents_comparison": "not_compared", "git_only_count": 0, "omni_only_count": 2},
+     "Omni branch has 2 files", "deletions and renames", False),
+])
+def test_changed_source_reports_an_incomplete_comparison_with_evidence_specific_fix(evidence, detail, fix, paired):
+    from omniflow.diagnostics import public_diagnostic
+    from omniflow.github.annotations import public_annotation_lines
+    from omniflow.reporting.markdown_report import candidate_location_lines
+    from omniflow.reporting.notification import render_pr_comment
+
+    raw = report(issues=[dict(evidence, validator="candidate", type="candidate_verification_failed",
+                              candidate_reason="pr_change_not_synchronized", severity="error", validation_scope="branch",
+                              blocking=True)], repository_diagnostics={"status": "generated", "diagnostics_reason": "repository_verified"})
+    safe = public_diagnostic(raw)
+    issue = dict(safe["issues"][0], candidate_evidence_kind="observations_not_correspondence", source_revision="head",
+                 git_revision="b" * 40, candidate_samples=[{"git_path": "omni/sensitive.view.yaml", "omni_path": "sensitive.view",
+                     "comparison": "different", "pairing": "authored_identity", "first_differing_line": 4}])
+    private = dict(safe, diagnostic_audience="repository", issues=[issue])
+    assert bool(candidate_location_lines(issue, private)) is paired
+    private_header = render_markdown_report(private).split("**How to resolve it**")[0]
+    assert ("line 4" in private_header) is paired
+    args = {"head_sha": "b" * 40, "run_url": "https://github.com/test/demo/actions/runs/123"}
+    for surface in (render_pr_comment(private, **args), "\n".join(public_annotation_lines(safe["issues"], limit=3))):
+        assert detail in surface and fix in surface and "OF-PR-CHANGE-NOT-SYNCHRONIZED" in surface
+        assert "sensitive.view" not in surface and "line 4" not in surface and "OF-CANDIDATE-CONTENT" not in surface

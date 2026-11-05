@@ -5,7 +5,7 @@ Start with the primary blocker on the PR or the first failed setup step in Actio
 <a id="guide-file-contents"></a>
 ## A saved model file differs from Git
 
-`OF-CANDIDATE-CONTENT` means OmniFlow found a text difference in a matched file. Start with the **Fix** in the annotation. For example, if Git is missing a final newline present in Omni, add that newline to the Git file, commit it, and rerun after synchronization. If the authored YAML differs, review both definitions before choosing the intended version.
+`OF-CANDIDATE-CONTENT` describes a mismatch found by the full-model check, including older Action pins that compared the whole inventory for ordinary PRs. Start with the **Fix** in the annotation. With current PR source verification, safely provable representation differences such as a final newline alone can be equivalent. A materially unsynchronized changed file has a separate code, [`OF-PR-CHANGE-NOT-SYNCHRONIZED`](#guide-compare-branches). If the authored definition differs, review both copies before choosing the intended version.
 
 For an eligible private run, open **Actions → the failed run → Summary → Content mismatch**. The card identifies the matched Git and Omni files and the first differing line. For an internal or public repository, or if the card is unavailable, use the local command below. The filenames and source text stay out of shareable annotations. If the run stopped at file 379 of 1,253, 378 matched byte for byte and 874 still need comparison. That run establishes **at least one** mismatch.
 
@@ -21,7 +21,7 @@ omniflow candidate diagnose \
 
 Set `REPOSITORY` to the GitHub owner/repository, `PR_NUMBER` to the PR number, and both SHA variables to full 40-character commits from the failed event. Use `--scope base` for a base-scope finding. With multiple model registrations, add `--model-path "exact/registered directory"`. If your workflow uses a custom policy, pass that same repository-relative path with `--config`. Read the policy from the trusted base.
 
-The command compares the currently saved Omni model with immutable Git objects for an open, same-repository PR targeting the default branch. It accepts version 1 registrations. For a version 2 environment registry, set `OMNIFLOW_ENVIRONMENT` to the registered environment and use that environment's credential and `OMNI_BASE_URL`. The diagnostic checks the live model's Git configuration. If the PR moved, start a fresh validation run and use its commits. For a non-default target or an unresolved environment binding, follow the governed workflow for that environment and give the maintainer its run reference. An older live Omni state cannot be reconstructed from a Git SHA.
+Use this full-model diagnostic to investigate a full-model comparison. It compares the currently saved Omni model with immutable Git objects for an open, same-repository PR targeting the default branch. A difference outside the PR's changed files can appear here even when the changed-file gate passes. It accepts version 1 registrations. For a version 2 environment registry, set `OMNIFLOW_ENVIRONMENT` to the registered environment and use that environment's credential and `OMNI_BASE_URL`. The diagnostic checks the live model's Git configuration. If the PR moved, start a fresh validation run and use its commits. For a non-default target or an unresolved environment binding, follow the governed workflow for that environment and give the maintainer its run reference. An older live Omni state cannot be reconstructed from a Git SHA.
 
 Read the paired Git and Omni paths, the first differing line, and the classification on that workstation. Review the intended change in the corresponding file. A formatting classification still requires judgment when the YAML contains SQL block text. Save or sync the intended definition in the correct direction. Then validate the current commit. **Recovered** means candidate verification completes for that scope. Other checks can now report genuine regressions.
 
@@ -31,6 +31,8 @@ Internal and public repositories receive a shareable report without model file p
 
 <a id="guide-compare-branches"></a>
 ## Omni and Git selected different files, branches, or revisions
+
+**`OF-PR-CHANGE-NOT-SYNCHRONIZED` — A changed Omni file does not match this PR revision.** If a topic was added, check that the shared model lacks it and the PR's Omni branch contains the saved definition. For a deleted topic, check the opposite. For an edit, check the definition on the scope named in the finding against the corresponding Git commit. Verify synchronization for that commit, then rerun. Recovery means the changed-file check completes and the validators can compare actual PR impact. Other model or dashboard findings may then require separate action.
 
 1. Check whether the finding is for the PR head or the target branch. For `OF-CANDIDATE-BRANCH` or `OF-BRANCH-NOT-FOUND`, verify that the PR has a corresponding saved Omni branch for the registered model.
 2. For `OF-CANDIDATE-FILES`, inspect Git-only and Omni-only counts. Compare the exact registered model path and authored file names on both sides. For ambiguous identities, preserve database and schema qualification on views. Topic group folders alone do not identify a view. For `OF-CANDIDATE-DRIFT`, finish pending changes and synchronization before starting another run.

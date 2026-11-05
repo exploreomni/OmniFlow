@@ -1022,14 +1022,17 @@ def _run_context(
         or (config.model_validation.enabled and config.model_validation.fail_on_new_only)
     )
     query_comparison = not strict_health and is_pull_request_event() and config.query_validation.enabled
-    if context.environment or regression_pr or query_comparison:
+    full_pr_audit = not strict_health and is_pull_request_event() and (
+        config.validation.source_verification == "full_model" or config.breaking_change_hold.enabled
+    )
+    if context.environment or regression_pr or query_comparison or full_pr_audit:
         progress.states["candidate"] = {"validator": "candidate", "status": "not_run"}
     try:
         return _run_context_steps(
             config=config, context=context, output_dir=output_dir, api_key=api_key,
             comparison_base_yaml_dir=comparison_base_yaml_dir, changed_files=changed_files,
             enforce_breaking_hold=enforce_breaking_hold, progress=progress,
-            strict_health=strict_health, regression_pr=regression_pr,
+            strict_health=strict_health, regression_pr=regression_pr, full_pr_audit=full_pr_audit,
         )
     except Exception as exc:
         progress.fail(exc)
@@ -1065,7 +1068,7 @@ def _run_context_steps(
     *, config, context: ModelContext, output_dir: Path, api_key: str | None,
     comparison_base_yaml_dir: Path | None, changed_files: list[str] | None,
     enforce_breaking_hold: bool, progress: ValidationProgress,
-    strict_health: bool, regression_pr: bool,
+    strict_health: bool, regression_pr: bool, full_pr_audit: bool,
 ) -> tuple[dict[str, Any], int]:
     if context.environment and (config.breaking_change_hold.enabled or config.dbt_sync.enabled):
         raise SecurityPolicyError(
@@ -1091,31 +1094,39 @@ def _run_context_steps(
         prepared_ai_sets = prepare_ai_eval_prompt_sets(client, context.model_id, config.ai_eval.prompt_sets)
         ai_comparison = bool(prepared_ai_sets)
         progress.states["ai_eval"]["status"] = "not_run"
-    verify_provenance = bool(context.environment) or regression_pr or query_comparison or ai_comparison
+    verify_both_sides = regression_pr or query_comparison or ai_comparison or full_pr_audit
+    verify_provenance = bool(context.environment) or verify_both_sides
+    scoped_regression = regression_pr and not (full_pr_audit or query_comparison or ai_comparison)
     baseline_proof = None
+    head_proof = None
+    proof_options = {}
     if verify_provenance:
         from .candidate import CandidateVerificationError
 
         progress.begin("candidate")
         context.candidate_verification = {"status": "unverified"}
         try:
+            if scoped_regression:
+                # Routing already caches the immutable three-dot PR diff. A caller's
+                # routing hint or an empty hold-policy list cannot establish its scope.
+                proof_options["changed_paths"] = tuple(get_changed_files())
             proofs, verification_errors = {}, []
             # Inspect both sides before considering advisory handling. A sync
             # mismatch on one side must not conceal an exclusion conflict on
             # the other side.
-            for side in (("base", "head") if regression_pr or query_comparison or ai_comparison else ("head",)):
+            for side in (("base", "head") if verify_both_sides else ("head",)):
                 try:
                     proofs[side] = verify_with_retry(
-                        client, context, revision_side=side, non_omni_rules=config.files.non_omni,
+                        client, context, revision_side=side, non_omni_rules=config.files.non_omni, **proof_options,
                     )
                 except CandidateVerificationError as exc:
                     verification_errors.append(exc)
             if verification_errors:
                 raise next((error for error in verification_errors
                             if error.candidate_reason not in SYNC_REASONS), verification_errors[0])
-            context.candidate_verification = proofs["head"]
+            head_proof = proofs["head"]
             # Completion requires the second sample after every enabled check.
-            context.candidate_verification["status"] = "pending_recheck"
+            context.candidate_verification = dict(head_proof, status="pending_recheck")
             baseline_proof = proofs.get("base")
         except CandidateVerificationError as exc:
             if exc.candidate_reason in SYNC_REASONS:
@@ -1372,15 +1383,15 @@ def _run_context_steps(
 
     if verify_provenance:
         progress.begin("candidate")
-        before = dict(context.candidate_verification, status="verified")
         final_proofs, final_errors = {}, []
-        for side, prior in (("head", before), ("base", baseline_proof)):
+        for side, prior in (("head", head_proof), ("base", baseline_proof)):
             if prior is None:
                 continue
             try:
                 final_proofs[side] = verify_with_retry(
                     client, context, revision_side=side, non_omni_rules=config.files.non_omni,
                     retry=False,  # Observed final drift must never be retried away.
+                    **proof_options,
                 )
                 if prior != final_proofs[side]:
                     error = CandidateVerificationError("changed_during_validation")

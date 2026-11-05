@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Sequence
 from typing import Any
 
 from .candidate import CandidateVerificationError, verify_candidate
@@ -10,16 +11,19 @@ from .candidate import CandidateVerificationError, verify_candidate
 # Unsafe sources, ambiguous identities and exclusion conflicts remain hard errors.
 SYNC_REASONS = frozenset({
     "file_inventory_mismatch", "content_mismatch", "missing_candidate_branch",
-    "changed_during_validation",
+    "changed_during_validation", "pr_change_not_synchronized",
 })
 
 
 def verify_with_retry(client: Any, context: Any, *, revision_side: str = "head",
-                      non_omni_rules: tuple = (), retry: bool = True) -> dict:
+                      non_omni_rules: tuple = (), retry: bool = True,
+                      changed_paths: Sequence[str] | None = None) -> dict:
     """One bounded synchronization retry, never an unbounded CI polling loop."""
     kwargs = {"revision_side": revision_side}
     if non_omni_rules:
         kwargs["non_omni_rules"] = non_omni_rules
+    if changed_paths is not None:
+        kwargs["changed_paths"] = changed_paths
     try:
         return verify_candidate(client, context, **kwargs)
     except CandidateVerificationError as exc:

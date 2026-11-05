@@ -12,6 +12,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from .artifact_identity import ArtifactIdentityError, identity_digest, match_artifacts
+from .candidate_change_scope import equivalent, scope_digest, select_scope, unproven_absence
 from .candidate_difference import difference_details, shareable_difference_fields
 from .exceptions import ConfigError, OmniFlowError, exception_diagnostic
 from .file_scope import FileScopeError, NonOmniRule, excluded_semantic_paths
@@ -83,6 +84,7 @@ def _bind_samples(exc: CandidateVerificationError, *, sha: str, model_id: str, b
 
 def verify_candidate(
     client: Any, context: Any, *, revision_side: str = "head", non_omni_rules: Sequence[NonOmniRule] = (),
+    changed_paths: Sequence[str] | None = None,
 ) -> dict[str, Any]:
     """Compare complete authored semantic snapshots without checking out PR code.
 
@@ -90,7 +92,8 @@ def verify_candidate(
     This is sampled content equality, not an atomic validation/revision lock.
     """
     try:
-        return _verify_snapshot(client, context, revision_side=revision_side, non_omni_rules=non_omni_rules)
+        return _verify_snapshot(client, context, revision_side=revision_side, non_omni_rules=non_omni_rules,
+                                changed_paths=changed_paths)
     except OmniFlowError as exc:
         exc.validation_scope = "base" if revision_side == "base" else "branch"
         exc.diagnostic_context["validation_scope"] = exc.validation_scope
@@ -103,6 +106,7 @@ def _verify_snapshot(
     client: Any, context: Any, *, revision_side: str, non_omni_rules: Sequence[NonOmniRule] = (),
     local_diagnosis_revision: tuple[str, str] | None = None,
     local_preview: Callable[[str, str, dict], None] | None = None,
+    changed_paths: Sequence[str] | None = None,
 ) -> dict[str, Any]:
     if revision_side not in {"head", "base"}:
         raise CandidateVerificationError("invalid_pr_revision")
@@ -140,7 +144,7 @@ def _verify_snapshot(
             raise
         remote = True
     expected = _semantic_inventory(entries, model_path, include_unrecognized=True)
-    if not expected:
+    if not expected and changed_paths is None:
         raise CandidateVerificationError("empty_git_snapshot")
 
     try:
@@ -156,7 +160,8 @@ def _verify_snapshot(
     # Keep the complete inventories through path, type, size and collision
     # validation. Rules cannot erase malformed evidence or real Omni sources.
     try:
-        identity_index(expected)
+        if changed_paths is None:
+            identity_index(expected)
     except AmbiguousModelPath:
         raise CandidateVerificationError("ambiguous_file_identity", **counts) from None
     try:
@@ -166,8 +171,16 @@ def _verify_snapshot(
     if excluded:
         expected = {path: entry for path, entry in expected.items() if path not in excluded}
     expected = _source_inventory(expected, actual)
-    counts["git_file_count"] = len(expected)
-    if not expected:
+    scope = None
+    if changed_paths is not None:
+        scope = select_scope(changed_paths, model_path, expected, actual, payload)
+        expected, actual = scope.git, scope.api
+        try:
+            identity_index(expected)
+        except AmbiguousModelPath:
+            raise CandidateVerificationError("ambiguous_file_identity") from None
+    counts.update(git_file_count=len(expected), omni_file_count=len(actual))
+    if not expected and scope is None:
         raise CandidateVerificationError("empty_git_snapshot", **counts)
     # Read only immutable Git objects, binding every returned byte to the tree's
     # blob hash before using authored qualification to establish correspondence.
@@ -202,7 +215,7 @@ def _verify_snapshot(
             raise CandidateVerificationError("incomplete_git_snapshot")
         git_files[path] = text
     omni_files = {path: raw.decode("utf-8") for path, raw in actual.items()}
-    view_names = normalize_api_view_names(
+    view_names = scope.view_names if scope is not None else normalize_api_view_names(
         payload["viewNames"], omni_files, parse_contents=False,
     ) if "viewNames" in payload else None
     try:
@@ -224,21 +237,37 @@ def _verify_snapshot(
         samples = [{"git_path": left, "omni_path": right, "comparison": "not_compared", "pairing": pairing}
                    for left, right, pairing in pairs[:MAX_CANDIDATE_SAMPLES]]
         raise _bind_samples(CandidateVerificationError(
-            "file_inventory_mismatch", candidate_samples=samples, **counts,
+            "pr_change_not_synchronized" if scope is not None else "file_inventory_mismatch",
+            candidate_samples=samples, **counts,
             candidate_sample_count=len(samples), candidate_sample_omitted_count=len(pairs) - len(samples),
             compared_file_count=0,
         ), sha=sha, model_id=context.model_id, branch_id=branch_id, comparison="not_compared")
+    if scope is not None:
+        # A survivor with a coincidentally unique basename cannot prove which
+        # previously colliding view was removed. Never rely on identity-by-bytes.
+        def other_inventory() -> set[str]:
+            opposite = pull_request_revision("base" if revision_side == "head" else "head")
+            if opposite is None or opposite[1] != repository:
+                raise CandidateVerificationError("invalid_pr_revision")
+            try:
+                other_tree = _local_tree(opposite[0], root=root)
+            except _GitUnavailable:
+                other_tree = _remote_tree(opposite[1], opposite[0])
+            return set(_semantic_inventory(other_tree, model_path, include_unrecognized=True))
+        if unproven_absence(scope, correspondence.pairing_methods, other_inventory):
+            raise CandidateVerificationError("pr_change_not_synchronized", **counts)
     digest = hashlib.sha256()
-    for compared_count, (path, text) in enumerate(sorted(git_files.items()), start=1):
+    to_compare = (git_files if scope is None else {p: t for p, t in git_files.items() if p in scope.touched})
+    for compared_count, (path, text) in enumerate(sorted(to_compare.items()), start=1):
         raw = _utf8(text)
         api_path = correspondence.pairs[path]
-        if raw != actual[api_path]:
+        if raw != actual[api_path] and (scope is None or not equivalent(text, omni_files[api_path])):
             sample = {"git_path": path, "omni_path": api_path,
                       "comparison": "different", "pairing": "authored_identity"}
             detail = difference_details(text, omni_files[api_path])
             sample.update(detail)
             error = CandidateVerificationError(
-                "content_mismatch", **counts,
+                "pr_change_not_synchronized" if scope is not None else "content_mismatch", **counts,
                 candidate_samples=[sample],
                 candidate_sample_count=1, candidate_sample_omitted_count=0, compared_file_count=compared_count,
             )
@@ -249,6 +278,15 @@ def _verify_snapshot(
             raise _bind_samples(error, sha=sha, model_id=context.model_id, branch_id=branch_id, comparison="different")
         name = path.encode("utf-8")
         digest.update(len(name).to_bytes(8, "big") + name + len(raw).to_bytes(8, "big") + raw)
+    if scope is not None:
+        return {
+            "status": "verified" if scope.touched else "scope_empty", "method": "pr_changed_files",
+            f"{revision_side}_sha": sha, "file_count": len(to_compare), "changed_file_count": len(scope.touched),
+            "absent_file_count": len(scope.touched - git_files.keys()),
+            "scope_digest": scope_digest(scope, correspondence.pairs, sha=sha, side=revision_side,
+                                         model_path=model_path, model_id=context.model_id, branch_id=branch_id),
+            "identity_digest": identity_digest(correspondence.pairs, omni_view_names=view_names),
+        }
     proof = {
         "status": "verified", "method": "authored_yaml_snapshot", f"{revision_side}_sha": sha,
         "file_count": len(expected), "snapshot_digest": digest.hexdigest(),

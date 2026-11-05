@@ -74,16 +74,14 @@ Rules:
 
 ## Required Policy
 
-Copy the complete canonical [`.omniflow.yml`](../.omniflow.yml) into the customer repository root. It is the shipped policy template, not `.github/workflows/omniflow.yml`. The template enables the main safety checks and explicitly selects regression gating for both model and content validation; optional integrations and label filters remain commented. This excerpt shows key settings, not the complete installation template:
+Copy the complete canonical [`.omniflow.yml`](../.omniflow.yml) into the customer repository root. The starter policy selects model and content regression checks and explicitly disables optional lint and downstream contracts. Existing installations use the settings on their own trusted base branch. This excerpt shows the key settings:
 
 ```yaml
+validation:
+  mode: strict
+  source_verification: pr_changes
 contracts:
-  fail_on:
-    deleted_referenced_fields: true
-    renamed_referenced_fields: true
-    referenced_field_type_changes: true
-    referenced_join_cardinality_changes: true
-    coverage_gaps: true
+  enabled: false
 
 checks:
   content_validation:
@@ -91,6 +89,8 @@ checks:
   model_validation:
     fail_on_new_only: true
     fail_on_warnings: false
+  semantic_lint:
+    enabled: false
 
 security:
   redaction_level: standard
@@ -117,11 +117,10 @@ policy and model-registry files remain separate trusted controls. Candidate/base
 verification also ignores Git-only generic YAML automatically, so no ancillary
 rule is needed for ordinary tooling files.
 
-The API is not filtered by that Git routing rule. When Omni returns a generic
-YAML file in its authored inventory, the corresponding Git file is retained and
-verified exactly, including its content. Unsupported API formats, missing source
-counterparts, ambiguous aliases, unsafe paths and real byte mismatches still
-cannot produce a verified pass.
+When full-model verification is required, a generic YAML file returned in Omni's
+authored inventory also needs a Git counterpart. In either verification mode,
+unsafe evidence or an unresolved identity needed for that comparison prevents a
+verified result.
 
 **Limitation:** filename-only routing cannot discover a custom generic API-authored
 file when that file is the PR's only change. Prefer standard native export names
@@ -166,6 +165,22 @@ Merge rules into the trusted base through review before relying on them. Propose
 PR-head policy cannot hide its own changes. Public diagnostics expose bounded
 counts and fixed conflict reasons, never the rule's free text or matched paths.
 
+## Source verification
+
+`validation.source_verification` controls **which authored files must correspond** before an ordinary model/content regression check may attribute findings to the PR. The validators still run against the selected model and its visible content on both sides.
+
+| Setting or requirement | What OmniFlow verifies |
+| --- | --- |
+| `pr_changes` (default) | Within each registered model, check the Omni artifacts touched by the PR. Compare Git base with the shared Omni model, and Git head with the selected Omni branch. Check again after validation. |
+| `full_model` | Check the complete authored model on each required side, including files the PR did not change. This stronger check requires matching authored bytes. |
+| Query-result validation, AI evaluation or a breaking-change hold/readiness check requiring full source evidence | Use whole-model verification even when the configured setting is `pr_changes`. Nonregression environment validation also retains its whole-model check. |
+
+For example, if a topic was added, Git should contain it only at the head and Omni should expose it only on the PR branch. A deletion reverses those expectations. A move or change uses the governed artifact identity, including database/schema qualification for repeated view names. Supported representation differences such as a final newline, line endings or proven YAML-only formatting do not change the authored definition. A SQL block scalar, value, field reference or join expression can change meaning and needs matching evidence.
+
+An unrelated file's drift alone does not block a `pr_changes` comparison. If a changed file is missing, unexpectedly present, materially different or cannot be identified safely on the required side, the result is **Incomplete**. Check the indicated base or branch and synchronize the intended change. If source verification succeeds, the independent validator comparison can still find new errors, increased occurrences or worsened severity. Unchanged, identity-matched findings are reported under the existing new-only policy.
+
+Use `full_model` explicitly when policy calls for the consistency of the entire authored model at the evaluated commits. Source locations in private reports are best effort and require separate verified evidence before they can be displayed.
+
 ## Enforcement Mode
 
 `validation.mode` defaults to `strict`. Normal regression policy already permits
@@ -177,7 +192,7 @@ validation:
 ```
 
 `advisory` is an explicit onboarding choice for ordinary candidate synchronization
-gaps only: `file_inventory_mismatch`, `content_mismatch`,
+gaps only: `file_inventory_mismatch`, `content_mismatch`, `pr_change_not_synchronized`,
 `missing_candidate_branch`, or `changed_during_validation`. When eligible and no
 other hard blocker exists, the run exits `0` with `policy_decision: advisory`,
 `decision_status: incomplete`, and `validation_complete: false`. Available
@@ -201,7 +216,7 @@ the branch.
 
 ## Contract Gates
 
-`contracts.enabled` defaults to `true`. The following gates also default to `true`:
+The starter file explicitly sets `contracts.enabled: false`. Existing custom policies that omit the key retain their prior default of `true`. When contracts are enabled, the following gates default to `true`:
 
 | Setting under `contracts.fail_on` | Behavior |
 | --- | --- |
@@ -239,9 +254,9 @@ Standalone content history uses schema version 4 and binds requested depth and v
 
 In PR branch validation, each enabled new-only validator fetches the live-base response before the candidate response for the same model. The client credential and applicable user/visibility scope stay the same. Identical request evidence can be reused only within the current run; consistency rereads bypass that reuse. Model matching retains issue identity, severity, and occurrence counts: an additional occurrence or warning-to-error change cannot be hidden as an existing issue. Content matching also preserves occurrence and supported document/query/filter identity.
 
-New-only PR validation requires immutable Git base/head revisions and verifies live authored model YAML against those revisions before and after the checks: the Omni candidate must match the PR head, and the live base must match the trusted Git base. Unavailable, unverifiable, or out-of-sync snapshots block in strict mode; the narrow onboarding advisory exception above still reports incomplete evidence, never a verified pass. A missing repository or identity override cannot replace this evidence. These before/after observations are sampled consistency checks, not an atomic lock over live models, content, or drafts.
+New-only PR validation requires immutable Git base/head revisions and verifies the selected authored files before and after the checks. The effective [source verification mode](#source-verification) determines whether it checks the changed artifacts or the full model. Missing required evidence blocks in strict mode. The onboarding advisory exception still records incomplete evidence. Before/after observations sample live models and drafts.
 
-Known native `.yaml`/`.yml` filename wrappers are matched to their authored API identities without changing paths or content. Git-only generic YAML is ignored automatically; generic YAML present in Omni's authored API inventory remains included and must match exactly. Reviewed `files.non_omni` rules cannot hide those API sources or recognized Omni families. Duplicate aliases remain hard failures. Extra/missing authored source files and byte differences prevent a verified comparison. See [candidate verification troubleshooting](TROUBLESHOOTING.md#candidate-verification-git-and-omni-snapshots-differ) for safe counts, reason categories and upgrade guidance.
+Known native `.yaml`/`.yml` filename wrappers can match authored API identities. Reviewed `files.non_omni` rules cannot hide known Omni sources. Unsupported or ambiguous evidence relevant to the requested scope remains incomplete. See [candidate verification troubleshooting](TROUBLESHOOTING.md#candidate-verification-git-and-omni-snapshots-differ) for safe counts and recovery steps.
 
 Matched existing findings remain visible without blocking that new-only validator; new model errors and new content issues block, while model warnings follow `fail_on_warnings`. Missing, malformed, or ambiguous evidence cannot prove that a finding already existed or that a comparison passed. A pass is not proof of a clean model/content inventory, complete instance health, or causal attribution to the PR. Other configured checks remain independent gates.
 
@@ -397,7 +412,7 @@ Uses `OMNI_API_KEY`; verify eval permissions and service-identity capacity befor
 
 ## Semantic Lint
 
-`checks.semantic_lint.enabled` defaults to `true`. Every rule accepts `off`, `info`, `warn`, or `error`. Only `error` is a blocking lint severity.
+The starter file explicitly sets `checks.semantic_lint.enabled: false`. Existing custom policies that omit the key retain their prior default of `true`. Every rule accepts `off`, `info`, `warn`, or `error`. Only `error` is a blocking lint severity.
 
 Supported rules:
 

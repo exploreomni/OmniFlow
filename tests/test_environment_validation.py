@@ -115,7 +115,7 @@ def run_args():
 
 
 @pytest.mark.parametrize("scenario", ["existing", "comment_only", "new_model", "new_content", "stale_head", "stale_base", "base_drift"])
-def test_regression_pr_verifies_both_git_snapshots_even_without_environment(promotion, monkeypatch, scenario):
+def test_full_model_opt_in_verifies_both_git_snapshots_even_without_environment(promotion, monkeypatch, scenario):
     root, _, event, head_text, event_path = promotion
     if scenario == "comment_only":
         head_text = MODEL_TEXT + "# Comment-only proposed change\n"
@@ -128,7 +128,7 @@ def test_regression_pr_verifies_both_git_snapshots_even_without_environment(prom
     client = TargetClient("prod-model", "main", True, head_text)
     context = ModelContext(base_url="https://omni.example", model_id="prod-model", model_path="omni/shared",
                            branch_id="candidate-id", branch_name="release/test")
-    config = _to_config({"contracts": {"enabled": False}, "checks": {
+    config = _to_config({"validation": {"source_verification": "full_model"}, "contracts": {"enabled": False}, "checks": {
         "semantic_lint": {"enabled": False}, "content_validation": {"fail_on_new_only": True},
         "model_validation": {"fail_on_new_only": True},
     }}, None)

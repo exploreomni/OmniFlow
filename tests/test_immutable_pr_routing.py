@@ -59,6 +59,13 @@ def route(capsys):
     return json.loads(capsys.readouterr().out)
 
 
+def test_local_git_replacement_cannot_hide_the_pr_edit(repository):
+    event, _, _ = repository
+    pr = event["pull_request"]
+    git("replace", pr["head"]["sha"], pr["base"]["sha"])
+    assert pull_request_changed_files() == ["omni/orders.view.yaml"]
+
+
 @pytest.mark.parametrize("event_name,version", [("pull_request", 1), ("pull_request_target", 1), ("pull_request_target", 2)])
 def test_routing_uses_event_head_not_checkout_current_pr_files_or_environment(repository, monkeypatch, capsys,
                                                                           event_name, version):

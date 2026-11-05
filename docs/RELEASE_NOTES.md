@@ -1,5 +1,11 @@
 # Release notes
 
+## Unreleased — PR source verification and validator gating
+
+- The starter policy gates on new model and content findings and explicitly opts out of optional lint and downstream contract checks. Existing explicit policy choices still apply.
+- Ordinary regression PRs verify the Omni files touched by the PR. Git base is checked against the shared Omni model and Git head against the selected Omni branch. Additions and deletions are verified on both sides. Unrelated model drift alone does not block this source check. The validators still compare findings in both live scopes.
+- The public report identifies the effective source verification method. Missing required evidence is **Incomplete**. A new validator finding that blocks under policy is a separate outcome. Use `validation.source_verification: full_model` when all authored files must correspond. Query/AI comparisons, breaking-change holds and readiness checks that need full proof retain that requirement. [Configuration](CONFIGURATION.md#source-verification)
+
 ## Unreleased — dbt comparison precision and external Omni snapshots
 
 - Omni Git `modelPath` values now map to repository folders before identity

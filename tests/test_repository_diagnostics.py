@@ -93,6 +93,20 @@ def execute(context, client, issues):
     return evidence
 
 
+def test_clean_scoped_pr_does_not_read_whole_git_model_for_private_locations(repository, monkeypatch):
+    context, client, policy = repository
+    proofs = {key + "_proof": {"method": "pr_changed_files", "status": "verified", key + "_sha": sha}
+              for key, sha in (("head", policy.head_sha), ("base", policy.base_sha))}
+    monkeypatch.setattr("omniflow.repository_diagnostics._load_snapshot",
+                        lambda *a, **kw: pytest.fail("clean PR attempted to read the entire Git model"))
+    with repository_reporting(object(), output_dir=Path(".omniflow")):
+        evidence = start_repository_context(context, client, branch_id="candidate", **proofs)
+        assert evidence and set(evidence.before) == {"base", "head"}
+        finish_repository_context(evidence, context, client, [], branch_id="candidate", **proofs)
+        safe = write({"issues": [], "exit_code": 0, "validation_complete": True})
+        assert safe["repository_diagnostics"]["diagnostics_reason"] == "no_findings_to_locate"
+
+
 def write(value, output_dir=".omniflow"):
     return write_public_reports(value, output_dir=output_dir,
                                 formats=["json", "markdown", "sarif", "junit"], redaction_level="standard")
@@ -561,6 +575,12 @@ def test_full_cli_regression_result_identical_with_detail_and_optout(repository,
     monkeypatch.setenv("GITHUB_ACTIONS", "true")
     monkeypatch.setenv("GITHUB_EVENT_NAME", "pull_request_target")
     monkeypatch.setenv("GITHUB_BASE_REF", "main")
+    event_path = Path("pr-event.json")
+    event_path.write_text(json.dumps({"pull_request": {
+        side: {"sha": sha, "repo": {"full_name": policy.repository}}
+        for side, sha in (("head", policy.head_sha), ("base", policy.base_sha))
+    }}))
+    monkeypatch.setenv("GITHUB_EVENT_PATH", str(event_path.resolve()))
     monkeypatch.setenv("GITHUB_OUTPUT", str(Path("action-outputs").resolve()))
     monkeypatch.setattr(cli, "load_config", lambda path: config)
     monkeypatch.setattr(cli, "discover_contexts", lambda **kwargs: [context])

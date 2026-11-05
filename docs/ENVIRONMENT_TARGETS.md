@@ -135,14 +135,16 @@ for the controlled PR live gate below.
 3. Read the candidate's authored YAML using the documented
    [model YAML endpoint](https://docs.omni.co/api/models/get-model-yaml), with
    `mode=combined`, the resolved `branchId` and `fullyResolved=false`.
-4. Compare the complete authored semantic-file inventory and authored contents with
-   the PR head's Git snapshot. Git data is read at an immutable commit, never checked out
-   or executed. Local Git objects or bounded, read-only GitHub tree/blob requests supply
-   evidence. Missing, additional, deleted, unsafe or different files block validation.
+4. For ordinary regression PRs, verify changed Omni files against the PR's immutable
+   Git revisions: shared model against base, selected branch against head. Expected
+   additions and deletions have different expected presence on each side. A material
+   mismatch on a required file leaves verification incomplete. Nonregression environment
+   runs retain full-model verification. See [Source verification](CONFIGURATION.md#source-verification)
+   for features that require a full-model check.
 5. Run configured model, content and semantic checks against that selected candidate.
    Content and semantic baselines still use the same environment's base model.
-6. Compare the candidate again after checks. Publish environment, target branch,
-   candidate branch, immutable head, file count, digest and verification status.
+6. Verify the selected scope again after checks. Review the method, changed or whole-model
+   file counts, source verification status, and validator outcomes in the report.
 
 This proves authored correspondence, not a Git-commit claim from an undocumented
 Omni field. Supported serialization wrappers and unambiguous typed identities can

@@ -55,6 +55,8 @@ class Snapshot:
 @dataclass
 class ContextEvidence:
     snapshots: dict[str, Snapshot] = field(default_factory=dict)
+    before: dict[str, bytes] = field(default_factory=dict)
+    non_omni_rules: tuple = ()
 
 
 @dataclass
@@ -68,6 +70,7 @@ class RepositorySession:
     output_ready: bool = False
     unavailable_reasons: dict[str, int] = field(default_factory=dict)
     report_failed: bool = False
+    no_locations_needed: bool = False
     candidate_summary_written: bool = False
 
 
@@ -121,7 +124,8 @@ def record_candidate_diagnostics(context: Any, exc: Exception, issue: dict) -> N
             safe["pairing"] = sample.get("pairing") if sample.get("pairing") in {
                 "basename_hint", "case_hint", "suffix_hint", "unpaired", "authored_identity", "ambiguous_identity"
             } else "unpaired"
-            if (exc.candidate_reason == "content_mismatch" and git_path is not None and omni_path is not None
+            if (exc.candidate_reason in {"content_mismatch", "pr_change_not_synchronized"}
+                    and git_path is not None and omni_path is not None
                     and safe["pairing"] == "authored_identity" and safe["comparison"] == "different"):
                 detail = shareable_difference_fields(sample)
                 if detail and detail == shareable_difference_fields(exc.diagnostic_context):
@@ -167,6 +171,7 @@ def clear_repository_reports(output_dir: str | Path) -> None:
     state = _session.get()
     if state is not None:
         state.output_ready = False
+        state.no_locations_needed = False
     if directory.resolve() != directory:
         raise SecurityPolicyError("Repository diagnostic output must not traverse symbolic links")
     paths = []
@@ -278,9 +283,24 @@ def _api_evidence(client: Any, context: Any, *, side: str, branch_id: str | None
     return actual, names
 
 
+def _api_fingerprint(files: dict[str, bytes], names: dict | None) -> bytes:
+    """Private disclosure only: detect changes in the inputs used to map source lines."""
+    digest = hashlib.sha256(json.dumps(names, sort_keys=True).encode())
+    for path, raw in sorted(files.items()):
+        name = path.encode()
+        digest.update(len(name).to_bytes(8, "big") + name + len(raw).to_bytes(8, "big") + raw)
+    return digest.digest()
+
+
 def _matches(snapshot: Snapshot, *, proof: dict | None, side: str, client: Any,
              context: Any, branch_id: str | None, api_files: dict | None = None,
              omni_view_names: dict[str, str] | None = None) -> bool:
+    if proof and proof.get("method") == "pr_changed_files":
+        # A scoped proof never authorizes location disclosure. The private
+        # mapper must independently bind the complete snapshot to this revision.
+        if proof.get(f"{side}_sha") != snapshot.sha or proof.get("status") not in {"pending_recheck", "verified", "scope_empty"}:
+            return False
+        proof = None
     if proof:
         proof_matches = (proof.get("status") in {"verified", "pending_recheck"}
                 and proof.get("method") == "authored_yaml_snapshot"
@@ -323,7 +343,7 @@ def start_repository_context(context: Any, client: Any, *, branch_id: str | None
     state = _session.get()
     if state is None or not state.policy.enabled:
         return None
-    evidence = ContextEvidence()
+    evidence = ContextEvidence(non_omni_rules=tuple(non_omni_rules))
     try:
         if not _registered_context(state.policy, context):
             raise ConfigError("Repository diagnostic context is unregistered")
@@ -335,6 +355,11 @@ def start_repository_context(context: Any, client: Any, *, branch_id: str | None
             # The candidate proof alone cannot authorize API path/canonical-name
             # aliases. Bind a fresh authored inventory and metadata to Git bytes.
             actual, names = _api_evidence(client, context, side=side, branch_id=branch_id)
+            if proof and proof.get("method") == "pr_changed_files":
+                # Ordinary PR validation does not read the entire Git model to
+                # prepare an optional report. Read it later only for a finding.
+                evidence.before[side] = _api_fingerprint(actual, names)
+                continue
             snapshot = _load_snapshot(
                 state.policy, context.model_path, side, non_omni_rules=non_omni_rules, api_files=actual,
             )
@@ -347,7 +372,7 @@ def start_repository_context(context: Any, client: Any, *, branch_id: str | None
         state.contexts_unavailable += 1
         _unavailable(state, "snapshot_evidence_unavailable")
         return None
-    if not evidence.snapshots:
+    if not evidence.snapshots and not evidence.before:
         state.contexts_unavailable += 1
         _unavailable(state, "snapshot_evidence_unavailable")
         return None
@@ -362,6 +387,18 @@ def finish_repository_context(evidence: ContextEvidence | None, context: Any, cl
         return
     try:
         verified = {}
+        for side, before in evidence.before.items():
+            if not issues:
+                break
+            proof = head_proof if side == "head" else base_proof
+            actual, names = _api_evidence(client, context, side=side, branch_id=branch_id)
+            if not proof or before != _api_fingerprint(actual, names):
+                continue
+            snapshot = _load_snapshot(state.policy, context.model_path, side,
+                                      non_omni_rules=evidence.non_omni_rules, api_files=actual)
+            if _matches(snapshot, proof=proof, side=side, client=client, context=context,
+                        branch_id=branch_id, api_files=actual, omni_view_names=names):
+                verified[side] = snapshot
         for side, snapshot in evidence.snapshots.items():
             proof = head_proof if side == "head" else base_proof
             if _matches(snapshot, proof=proof, side=side, client=client, context=context, branch_id=branch_id):
@@ -434,6 +471,9 @@ def write_repository_reports(report: dict, safe_report: dict, *, output_dir: str
                 "unavailable_reasons": dict(state.unavailable_reasons),
             }
             write_reports(projected, output_dir=directory, formats=["json", "markdown", "sarif", "junit"])
+        elif enabled and safe_report.get("validation_complete") is True and safe_report.get("issues") == []:
+            state.no_locations_needed = True
+            status["reason"] = "no_findings_to_locate"
         elif enabled:
             status["reason"] = "snapshot_evidence_unavailable"
         secure_write_text(directory / "status.json", json.dumps(status, indent=2) + "\n")
@@ -464,6 +504,8 @@ def repository_diagnostic_availability() -> dict:
         return {"status": "generated", "diagnostics_reason": "repository_verified",
                 **({"candidate_summary_written": True} if state.candidate_summary_written else {}),
                 "publication_status": "unconfirmed"}
+    if state.no_locations_needed:
+        return {"status": "not_needed", "diagnostics_reason": "no_findings_to_locate", "publication_status": "unconfirmed"}
     reason = state.policy.reason
     if state.policy.enabled:
         reason = "repository_report_unavailable" if state.report_failed else "snapshot_evidence_unavailable"

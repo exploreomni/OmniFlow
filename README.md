@@ -30,8 +30,8 @@ The workflow always preserves `report.sarif` in the evidence artifact. Repositor
 - Omni model validation, with independent branch-to-base regression and warning policy
 - Omni Content Validator results, including branch-to-base comparison for new-only policy
 - Authored Models, Topics, Views, fields, and global or topic-level Relationship YAML
-- Semantic lint rules for descriptions, primary keys, labels, topic owners, cardinality, and governance
-- Breaking semantic changes and the dashboards, reports, and queries that reference them
+- Optional semantic lint rules for descriptions, primary keys, labels, topic owners, cardinality, and governance
+- Optional downstream contracts for breaking semantic changes and their dashboard and query consumers
 - Optional, branch-aware dbt exposure metadata
 - Optional post-deployment dbt metadata refresh with asynchronous job polling and full revalidation
 - Optional single-branch breaking-change hold that keeps dbt and Omni merges in a safe order
@@ -53,14 +53,14 @@ A team manages Omni model YAML in Git and uses OmniFlow as the required PR check
 ```text
 Developer edits a view in an Omni branch
   → Omni creates a pull request
-  → OmniFlow validates model, content, semantic diff, and downstream contracts
+  → OmniFlow verifies the changed model files and compares live model and content findings
   → Reviewer approves → merge → Omni promotes the branch
 ```
 
 OmniFlow blocks merge when:
-- The model has validation errors
-- Content issues are detected by the Content Validator
-- A renamed or deleted field is referenced by a published dashboard or query
+- This branch introduces a model or content error, increases its occurrence count, or worsens a finding to a blocking severity.
+- The evidence needed to compare the change is incomplete. The report identifies the missing evidence.
+- A separately enabled downstream contract detects a breaking reference.
 
 ### Scenario 2: Monorepo with dbt (Two-Branch Architecture)
 
@@ -158,7 +158,7 @@ External contributor opens a PR from a fork
 | --- | --- |
 | Additive model change (new field, new view) | Pass |
 | Breaking change with no downstream references | Warning (pass) |
-| Breaking change referenced by a dashboard | Fail (contract violation) |
+| Breaking change referenced by a dashboard (downstream contracts enabled) | Fail (contract violation) |
 | New model errors or additional occurrences (new-only policy) | Fail |
 | New model warnings (new-only policy) | Warning; fail only with `fail_on_warnings: true` |
 | New Content Validator issues or additional occurrences (new-only policy) | Fail |
@@ -190,7 +190,7 @@ The two optional dbt policies are complements:
 3. GitHub Actions starts OmniFlow from the trusted base-branch workflow.
 4. A credential-free preflight routes non-Omni pull requests to a successful `skipped` result before the validation process receives `OMNI_API_KEY`.
 5. OmniFlow selects the changed model from trusted base-branch metadata and resolves the Omni branch from the GitHub head branch.
-6. It verifies the Git/Omni snapshots, collects each new-only validator's live-base findings before its candidate findings, computes the semantic diff and lint regressions, and searches Omni for downstream references.
+6. In the starter policy, it verifies the PR's changed Omni artifacts against Git, then runs each enabled validator on the live base and the selected Omni branch. It compares the findings to identify regressions. Lint and downstream contracts can be enabled separately.
 7. The pull request receives a compact status, relevant counts and current-run links. Failures show up to three blocking groups and a primary next action; detailed findings stay in the reports and Actions summary. Verified private-repository runs also generate source-location diagnostics, uploaded separately for repository readers and never copied into the PR comment.
 8. GitHub branch protection blocks merge when required OmniFlow checks fail.
 9. After review and approval, the pull request is merged. Omni's configured pull-request webhook promotes the Omni branch and publishes associated draft content.
@@ -287,18 +287,19 @@ repair and hold-release workflows remain outside its supported scope.
 
 ### 4. Add The Required Policy
 
-Copy the canonical [`.omniflow.yml`](.omniflow.yml) into the customer repository root. This required policy is **not** the GitHub workflow at `.github/workflows/omniflow.yml`. It enables model validation, content validation, semantic lint, semantic diff, and downstream contracts, with independent `fail_on_new_only: true` settings for model and content regression gating. Optional integrations and label filters remain commented until deliberately configured. The new model setting requires a reviewed Action revision that supports it; follow the [upgrade sequence](docs/INSTALLATION.md#step-5-merge-the-setup-into-the-base-branch) for existing installations.
+Copy the canonical [`.omniflow.yml`](.omniflow.yml) into the customer repository root. The starter policy gates on new model and content findings. It explicitly disables semantic lint and downstream contracts. Existing installations keep the policy committed to their trusted base branch. Coordinate new settings with an Action pin that supports them. [Upgrade instructions](docs/INSTALLATION.md#step-5-merge-the-setup-into-the-base-branch)
+
+For example, when a PR edits one view, OmniFlow checks that view in the shared model against Git's base commit and in the Omni branch against Git's PR head. A new topic should be absent on the base and present on the branch. A deleted topic should show the opposite. Unrelated files do not have to match across the entire model for this check. Both validators still inspect the model and its visible content, so they can detect a downstream query that broke even though its own file did not change. [Source verification options](docs/CONFIGURATION.md#source-verification)
 
 The following excerpt illustrates key gates; start with the complete canonical file when installing:
 
 ```yaml
+validation:
+  mode: strict
+  source_verification: pr_changes
+
 contracts:
-  fail_on:
-    deleted_referenced_fields: true
-    renamed_referenced_fields: true
-    referenced_field_type_changes: true
-    referenced_join_cardinality_changes: true
-    coverage_gaps: true
+  enabled: false
 
 checks:
   content_validation:
@@ -306,6 +307,8 @@ checks:
   model_validation:
     fail_on_new_only: true
     fail_on_warnings: false
+  semantic_lint:
+    enabled: false
 ```
 
 Commit the policy to the protected base branch before PR validation. A file added only in the PR head is not trusted. A missing policy stops execution with configuration exit code `2`; OmniFlow does not silently fall back to built-in defaults. Environment variables and identity flags cannot substitute for the file. An explicit `--config` path (or Action `config` input) is supported, but that selected file must exist and satisfy the same trust requirements.
@@ -370,12 +373,8 @@ Unrelated generic YAML and other regular files, such as Markdown or scripts, do 
 merely because they share that directory. Workflow, policy and registry files
 remain separate trusted controls.
 
-During a selected model's candidate/base verification, Git-only generic YAML is
-ignored automatically; no `files.non_omni` rule is required for ordinary tooling
-YAML. A generic YAML file **returned by Omni's authored API**, however, remains
-authoritative: its exact filename counterpart and bytes must match, and an exclusion
-rule cannot hide it. Unsupported API files fail closed rather than disappearing
-from evidence.
+Git-only tooling YAML is ignored automatically. A recognized Omni source or
+an authored source returned by the API cannot be hidden by an exclusion rule.
 
 **Artifact identity is type-specific, not a folder-layout policy.** Within each
 registered `model_path`, candidate/base verification first recognizes exact authored
@@ -386,17 +385,14 @@ same filename across databases/schemas. Their canonical Omni names and authored
 omission is retained rather than guessed from an organizational folder. Query views
 do not need a physical table identity.
 
-Organizational folder differences can match through a unique filename, a canonical
-view filename, or an unambiguous qualified view counterpart. Matching uses both
-complete inventories: an already matched file never makes a remaining duplicate
-safe to guess. Distinct semantic views are not collapsed just because they point
-to the same table or have identical contents. Unknown/ambiguous identities require
-correction, not a bypass or renaming valid schema-scoped views. No connection naming
-setting changes are required.
-
-All paired contents still match exactly. New/deleted files must match the respective
-Omni candidate/base, not each other. Files never match across registered models.
-Original Git paths remain in authorized source locations and immutable blob reads.
+Organizational folder differences can match through a unique filename, canonical
+view name, or unambiguous qualified view counterpart. When an identity needed
+for the PR is ambiguous, the result is **Incomplete**. A registered model bounds
+the comparison. In `pr_changes` mode, supported line endings, final newlines, and YAML comments or
+formatting can be equivalent when OmniFlow can prove that the authored meaning
+matches. SQL block text and substantive changes still require inspection.
+Selecting `validation.source_verification: full_model` extends the correspondence
+check to all authored files in the selected model and requires matching authored bytes.
 
 **Custom-name limitation:** a PR changing only an API-authored file with an
 unrecognized generic YAML name is not automatically routed from its filename.

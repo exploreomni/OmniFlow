@@ -48,7 +48,9 @@ def test_starter_enables_core_checks_without_optional_scope_or_features(tmp_path
     assert config.content_validation.enabled and config.content_validation.fail_on_new_only
     assert config.content_validation.labels == []
     assert not config.content_validation.classify_comment_only
-    assert config.model_validation.enabled and config.semantic_lint.enabled and config.contracts.enabled
+    assert config.model_validation.enabled
+    assert config.validation.source_verification == "pr_changes"
+    assert not config.semantic_lint.enabled and not config.contracts.enabled
     assert config.model_validation.fail_on_new_only
     assert not config.model_validation.fail_on_warnings
     assert all((config.contracts.fail_on_deleted_referenced_fields,

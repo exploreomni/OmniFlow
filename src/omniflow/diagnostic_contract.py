@@ -236,6 +236,10 @@ _add("content_mismatch", "OF-CANDIDATE-CONTENT", "Content mismatch",
      "Compare the selected Omni scope with its Git revision. Use the read-only local comparison to locate the difference.", "synchronization")
 _add("changed_during_validation", "OF-CANDIDATE-DRIFT", "The selected snapshot changed during validation.",
      "Wait for synchronization/editing to finish and rerun against the latest PR revisions.", "synchronization")
+_add("pr_change_not_synchronized", "OF-PR-CHANGE-NOT-SYNCHRONIZED",
+     "PR change is not synchronized",
+     "Check that the saved definition or deletion is present on the intended branch. Review the PR commit in Omni's Webhook Deliveries and rerun after synchronization.",
+     "synchronization")
 _add("relationship_scope_unresolved", "OF-RELATIONSHIP-SCOPE", "A relationship relocation could not be proven equivalent.",
      "Inspect topic join paths and competing local/global relationship definitions. Resolve ambiguous precedence "
      "or missing join coverage, then rerun; moving a definition must not silently change another topic.")

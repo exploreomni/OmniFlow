@@ -21,12 +21,24 @@ def first_step(finding: dict[str, Any]) -> str:
     return steps[0] if steps else finding.get("next_action", "Inspect the failed check in this run.")
 
 
+SOURCE_SYNC_REASONS = {"content_mismatch", "pr_change_not_synchronized"}
+
+
+def has_matched_difference(finding: dict[str, Any]) -> bool:
+    return (finding.get("candidate_reason") == "content_mismatch"
+            or (finding.get("candidate_reason") == "pr_change_not_synchronized"
+                and finding.get("contents_comparison") == "different"))
+
+
 def mismatch_description(finding: dict[str, Any]) -> str:
-    return finding.get("difference_description") or "A saved Omni file differs from its matching Git file."
+    return finding.get("difference_description") or (
+        "A saved Omni file differs from its matching Git file." if has_matched_difference(finding)
+        else "OmniFlow could not confirm this changed artifact in the selected Omni scope."
+    )
 
 
 def candidate_detail_hint(finding: dict[str, Any], report: dict[str, Any]) -> str:
-    if finding.get("candidate_reason") != "content_mismatch":
+    if not has_matched_difference(finding):
         return ""
     availability = report.get("repository_diagnostics") or {}
     if availability.get("status") == "unavailable":
@@ -34,5 +46,5 @@ def candidate_detail_hint(finding: dict[str, Any], report: dict[str, Any]) -> st
                   if availability.get("diagnostics_reason") == "repository_internal" else "")
         return reason + "No detailed artifact was generated for this run."
     if availability.get("candidate_summary_written") is True and report.get("diagnostic_audience") != "repository":
-        return "Open this run’s Summary for the filename and line."
+        return "Open this run’s Summary for available file and line details."
     return ""

@@ -27,7 +27,8 @@ def pull_request_changed_files(*, root: Path = Path(".")) -> list[str] | None:
         return None
     try:
         result = subprocess.run(  # nosec B603
-            [git_executable(), "diff", "--name-only", "--no-renames", "-z", f"{base[0]}...{head[0]}"],
+            [git_executable(), "--no-replace-objects", "diff", "--name-only", "--no-renames",
+             "--no-ext-diff", "--no-textconv", "-z", f"{base[0]}...{head[0]}"],
             cwd=root, check=True, capture_output=True, timeout=15,
         )
         if len(result.stdout) > 1024 * 1024:

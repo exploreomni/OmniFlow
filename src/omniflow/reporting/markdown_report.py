@@ -13,7 +13,13 @@ from .diagnostic_fields import DIAGNOSTIC_FACTS
 from .finding_groups import group_findings
 from .issue_policy import is_blocking
 from .notification import query_policy_reference, query_result_coverage
-from .recovery import candidate_detail_hint, diagnostic_guide, mismatch_description
+from .recovery import (
+    SOURCE_SYNC_REASONS,
+    candidate_detail_hint,
+    diagnostic_guide,
+    has_matched_difference,
+    mismatch_description,
+)
 
 
 def _render_minimal_diagnostic(report: dict[str, Any]) -> str:
@@ -97,6 +103,22 @@ def _render_minimal_diagnostic(report: dict[str, Any]) -> str:
     for context in contexts:
         reference = _safe_code(context.get("context_reference", "context"))
         proof = context.get("candidate_verification", {})
+        method = proof.get("method")
+        if method == "pr_changed_files":
+            count = proof.get("changed_file_count")
+            if proof.get("status") == "scope_empty" and count == 0:
+                lines.append(f"- `{reference}` source verification: the PR touched zero Omni files in this model. "
+                             "See the live validator results below.")
+            else:
+                lines.append(f"- `{reference}` source verification: changed PR files only "
+                             f"(`{_safe_code(proof.get('status'))}`). "
+                             f"Changed files: `{_safe_code(count)}`. "
+                             f"Present on the evaluated side: `{_safe_code(proof.get('file_count'))}`; "
+                             f"expected absent: `{_safe_code(proof.get('absent_file_count'))}`.")
+        elif method == "authored_yaml_snapshot":
+            lines.append(f"- `{reference}` source verification: full authored model "
+                         f"(`{_safe_code(proof.get('status'))}`), "
+                         f"files on the evaluated side: `{_safe_code(proof.get('file_count'))}`.")
         if type(proof.get("excluded_file_count")) is int:
             lines.append(f"- `{reference}`: `{proof['excluded_file_count']}` confirmed non-Omni files "
                          "excluded by trusted policy. Authoritative Omni sources were not removed.")
@@ -229,7 +251,7 @@ def _primary_blocker_lines(primary: dict[str, Any] | None, report: dict[str, Any
     title = primary.get("title") or primary.get("message") or "The check could not establish a safe result."
     code = primary.get("diagnostic_code") or primary.get("reason_code") or primary.get("type", "unknown")
     lines = ["", f"**Primary blocker:** {_safe_text(title)} (`{_safe_code(code)}`)"]
-    mismatch = primary.get("candidate_reason") == "content_mismatch"
+    mismatch = primary.get("candidate_reason") in SOURCE_SYNC_REASONS
     if mismatch:
         location = candidate_location_lines(primary, report)
         if location:
@@ -246,7 +268,7 @@ def _primary_blocker_lines(primary: dict[str, Any] | None, report: dict[str, Any
             lines.append(f"- Outcome: {_safe_text(primary['outcome_label'])}")
         if primary.get("coverage_description"):
             lines.append(f"- Comparison: {_safe_text(primary['coverage_description'])}")
-        if primary.get("candidate_reason") == "content_mismatch":
+        if mismatch:
             health = sum(item.get("validator") in {"model", "content"} and item.get("active", True)
                          and not is_blocking(item) for item in report.get("issues", []))
             if health:
@@ -283,7 +305,7 @@ def candidate_location_lines(finding: dict[str, Any], report: dict[str, Any]) ->
     sha = finding.get("git_revision")
     if (report.get("diagnostic_audience") != "repository"
             or availability.get("status") != "generated" or availability.get("diagnostics_reason") != "repository_verified"
-            or finding.get("candidate_reason") != "content_mismatch"
+            or not has_matched_difference(finding)
             or finding.get("candidate_evidence_kind") != "observations_not_correspondence"
             or finding.get("source_revision") != ("base" if finding.get("validation_scope") == "base" else "head")
             or not isinstance(sha, str) or not FULL_SHA.fullmatch(sha)):
@@ -343,7 +365,7 @@ def _candidate_observation_lines(finding: dict[str, Any]) -> list[str]:
     samples = finding.get("candidate_samples")
     if not isinstance(samples, list) or not samples:
         return []
-    matched_contents = finding.get("candidate_reason") == "content_mismatch"
+    matched_contents = has_matched_difference(finding)
     lines = ["   - Matched files with different contents:" if matched_contents
              else "   - Candidate path observations (not verified correspondence):"]
     for sample in samples[:5]:

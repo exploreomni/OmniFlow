@@ -34,7 +34,7 @@ SEMANTIC_LINT_RULES = {
 RULE_SEVERITIES = {"off", "info", "warn", "error"}
 CONFIG_KEYS = {"omni", "checks", "reporting", "security", "contracts", "repairs", "deployment", "files", "validation"}
 FILE_KEYS = {"non_omni"}
-VALIDATION_KEYS = {"mode"}
+VALIDATION_KEYS = {"mode", "source_verification"}
 OMNI_KEYS = {
     "base_url",
     "model_id",
@@ -416,6 +416,7 @@ class FileSettings:
 @dataclass
 class ValidationSettings:
     mode: str = "strict"
+    source_verification: str = "pr_changes"
 
 
 @dataclass
@@ -453,7 +454,8 @@ def _to_config(raw: dict[str, Any], source: Path | None) -> OmniFlowConfig:
     files = FileSettings(non_omni=_non_omni_rules(files_raw.get("non_omni")))
     validation_raw = _mapping(raw.get("validation"), "validation")
     _reject_unknown_keys(validation_raw, VALIDATION_KEYS, "validation")
-    validation = ValidationSettings(mode=_validation_mode(validation_raw.get("mode", "strict")))
+    validation = ValidationSettings(mode=_validation_mode(validation_raw.get("mode", "strict")),
+                                    source_verification=_source_verification(validation_raw.get("source_verification", "pr_changes")))
     checks_raw = _mapping(raw.get("checks"), "checks")
     reporting_raw = _mapping(raw.get("reporting"), "reporting")
     security_raw = _mapping(raw.get("security"), "security")
@@ -759,6 +761,13 @@ def _validation_mode(value: Any) -> str:
     return value
 
 
+def _source_verification(value: Any) -> str:
+    if not isinstance(value, str) or value not in {"pr_changes", "full_model"}:
+        raise _config_error("validation.source_verification must be pr_changes or full_model",
+                            "validation.source_verification", "enum", reason="config_invalid_value")
+    return value
+
+
 def _redaction_level(value: Any) -> str:
     if value is None:
         return "standard"
@@ -992,6 +1001,7 @@ def _validate_config_schema(raw: dict[str, Any]) -> None:
     validation = _mapping(raw.get("validation"), "validation")
     _reject_unknown_keys(validation, VALIDATION_KEYS, "validation")
     _validation_mode(validation.get("mode", "strict"))
+    _source_verification(validation.get("source_verification", "pr_changes"))
     omni = _mapping(raw.get("omni"), "omni")
     checks = _mapping(raw.get("checks"), "checks")
     reporting = _mapping(raw.get("reporting"), "reporting")

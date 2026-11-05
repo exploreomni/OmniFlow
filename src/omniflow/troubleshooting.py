@@ -71,8 +71,32 @@ def recovery_details(issue: dict) -> dict:
     verify = "Run the affected check again and confirm it completed with the intended result."
     support = "Give the OmniFlow maintainer the code, failed check and run reference from this report."
     coverage = None
+    difference = None
 
-    if code == "OF-CANDIDATE-CONTENT":
+    if code == "OF-PR-CHANGE-NOT-SYNCHRONIZED":
+        base = issue.get("validation_scope") == "base"
+        scope = "shared Omni model" if base else "Omni branch"
+        commit = "target commit" if base else "PR head commit"
+        left, right = issue.get("git_only_count"), issue.get("omni_only_count")
+        fix = f"Compare this PR’s changed files at the {commit} with the saved {scope}. Review the intended edit, addition or deletion and synchronize that scope."
+        if issue.get("contents_comparison") == "different":
+            difference = _mismatch_remedy(issue)[0]
+            fix = f"Compare the changed Git definition at the {commit} with its saved file in the {scope}. Confirm the intended definition and synchronize it."
+        elif left and right == 0:
+            noun = "file" if left == 1 else "files"
+            difference = f"Git has {left:,} {noun} in the changed scope with no matching file in the {scope}."
+            fix = f"Check the added or renamed files at the {commit}. Confirm each intended definition is saved in the {scope}, then synchronize."
+        elif right and left == 0:
+            noun = "file" if right == 1 else "files"
+            difference = f"The {scope} has {right:,} {noun} with no matching file in Git’s changed scope."
+            fix = f"Review deletions and renames at the {commit}. Check whether the {scope} still contains the old definition, then synchronize the intended removal or rename."
+        elif left and right:
+            difference = f"The changed scope has unmatched files on both sides: Git-only {left:,}, Omni-only {right:,}."
+        else:
+            difference = "OmniFlow could not confirm the expected identity or absence of a changed artifact."
+        steps = [fix, f"Rerun against the current {commit} after synchronization finishes."]
+        verify = "The changed-file check completes and the model/content validators can compare PR impact."
+    elif code == "OF-CANDIDATE-CONTENT":
         anchor = "file-contents"
         base = issue.get("validation_scope") == "base"
         revision = "target (base)" if base else "PR head"
@@ -162,7 +186,7 @@ def recovery_details(issue: dict) -> dict:
         outcome = "Blocks the PR because validation is incomplete"
     result = {"recovery_steps": steps, "verify_recovery": verify, "support_action": support,
               "guide_anchor": anchor, "outcome_label": outcome}
-    if code == "OF-CANDIDATE-CONTENT":
+    if difference:
         result["difference_description"] = difference
     if coverage:
         result["coverage_description"] = coverage
