@@ -263,14 +263,20 @@ class RevalidationTests(unittest.TestCase):
         with self.assertRaisesRegex(ConfigError, "inventory incomplete"):
             self.run_check(inventory_error=ConfigError("inventory incomplete"))
 
-    def test_partial_model_selection_and_report_identity_are_rejected(self):
+    def test_marker_cannot_release_hold_without_receipt_for_every_changed_model(self):
         self.flow["models"].append({"base_url": "https://omni.example", "model_id": "m2", "model_path": "other"})
-        self.pr["body"] = '<!-- omniflow-context {"model_id":"m1"} -->'
-        with self.assertRaisesRegex(ConfigError, "every changed registered"):
-            self.run_check(changed_files=["omni/orders.view", "other/orders.view"])
-        self.pr.pop("body")
+        paths = ["omni/orders.view", "other/orders.view"]
         with self.assertRaisesRegex(ConfigError, "every routed Omni"):
-            self.run_check(changed_files=["omni/orders.view", "other/orders.view"])
+            self.run_check(changed_files=paths)
+        self.pr["body"] = '<!-- omniflow-context {"model_id":"m1"} -->'
+        with self.assertRaisesRegex(ConfigError, "every routed Omni"):
+            self.run_check(changed_files=paths)
+        self.assertFalse(any(call.args[0] == "DELETE" for call in self.api.request.call_args_list))
+        complete = {"policy_decision": "pass", "models": [{"model_id": "m1"}, {"model_id": "m2"}],
+                    "git_sha": HEAD, "exit_code": 0}
+        self.assertEqual(self.run_check(changed_files=paths, report=complete), 0)
+        self.assertIn(mock.call("DELETE", "/issues/4/labels/custom%2Fawaiting-warehouse"),
+                      self.api.request.call_args_list)
 
     def test_workflow_durable_write_must_succeed_and_reread_before_revalidation(self):
         path = ROOT / ".github/workflow-examples/omniflow-dbt-sync-with-release.yml"
