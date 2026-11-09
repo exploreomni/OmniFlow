@@ -47,21 +47,14 @@ base_view: orders
 
 
 HEAD_FILES = {
+    # The simulated PR removes orders.revenue. Its other authored files match Git.
+    **BASE_FILES,
     "views/orders.view": """name: orders
 fields:
   id:
     type: number
     primary_key: true
     description: Order ID
-""",
-    "relationships/relationships.yaml": """- join_from_view: orders
-  join_to_view: order_items
-  relationship_type: one_to_many
-  on_sql: $${orders.id} = $${order_items.order_id}
-""",
-    "topics/sales.topic": """name: sales
-label: Sales
-base_view: orders
 """,
 }
 
@@ -609,8 +602,10 @@ def setup_repo(repo: Path, *, base_url: str, scenario: Scenario) -> None:
     )
     for model_id in scenario.model_ids:
         model_root = repo / model_path_for(model_id)
-        (model_root / "views").mkdir(parents=True)
-        (model_root / "views/orders.view").write_text(BASE_FILES["views/orders.view"], encoding="utf-8")
+        for path, content in BASE_FILES.items():
+            target = model_root / path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content, encoding="utf-8")
     if scenario.dbt_sql_base and scenario.dbt_sql_path:
         dbt_file = repo / scenario.dbt_sql_path
         dbt_file.parent.mkdir(parents=True, exist_ok=True)
