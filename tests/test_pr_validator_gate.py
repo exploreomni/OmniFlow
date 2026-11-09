@@ -108,7 +108,8 @@ def run_pr(tmp_path, monkeypatch):
         assert report["exit_code"] == code
         if code in {0, 1}:
             context = report["model_reports"][0]
-            assert context["candidate_verification"]["method"] == "pr_changed_files"
+            proof = context["candidate_verification"]
+            assert proof["method"] == ("authored_yaml_snapshot" if proof.get("source_fallback_reason") else "pr_changed_files")
             states = {c["validator"]: c["status"] for c in context["check_states"]}
             assert states["content"] == states["model"] == "completed"
         return code, report
@@ -137,11 +138,36 @@ def test_full_model_opt_in_still_checks_untouched_files(run_pr):
     assert any(issue.get("candidate_reason") == "content_mismatch" for issue in report["issues"])
 
 
+def test_comment_only_complex_view_keeps_an_unrelated_difference_out_of_scope(run_pr, monkeypatch):
+    # This view's dynamic SQL would need whole-model evidence for a substantive edit.
+    view = 'dimensions:\n  id:\n    sql: "{{ filter_name }} + ${TABLE}.id"\n'
+    monkeypatch.setitem(BASE, "orders.view", view)
+    head = {**BASE, "orders.view": "# Clarify the field\n" + view}
+    live = {**head, "legacy.view": LEGACY.replace(".amount", ".legacy_amount")}
+    code, report = run_pr(head, live)
+    assert code == 0 and report["validation_complete"] is True
+    proof = report["model_reports"][0]["candidate_verification"]
+    assert proof["method"] == "pr_changed_files" and proof["file_count"] == 1
+
+
+def test_wrapper_rename_cannot_mask_removed_field_with_a_branch_only_fix(run_pr, monkeypatch):
+    consumer = LEGACY.replace("${TABLE}.amount", "${orders.id}")
+    monkeypatch.setitem(BASE, "legacy.view", consumer)
+    head = {**BASE, "orders.view": VIEW.replace("  id:", "  replaced_id:")}
+    live = {**head, "legacy.view": consumer.replace("${orders.id}", "${orders.replaced_id}")}
+    code, report = run_pr(head, live, wrapper=".yml")
+    assert code == 2 and report["validation_complete"] is False
+    assert any(issue.get("candidate_reason") == "pr_change_not_synchronized"
+               and issue.get("source_fallback_reason") == "dependency_consumers_unverified"
+               for issue in report["issues"])
+
+
 @pytest.mark.parametrize("referenced", [True, False])
 def test_synced_deletion_uses_both_validators_to_decide(run_pr, referenced):
     head = {"orders.view": VIEW}
     code, report = run_pr(head, head, referenced=referenced)
     assert code == int(referenced) and report["validation_complete"] is True
+    assert report["model_reports"][0]["candidate_verification"]["source_fallback_reason"] == "dependency_consumers_unverified"
     blockers = {i["diagnostic_code"] for i in report["issues"] if i.get("blocking") and i.get("state") == "new"}
     assert blockers == (CODES if referenced else set())
 
@@ -176,3 +202,46 @@ def test_clean_candidate_needs_a_readable_baseline(run_pr, validator):
     code, report = run_pr(head, head, unreadable=validator)
     assert code == 4 and report["validation_complete"] is False
     assert any(i.get("validator") == validator and i.get("blocking") for i in report["issues"])
+
+
+@pytest.mark.parametrize("branch_only_field", [False, True])
+def test_gate_checks_the_source_of_a_referenced_field(run_pr, branch_only_field):
+    orders = VIEW.replace("primary_key: true", "sql: ${legacy.amount}")
+    head = {**BASE, "orders.view": orders}
+    branch = dict(head)
+    if branch_only_field:
+        head["orders.view"] = branch["orders.view"] = orders.replace("legacy.amount", "legacy.new_amount")
+        branch["legacy.view"] = LEGACY.replace("  amount:", "  new_amount:")
+    code, report = run_pr(head, branch)
+    # The synthetic API reports a healthy model in both cases. Only the
+    # immutable dependency correspondence can detect the missing Git field.
+    if branch_only_field:
+        assert code == 2 and report["validation_complete"] is False
+        assert any(i.get("source_difference_role") == "referenced_dependency" and "referenced definition" in
+                   " ".join(i.get("recovery_steps", [])) for i in report["issues"])
+    else:
+        assert code == 0
+        assert report["model_reports"][0]["candidate_verification"]["dependency_file_count"] == 1
+
+
+def test_removed_field_cannot_hide_its_remaining_git_consumer(run_pr, monkeypatch):
+    consumer = "dimensions:\n  amount: {sql: '${orders.id}'}\n"
+    monkeypatch.setitem(BASE, "legacy.view", consumer)
+    head = {**BASE, "orders.view": "label: Orders\ndimensions: {}\n"}
+    # The branch-only edit removes the consumer, so both fake live validators
+    # would be healthy. Git would still deploy it.
+    code, report = run_pr(head, {**head, "legacy.view": "dimensions: {}\n"})
+    assert code == 2 and report["validation_complete"] is False
+    assert any(i.get("source_fallback_reason") == "dependency_consumers_unverified" and
+               i.get("validation_scope") == "branch" for i in report["issues"])
+
+
+def test_report_records_baseline_only_full_fallback(run_pr, monkeypatch):
+    monkeypatch.setitem(BASE, "orders.view", VIEW + "extends: inherited\n")
+    head = {**BASE, "orders.view": VIEW}
+    code, report = run_pr(head, head)
+    assert code == 0
+    proof = report["model_reports"][0]["candidate_verification"]
+    assert proof["method"] == "pr_changed_files"
+    assert proof["base_source_verification"] == {"method": "authored_yaml_snapshot",
+                                                "source_fallback_reason": "dependency_scope_unresolved"}

@@ -75,4 +75,7 @@ def test_complete_pr_pipeline_does_not_omit_relationships(tmp_path, monkeypatch,
     report = json.loads((tmp_path / ".omniflow/public/report.json").read_text())
     assert report["validation_complete"] is True
     assert report["policy_decision"] == ("fail" if changed else "pass")
-    assert report["model_reports"][0]["candidate_verification"]["status"] == "verified"
+    proof = report["model_reports"][0]["candidate_verification"]
+    assert proof["status"] == ("verified" if changed else "scope_empty")
+    if not changed:
+        assert proof["changed_file_count"] == 0

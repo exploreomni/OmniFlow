@@ -128,9 +128,9 @@ Public repair output follows [Diagnostic Privacy](DIAGNOSTIC_PRIVACY.md): fixed 
 4. OmniFlow reads trusted base-branch metadata and resolves exactly one Omni model and branch.
 5. It records one repair attempt for the exact PR head SHA in a bot-authored PR comment.
 6. It fetches authored YAML with checksums into memory and maps current model errors to existing files.
-7. It submits one bounded metadata-only prompt to the Omni AI job API.
+7. It submits fixed instructions and counts to the Omni AI job API. Each permitted file is identified by its position in the sorted authored inventory and the SHA-256 of its exact path. Validator prose, suggested fixes, paths and source text stay out of the prompt. The agent must use its read-only modeling context to inspect the same branch’s current non-warning Model Validator findings and verify the file hashes, positions and counts before editing. If it cannot do so, the instructions direct it to stop and request manual review. Its ability to do this still needs a supported API and a live test.
 8. It polls only job state. On timeout, it requests cancellation before any rollback.
-9. It fetches authored YAML again and rejects additions, deletions, unrelated files, oversized changes, secrets, SQL, data-source, access, visibility, ownership, and governance changes.
+9. It fetches authored YAML again and rejects file additions, deletions, unrelated files, oversized changes, introduced secrets and edits to protected SQL, data-source, access, visibility, ownership and governance fields. It checks nested additions, removals and changes of YAML type. An ambiguous mapping or alias requires manual repair.
 10. It forces model validation, then reruns configured content validation, semantic lint, semantic diff, downstream contracts, and optional dbt exposures. Model/content verification uses strict health, not the PR new-only switches or historical suppression; existing model errors cannot be accepted as a successful repair. Model warnings follow `fail_on_warnings`.
 11. It rechecks that the branch did not change during validation.
 12. It updates the Git-connected branch using `require_branch_exists: true` only after all gates pass.

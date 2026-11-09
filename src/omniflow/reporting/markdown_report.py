@@ -110,15 +110,30 @@ def _render_minimal_diagnostic(report: dict[str, Any]) -> str:
                 lines.append(f"- `{reference}` source verification: the PR touched zero Omni files in this model. "
                              "See the live validator results below.")
             else:
-                lines.append(f"- `{reference}` source verification: changed PR files only "
+                label = ("changed PR files and their model dependencies" if "dependency_file_count" in proof
+                         else "changed PR files only")
+                lines.append(f"- `{reference}` source verification: {label} "
                              f"(`{_safe_code(proof.get('status'))}`). "
                              f"Changed files: `{_safe_code(count)}`. "
                              f"Present on the evaluated side: `{_safe_code(proof.get('file_count'))}`; "
                              f"expected absent: `{_safe_code(proof.get('absent_file_count'))}`.")
+                if "dependency_file_count" in proof:
+                    lines.append(f"  Additional dependency files checked: `{_safe_code(proof['dependency_file_count'])}`.")
         elif method == "authored_yaml_snapshot":
             lines.append(f"- `{reference}` source verification: full authored model "
                          f"(`{_safe_code(proof.get('status'))}`), "
                          f"files on the evaluated side: `{_safe_code(proof.get('file_count'))}`.")
+            if proof.get("source_fallback_reason"):
+                lines.append("  The changed files' dependencies required a whole-model comparison "
+                             f"(`{_safe_code(proof['source_fallback_reason'])}`).")
+        base_source = proof.get("base_source_verification")
+        if isinstance(base_source, dict) and (base_source.get("method"), base_source.get("source_fallback_reason")) != (
+                method, proof.get("source_fallback_reason")):
+            if base_source.get("method") == "authored_yaml_snapshot":
+                lines.append("  The Git base required a full authored model comparison "
+                             f"(`{_safe_code(base_source.get('source_fallback_reason'))}`).")
+            elif base_source.get("method") == "pr_changed_files":
+                lines.append("  The Git base used changed-file and dependency verification.")
         if type(proof.get("excluded_file_count")) is int:
             lines.append(f"- `{reference}`: `{proof['excluded_file_count']}` confirmed non-Omni files "
                          "excluded by trusted policy. Authoritative Omni sources were not removed.")

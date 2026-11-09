@@ -11,8 +11,9 @@ validation:
   # NOT a verified pass. Security, malformed evidence and other blockers remain;
   # an enabled breaking-change hold prevents advisory downgrade.
   mode: strict
-  # For model/content regression checks, verify the Omni files touched by this
-  # PR against Git. Use full_model to require the whole authored model.
+  # Verify changed Omni files and the dependencies needed to validate them.
+  # Unresolved dependencies require full-model evidence. Set full_model to
+  # require the whole authored model on every regression PR.
   source_verification: pr_changes
 
 # Optional reviewed ancillary classification; NOT required for ordinary tooling

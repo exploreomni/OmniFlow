@@ -391,6 +391,9 @@ for the PR is ambiguous, the result is **Incomplete**. A registered model bounds
 the comparison. In `pr_changes` mode, supported line endings, final newlines, and YAML comments or
 formatting can be equivalent when OmniFlow can prove that the authored meaning
 matches. SQL block text and substantive changes still require inspection.
+When a changed definition references another Omni view, its saved dependencies
+must also match the corresponding Git revision. If OmniFlow cannot resolve
+the dependencies, it requires full-model evidence for that comparison.
 Selecting `validation.source_verification: full_model` extends the correspondence
 check to all authored files in the selected model and requires matching authored bytes.
 
@@ -406,7 +409,7 @@ An optional marker can select a model for a content-only or otherwise ambiguous 
 <!-- omniflow-context {"model_id":"uuid","model_path":"omni/my_model","branch_name":"feature/my-change"} -->
 ```
 
-The marker cannot provide `base_url`; its model and path must match trusted metadata; and its branch must match the GitHub head branch. Omni does not currently document this marker, so it must be added by customer automation if used.
+The marker adds a registered model to the checks for this PR. OmniFlow also validates every registered model whose source files changed in Git. A changed Omni file outside the registered paths requires a metadata update on the target branch. The marker's model and path must match trusted metadata, and its branch must match the GitHub head branch. The trusted registration supplies the Omni host. If used, the marker is supplied by customer automation.
 
 Fork pull requests never receive the Omni secret. Non-Omni fork changes skip cleanly; fork changes that touch Omni files fail closed because they cannot be validated without a trusted secret. A maintainer can move the proposed change to a same-repository branch for a full run. Omni-like files outside registered model paths also fail closed so stale or missing routing metadata cannot silently bypass validation.
 

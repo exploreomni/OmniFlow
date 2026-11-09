@@ -15,7 +15,6 @@ from typing import Any
 
 import yaml
 from yaml.nodes import MappingNode, ScalarNode, SequenceNode
-from yaml.tokens import AliasToken, AnchorToken, DirectiveToken, TagToken
 
 from .artifact_identity import _canonical_stem
 from .exceptions import ConfigError, OmniFlowError
@@ -83,7 +82,7 @@ def _identity_keys(path: str) -> set[tuple[str, str]]:
 
 
 def select_scope(changed_paths: Sequence[str], model_path: str, git: dict[str, dict],
-                 api: dict[str, bytes], payload: dict) -> ChangeScope:
+                 api: dict[str, bytes], payload: dict, *, dependency_api_paths: frozenset[str] = frozenset()) -> ChangeScope:
     prefix = "" if model_path == "." else model_path + "/"
     if (not isinstance(changed_paths, Sequence) or isinstance(changed_paths, (str, bytes))
             or len(changed_paths) > MAX_SCOPE_PATHS):
@@ -120,6 +119,7 @@ def select_scope(changed_paths: Sequence[str], model_path: str, git: dict[str, d
                 edges[key].update(group)
     connected = set()
     pending = [key for path in touched for key in _identity_keys(path)]
+    pending.extend(key for p in dependency_api_paths for key in keys(p, omni=True))
     while pending:
         key = pending.pop()
         if key not in connected:
@@ -190,10 +190,7 @@ def _structure(text: str) -> tuple | None:
     if len(text.encode("utf-8")) > MAX_SEMANTIC_COMPARE_BYTES:
         return None
     try:
-        parse_secure_yaml(text, source="changed Omni artifact")
-        if any(isinstance(token, (AliasToken, AnchorToken, DirectiveToken, TagToken))
-               for token in yaml.scan(text, Loader=yaml.SafeLoader)):
-            return None
+        parse_secure_yaml(text, source="changed Omni artifact", comparison=True)
         node = yaml.compose(text, Loader=yaml.SafeLoader)
         return _node_identity(node) if node is not None else ("empty-document",)
     except (OmniFlowError, yaml.YAMLError, ValueError, TypeError, RecursionError, OverflowError):
@@ -207,11 +204,40 @@ def equivalent(git: str, omni: str) -> bool:
     return before is not None and before == _structure(omni)
 
 
-def scope_digest(scope: ChangeScope, pairs: dict[str, str], *, sha: str, side: str,
+def compare_pr_definitions(base: str, head: str, *, view: bool) -> tuple[bool, bool]:
+    """Can the PR alter dependencies, or remove a field that unchanged consumers still need?"""
+    before, after = _structure(base), _structure(head)
+    if before is not None and before == after:
+        return True, False
+    if not view:
+        return False, False
+
+    def field_contracts(node: tuple | None) -> dict | None:
+        if node is None or node[0] != "mapping":
+            return None
+        contracts = {}
+        for key, group in node[1]:
+            if key in {"dimensions", "measures", "fields"}:
+                if group[0] != "mapping":
+                    return None
+                for name, definition in group[1]:
+                    if definition[0] != "mapping":
+                        return None
+                    props = dict(definition[1])
+                    contracts[key, name] = tuple(props.get(k) for k in ("type", "data_type", "aggregate_type"))
+        return contracts
+
+    old, new = field_contracts(before), field_contracts(after)
+    consumers_unknown = old is None or new is None or any(new.get(k) != v for k, v in old.items())
+    return False, consumers_unknown
+
+
+def scope_digest(scope: ChangeScope, pairs: dict[str, str], *, dependencies: set[str], sha: str, side: str,
                  model_path: str, model_id: str, branch_id: str | None) -> str:
     # These are immutable Git identities, observed correspondences and
     # confirmed tombstones. This is NOT an assertion that all Omni bytes (or
     # even representational bytes of a matched file) equal the Git tree.
     bound = [sha, side, model_path, model_id, branch_id,
-             sorted((p, scope.git[p]["sha"] if p in scope.git else None, pairs.get(p)) for p in scope.touched)]
+             sorted((p, scope.git[p]["sha"] if p in scope.git else None, pairs.get(p)) for p in scope.touched),
+             sorted((p, scope.git[p]["sha"], pairs[p]) for p in dependencies)]
     return hashlib.sha256(json.dumps(bound, ensure_ascii=True, separators=(",", ":")).encode()).hexdigest()

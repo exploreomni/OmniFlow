@@ -81,7 +81,13 @@ def recovery_details(issue: dict) -> dict:
         fix = f"Compare this PR’s changed files at the {commit} with the saved {scope}. Review the intended edit, addition or deletion and synchronize that scope."
         if issue.get("contents_comparison") == "different":
             difference = _mismatch_remedy(issue)[0]
-            fix = f"Compare the changed Git definition at the {commit} with its saved file in the {scope}. Confirm the intended definition and synchronize it."
+            if issue.get("source_difference_role") == "referenced_dependency":
+                difference = "A definition used by the PR has different contents in Git and Omni."
+                fix = f"Compare the referenced definition at the {commit} with its saved file in the {scope}. Commit the intended dependency or remove the stale Omni change, then rerun."
+            elif issue.get("source_fallback_reason"):
+                fix = f"Whole-model verification found a difference. Compare the reported definition at the {commit} with its saved file in the {scope}, synchronize the intended version, then rerun."
+            else:
+                fix = f"Compare the changed Git definition at the {commit} with its saved file in the {scope}. Confirm the intended definition and synchronize it."
         elif left and right == 0:
             noun = "file" if left == 1 else "files"
             difference = f"Git has {left:,} {noun} in the changed scope with no matching file in the {scope}."

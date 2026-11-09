@@ -111,6 +111,9 @@ ENUMS = {
     "operation": {"validation", "dbt_impact", "dbt_sync", "ai_repair", "ai_repair_beta"},
     "validation_scope": {"branch", "base"}, "state": {"new", "existing", "resolved", "improved"},
     "method": {"pr_changed_files", "authored_yaml_snapshot"},
+    "source_difference_role": {"referenced_dependency"},
+    "source_fallback_reason": {"dependency_scope_unresolved", "dependency_identity_unresolved", "dependency_scope_limit",
+                               "dependency_consumers_unverified"},
     "status": {"completed", "failed", "not_run", "disabled", "skipped", "passed", "unknown",
                "verified", "unverified", "scope_empty", "pending_recheck", "not_applicable", "success", "refused",
                "proposed", "rolled_back", "manual_review_required", "available", "unavailable", "committed",
@@ -171,7 +174,7 @@ COUNTS = frozenset({
     "checks_failed", "checks_not_run", "checks_disabled", "file_count", "changed_lines",
     "git_file_count", "omni_file_count", "git_only_count", "omni_only_count",
     "excluded_file_count", "changed_file_count", "absent_file_count", "case_only_count", "directory_only_count", "suffix_only_count",
-    "content_selector_count",
+    "dependency_file_count", "content_selector_count",
     "modified_file_count", "regressed_count", "improved_count", "unchanged_count", "prompt_set_count",
     "refreshes_completed", "refreshes_failed", "post_sync_validations_failed", "refreshed_models", "models_requested",
     "http_status", "attempt_count", "max_attempts", "elapsed_ms", "source_line", "source_column", "entry_index",
@@ -190,7 +193,7 @@ FLAGS = frozenset({
     "snapshot_attested", "native_qualified", "remote_execution_may_continue",
 })
 OBJECTS = frozenset({
-    "summary", "change_classification", "candidate_verification", "refresh", "post_sync_validation",
+    "summary", "change_classification", "candidate_verification", "base_source_verification", "refresh", "post_sync_validation",
     "full_validation", "rollback", "commit", "change_summary",
     "repository_diagnostics",
 })

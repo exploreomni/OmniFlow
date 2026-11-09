@@ -5,6 +5,9 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
+import yaml
+from yaml.nodes import MappingNode, Node, ScalarNode, SequenceNode
+
 from ..config import AIRepairSettings
 from ..exceptions import ConfigError, SecurityPolicyError
 from ..model_yaml import validate_editable_yaml_file_name
@@ -18,6 +21,7 @@ SENSITIVE_KEYS = {
     "access_filters",
     "access_grant",
     "access_grants",
+    "default_access_grants",
     "required_access_grants",
     "user_attribute",
     "user_attributes",
@@ -29,6 +33,7 @@ SENSITIVE_KEYS = {
     "security",
     "sql",
     "sql_on",
+    "on_sql",
     "sql_where",
     "always_where",
     "default_filters",
@@ -38,6 +43,7 @@ SENSITIVE_KEYS = {
     "owner",
     "owners",
     "connection",
+    "catalog",
     "database",
     "schema",
     "table",
@@ -45,6 +51,7 @@ SENSITIVE_KEYS = {
     "allowed_values",
     "ai_context",
 }
+_REPAIR_SCALAR_TAGS = {f"tag:yaml.org,2002:{name}" for name in ("str", "bool", "int", "float", "null")}
 SECRET_LIKE_VALUE_RE = re.compile(
     r"(?:Bearer\s+[A-Za-z0-9._~+/=-]+|OMNI_API_KEY\s*[:=]|github_pat_|gh[pousr]_|AKIA[A-Z0-9]{16})",
     re.IGNORECASE,
@@ -154,18 +161,13 @@ def inspect_repair_change(
         raise SecurityPolicyError("Omni AI repair exceeded the configured changed-line limit")
 
     for file_name in difference.modified_files:
-        old_payload = parse_secure_yaml(before.files[file_name].text, source=file_name)
-        new_payload = parse_secure_yaml(after.files[file_name].text, source=file_name)
-        if not isinstance(new_payload, (dict, list)):
-            raise SecurityPolicyError("Omni AI repair replaced an authored YAML file with an unsupported scalar value")
-        reject_secret_keys(new_payload, source=f"AI-repaired YAML file {file_name}")
-        changed_paths = _changed_paths(old_payload, new_payload)
-        sensitive = sorted(path for path in changed_paths if _path_contains_sensitive_key(path))
-        if sensitive:
+        before_protected, before_secrets = _repair_fields(before.files[file_name].text, file_name)
+        after_protected, after_secrets = _repair_fields(after.files[file_name].text, file_name, proposed=True)
+        if before_protected != after_protected:
             raise SecurityPolicyError(
                 f"Omni AI repair changed security, governance, SQL, or data-source metadata in {file_name}"
             )
-        if any(_contains_secret_like_value(value) for _, value in _new_changed_values(old_payload, new_payload)):
+        if any(before_secrets.get(path) != value for path, value in after_secrets.items()):
             raise SecurityPolicyError(f"Omni AI repair introduced a secret-like value in {file_name}")
     return difference
 
@@ -178,67 +180,59 @@ def _changed_line_count(before: str, after: str) -> int:
     )
 
 
-def _changed_paths(before: Any, after: Any, path: tuple[str, ...] = ()) -> set[tuple[str, ...]]:
-    if isinstance(before, dict) and isinstance(after, dict):
-        paths: set[tuple[str, ...]] = set()
-        for key in set(before) | set(after):
-            child_path = (*path, str(key))
-            if key not in before or key not in after:
-                paths.add(child_path)
-            else:
-                paths.update(_changed_paths(before[key], after[key], child_path))
-        return paths
-    if isinstance(before, list) and isinstance(after, list):
-        paths = set()
-        for index in range(max(len(before), len(after))):
-            child_path = (*path, f"[{index}]")
-            if index >= len(before) or index >= len(after):
-                paths.add(child_path)
-            else:
-                paths.update(_changed_paths(before[index], after[index], child_path))
-        return paths
-    return {path} if before != after else set()
+def _repair_fields(text: str, source: str, *, proposed: bool = False) -> tuple[dict, dict]:
+    """Index protected subtrees and secret-like scalars by typed path before comparing revisions."""
+    # Apply the shared size, depth, graph and YAML parser limits before composition.
+    payload = parse_secure_yaml(text, source=source)
+    if proposed:
+        reject_secret_keys(payload, source=f"AI-repaired YAML file {source}")
+    root = yaml.compose(text, Loader=yaml.SafeLoader)
+    if proposed and not isinstance(root, (MappingNode, SequenceNode)):
+        raise SecurityPolicyError("AI repair requires an authored YAML mapping or sequence")
 
+    protected_fields = {}
+    secret_values = {}
+    seen = set()
+    prefix = "tag:yaml.org,2002:"
 
-def _new_changed_values(before: Any, after: Any, path: tuple[str, ...] = ()) -> list[tuple[tuple[str, ...], Any]]:
-    if isinstance(before, dict) and isinstance(after, dict):
-        values: list[tuple[tuple[str, ...], Any]] = []
-        for key in after:
-            child_path = (*path, str(key))
-            if key not in before:
-                values.extend(_all_leaf_values(after[key], child_path))
-            else:
-                values.extend(_new_changed_values(before[key], after[key], child_path))
-        return values
-    if isinstance(before, list) and isinstance(after, list):
-        values = []
-        for index, item in enumerate(after):
-            child_path = (*path, f"[{index}]")
-            if index >= len(before):
-                values.extend(_all_leaf_values(item, child_path))
-            else:
-                values.extend(_new_changed_values(before[index], item, child_path))
-        return values
-    return [(path, after)] if before != after else []
+    def walk(node: Node, path: tuple[str | int, ...], protected: bool) -> None:
+        # Aliased locations and non-standard tags may change how Omni resolves
+        # the same authored path. Leave those files for a human to repair.
+        if id(node) in seen:
+            raise SecurityPolicyError("AI repair cannot verify YAML aliases")
+        seen.add(id(node))
+        if isinstance(node, MappingNode) and node.tag == prefix + "map":
+            keys = []
+            for key, _ in node.value:
+                if not isinstance(key, ScalarNode) or key.tag != prefix + "str":
+                    raise SecurityPolicyError("AI repair requires unique string YAML mapping keys")
+                if id(key) in seen:
+                    raise SecurityPolicyError("AI repair cannot verify YAML aliases")
+                seen.add(id(key))
+                keys.append(key.value)
+            if len(set(keys)) != len(keys):
+                raise SecurityPolicyError("AI repair requires unique string YAML mapping keys")
+            if protected:
+                protected_fields[path] = (node.tag, tuple(keys))
+            for key, child in node.value:
+                sensitive_key = key.value.lower().replace("-", "_") in SENSITIVE_KEYS
+                walk(child, (*path, key.value), protected or sensitive_key)
+        elif isinstance(node, SequenceNode) and node.tag == prefix + "seq":
+            if protected:
+                protected_fields[path] = (node.tag, len(node.value))
+            for index, item in enumerate(node.value):
+                walk(item, (*path, index), protected)
+        elif isinstance(node, ScalarNode) and node.tag in _REPAIR_SCALAR_TAGS:
+            # Keep the YAML type and value. Python coercion would equate True,
+            # 1 and 1.0, including when they occur inside a protected list.
+            value = (node.tag, node.value)
+            if protected:
+                protected_fields[path] = value
+            if SECRET_LIKE_VALUE_RE.search(node.value):
+                secret_values[path] = value
+        else:
+            raise SecurityPolicyError("AI repair cannot verify this YAML node type")
 
-
-def _all_leaf_values(value: Any, path: tuple[str, ...]) -> list[tuple[tuple[str, ...], Any]]:
-    if isinstance(value, dict):
-        values: list[tuple[tuple[str, ...], Any]] = []
-        for key, item in value.items():
-            values.extend(_all_leaf_values(item, (*path, str(key))))
-        return values
-    if isinstance(value, list):
-        values = []
-        for index, item in enumerate(value):
-            values.extend(_all_leaf_values(item, (*path, f"[{index}]")))
-        return values
-    return [(path, value)]
-
-
-def _path_contains_sensitive_key(path: tuple[str, ...]) -> bool:
-    return any(segment.lower().replace("-", "_") in SENSITIVE_KEYS for segment in path)
-
-
-def _contains_secret_like_value(value: Any) -> bool:
-    return isinstance(value, str) and bool(SECRET_LIKE_VALUE_RE.search(value))
+    if root is not None:
+        walk(root, (), False)
+    return protected_fields, secret_values

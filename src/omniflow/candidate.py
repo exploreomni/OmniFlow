@@ -5,14 +5,23 @@ from __future__ import annotations
 import hashlib
 import os
 import subprocess  # nosec B404
-from collections import defaultdict
+from collections import Counter, defaultdict
 from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from pathlib import Path, PurePosixPath
 from typing import Any
 
 from .artifact_identity import ArtifactIdentityError, identity_digest, match_artifacts
-from .candidate_change_scope import equivalent, scope_digest, select_scope, unproven_absence
+from .candidate_change_scope import (
+    MAX_SEMANTIC_COMPARE_BYTES,
+    _canonical_names,
+    compare_pr_definitions,
+    equivalent,
+    scope_digest,
+    select_scope,
+    unproven_absence,
+)
+from .candidate_dependencies import referenced_files
 from .candidate_difference import difference_details, shareable_difference_fields
 from .exceptions import ConfigError, OmniFlowError, exception_diagnostic
 from .file_scope import FileScopeError, NonOmniRule, excluded_semantic_paths
@@ -171,10 +180,64 @@ def _verify_snapshot(
     if excluded:
         expected = {path: entry for path, entry in expected.items() if path not in excluded}
     expected = _source_inventory(expected, actual)
+
+    def other_inventory() -> set[str]:
+        opposite = pull_request_revision("base" if revision_side == "head" else "head")
+        if opposite is None or opposite[1] != repository:
+            raise CandidateVerificationError("invalid_pr_revision")
+        try:
+            other_tree = _local_tree(opposite[0], root=root)
+        except _GitUnavailable:
+            other_tree = _remote_tree(opposite[1], opposite[0])
+        return set(_semantic_inventory(other_tree, model_path, include_unrecognized=True))
+
     scope = None
+    original_scope = None
+    dependency_api_paths: set[str] = set()
+    fallback_reason = None
     if changed_paths is not None:
         scope = select_scope(changed_paths, model_path, expected, actual, payload)
-        expected, actual = scope.git, scope.api
+        original_scope = scope
+        present = {p: scope.git[p] for p in scope.touched & scope.git.keys()}
+        absent = scope.touched - present.keys()
+        if revision_side == "head" and absent:
+            # A removed definition may have consumers anywhere in the remaining
+            # model. A directory or wrapper move can preserve a definition.
+            missing_names = Counter(filename_identity(p) for p in absent)
+            present_names = Counter(filename_identity(p) for p in present)
+            if missing_names - present_names:
+                fallback_reason = "dependency_consumers_unverified"
+            else:
+                names = set(missing_names)
+                before = Counter(filename_identity(p) for p in other_inventory() if filename_identity(p) in names)
+                after = Counter(filename_identity(p) for p in expected if filename_identity(p) in names)
+                if before - after:
+                    fallback_reason = "dependency_consumers_unverified"
+        if present and scope.api and not fallback_reason:
+            unchanged, field_loss = unchanged_pr_sources(
+                expected=present, model_path=model_path, sha=sha, side=revision_side,
+                repository=repository, root=root, remote=remote,
+            )
+            if field_loss:
+                fallback_reason = "dependency_consumers_unverified"
+            elif present.keys() - unchanged:
+                active = scope
+                if unchanged:
+                    active_paths = [scope.git[p]["path"] for p in present.keys() - unchanged]
+                    active = select_scope(active_paths, model_path, expected, actual, payload)
+                names = _canonical_names(payload["viewNames"], actual) if "viewNames" in payload else None
+                dependency_api_paths, fallback_reason = referenced_files(set(active.api), actual, expected, names)
+        if fallback_reason:
+            if unproven_absence(original_scope, {}, other_inventory):
+                error = CandidateVerificationError("pr_change_not_synchronized", **counts)
+                error.diagnostic_context["source_fallback_reason"] = fallback_reason
+                raise error
+            scope = None  # Use the complete, exact snapshots from this same observation.
+        elif dependency_api_paths:
+            scope = select_scope(changed_paths, model_path, expected, actual, payload,
+                                 dependency_api_paths=frozenset(dependency_api_paths))
+        if scope is not None:
+            expected, actual = scope.git, scope.api
         try:
             identity_index(expected)
         except AmbiguousModelPath:
@@ -184,36 +247,11 @@ def _verify_snapshot(
         raise CandidateVerificationError("empty_git_snapshot", **counts)
     # Read only immutable Git objects, binding every returned byte to the tree's
     # blob hash before using authored qualification to establish correspondence.
-    git_files = {}
-    for path, entry in sorted(expected.items()):
-        try:
-            if local_diagnosis_revision is not None:
-                # Read the already inventoried blob directly. Never lazy-fetch
-                # missing objects or invoke configured remote credential helpers.
-                try:
-                    text = _bounded_git(["cat-file", "blob", entry["sha"]], root=root,
-                                        limit=MAX_YAML_FILE_BYTES, local_only=True).decode("utf-8")
-                except _GitUnavailable:
-                    raise CandidateVerificationError("git_snapshot_unavailable") from None
-                except UnicodeError:
-                    raise CandidateVerificationError("invalid_snapshot_encoding") from None
-            elif remote:
-                text = read_github_text(repository, sha, entry["path"], max_bytes=MAX_YAML_FILE_BYTES)
-            else:
-                text = read_git_text(sha, entry["path"], root=root, max_bytes=MAX_YAML_FILE_BYTES)
-        except OmniFlowError as exc:
-            _retain_candidate_cause(exc, "git_snapshot_unavailable")
-            raise
-        if not isinstance(text, str):
-            raise CandidateVerificationError("incomplete_git_snapshot")
-        raw = _utf8(text)
-        # Bind the helper's content to the blob in the independently checked
-        # inventory, including when local Git replacement refs are configured.
-        algorithm = hashlib.sha1 if len(entry["sha"]) == 40 else hashlib.sha256  # nosec B303,B324
-        blob = algorithm(b"blob " + str(len(raw)).encode("ascii") + b"\0" + raw).hexdigest()  # nosec B324
-        if len(raw) != entry["size"] or blob != entry["sha"].lower():
-            raise CandidateVerificationError("incomplete_git_snapshot")
-        git_files[path] = text
+    git_files = {
+        path: _verified_git_text(entry, repository=repository, sha=sha, root=root, remote=remote,
+                                 local_only=local_diagnosis_revision is not None)
+        for path, entry in sorted(expected.items())
+    }
     omni_files = {path: raw.decode("utf-8") for path, raw in actual.items()}
     view_names = scope.view_names if scope is not None else normalize_api_view_names(
         payload["viewNames"], omni_files, parse_contents=False,
@@ -236,28 +274,24 @@ def _verify_snapshot(
         pairs = _mismatch_pairs(correspondence.unmatched_git, correspondence.unmatched_omni)
         samples = [{"git_path": left, "omni_path": right, "comparison": "not_compared", "pairing": pairing}
                    for left, right, pairing in pairs[:MAX_CANDIDATE_SAMPLES]]
-        raise _bind_samples(CandidateVerificationError(
-            "pr_change_not_synchronized" if scope is not None else "file_inventory_mismatch",
+        mismatch = CandidateVerificationError(
+            "pr_change_not_synchronized" if changed_paths is not None else "file_inventory_mismatch",
             candidate_samples=samples, **counts,
             candidate_sample_count=len(samples), candidate_sample_omitted_count=len(pairs) - len(samples),
             compared_file_count=0,
-        ), sha=sha, model_id=context.model_id, branch_id=branch_id, comparison="not_compared")
-    if scope is not None:
+        )
+        if fallback_reason:
+            mismatch.diagnostic_context["source_fallback_reason"] = fallback_reason
+        raise _bind_samples(mismatch, sha=sha, model_id=context.model_id, branch_id=branch_id, comparison="not_compared")
+    if original_scope is not None:
         # A survivor with a coincidentally unique basename cannot prove which
         # previously colliding view was removed. Never rely on identity-by-bytes.
-        def other_inventory() -> set[str]:
-            opposite = pull_request_revision("base" if revision_side == "head" else "head")
-            if opposite is None or opposite[1] != repository:
-                raise CandidateVerificationError("invalid_pr_revision")
-            try:
-                other_tree = _local_tree(opposite[0], root=root)
-            except _GitUnavailable:
-                other_tree = _remote_tree(opposite[1], opposite[0])
-            return set(_semantic_inventory(other_tree, model_path, include_unrecognized=True))
-        if unproven_absence(scope, correspondence.pairing_methods, other_inventory):
+        if unproven_absence(original_scope, correspondence.pairing_methods, other_inventory):
             raise CandidateVerificationError("pr_change_not_synchronized", **counts)
     digest = hashlib.sha256()
-    to_compare = (git_files if scope is None else {p: t for p, t in git_files.items() if p in scope.touched})
+    dependency_git = {path for path, target in correspondence.pairs.items() if target in dependency_api_paths}
+    to_compare = (git_files if scope is None else
+                  {p: t for p, t in git_files.items() if p in scope.touched or p in dependency_git})
     for compared_count, (path, text) in enumerate(sorted(to_compare.items()), start=1):
         raw = _utf8(text)
         api_path = correspondence.pairs[path]
@@ -267,12 +301,16 @@ def _verify_snapshot(
             detail = difference_details(text, omni_files[api_path])
             sample.update(detail)
             error = CandidateVerificationError(
-                "pr_change_not_synchronized" if scope is not None else "content_mismatch", **counts,
+                "pr_change_not_synchronized" if changed_paths is not None else "content_mismatch", **counts,
                 candidate_samples=[sample],
                 candidate_sample_count=1, candidate_sample_omitted_count=0, compared_file_count=compared_count,
             )
             # Never place paths, line positions or source text in public context.
             error.diagnostic_context.update(shareable_difference_fields(detail))
+            if scope is not None and path in dependency_git - scope.touched:
+                error.diagnostic_context["source_difference_role"] = "referenced_dependency"
+            if fallback_reason:
+                error.diagnostic_context["source_fallback_reason"] = fallback_reason
             if local_diagnosis_revision is not None and local_preview is not None:
                 local_preview(text, omni_files[api_path], detail)
             raise _bind_samples(error, sha=sha, model_id=context.model_id, branch_id=branch_id, comparison="different")
@@ -281,9 +319,10 @@ def _verify_snapshot(
     if scope is not None:
         return {
             "status": "verified" if scope.touched else "scope_empty", "method": "pr_changed_files",
-            f"{revision_side}_sha": sha, "file_count": len(to_compare), "changed_file_count": len(scope.touched),
+            f"{revision_side}_sha": sha, "file_count": len(scope.touched & git_files.keys()), "changed_file_count": len(scope.touched),
+            "dependency_file_count": len(dependency_git - scope.touched),
             "absent_file_count": len(scope.touched - git_files.keys()),
-            "scope_digest": scope_digest(scope, correspondence.pairs, sha=sha, side=revision_side,
+            "scope_digest": scope_digest(scope, correspondence.pairs, dependencies=dependency_git, sha=sha, side=revision_side,
                                          model_path=model_path, model_id=context.model_id, branch_id=branch_id),
             "identity_digest": identity_digest(correspondence.pairs, omni_view_names=view_names),
         }
@@ -292,6 +331,8 @@ def _verify_snapshot(
         "file_count": len(expected), "snapshot_digest": digest.hexdigest(),
         "identity_digest": identity_digest(correspondence.pairs, omni_view_names=view_names),
     }
+    if fallback_reason:
+        proof["source_fallback_reason"] = fallback_reason
     if non_omni_rules:
         proof["excluded_file_count"] = len(excluded)
     return proof
@@ -355,6 +396,98 @@ def _safe_path(value: Any) -> str:
 
 def _semantic_path(path: str) -> bool:
     return is_semantic_file(path)
+
+
+def unchanged_pr_sources(*, expected: dict[str, dict], model_path: str, sha: str, side: str,
+                         repository: str, root: Path, remote: bool) -> tuple[set[str], bool]:
+    """Compare existing files at the two event commits. Unknown consumer coverage requires a full check."""
+    if not expected:
+        return set(), False
+    if len(expected) > 128:
+        return set(), True
+    try:
+        opposite = pull_request_revision("base" if side == "head" else "head")
+        if not opposite or opposite[1] != repository:
+            return set(), True
+        other_sha = opposite[0]
+        try:
+            entries = _local_tree(other_sha, root=root)
+            other_remote = False
+        except _GitUnavailable:
+            entries = _remote_tree(repository, other_sha)
+            other_remote = True
+        other = _semantic_inventory(entries, model_path, include_unrecognized=True)
+        other_views: dict[str, list[dict]] = defaultdict(list)
+        for path, entry in other.items():
+            name = filename_identity(path)
+            if name.endswith(".view"):
+                other_views[name].append(entry)
+        unchanged = set()
+        budget = 4 * 1024 * 1024
+        for path, entry in expected.items():
+            counterpart = other.get(path)
+            same_path = counterpart is not None
+            if counterpart is None:
+                # A folder move or wrapper rename can also remove fields. A basename
+                # can require wider coverage but cannot grant a no-op exemption.
+                alternatives = other_views.get(filename_identity(path), [])
+                if not alternatives:
+                    continue
+                if len(alternatives) != 1:
+                    return set(), True
+                counterpart = alternatives[0]
+            if entry["mode"] != counterpart["mode"]:
+                return set(), True
+            if entry["sha"] == counterpart["sha"]:
+                if same_path:
+                    unchanged.add(path)
+                continue
+            largest = max(entry["size"], counterpart["size"])
+            budget -= entry["size"] + counterpart["size"]
+            if largest > MAX_SEMANTIC_COMPARE_BYTES or budget < 0:
+                return set(), True
+            current = _verified_git_text(entry, repository=repository, sha=sha, root=root,
+                                         remote=remote, max_bytes=MAX_SEMANTIC_COMPARE_BYTES)
+            previous = _verified_git_text(counterpart, repository=repository, sha=other_sha, root=root,
+                                          remote=other_remote, max_bytes=MAX_SEMANTIC_COMPARE_BYTES)
+            base, head = (previous, current) if side == "head" else (current, previous)
+            same, consumers_unknown = compare_pr_definitions(base, head, view=filename_identity(path).endswith(".view"))
+            if consumers_unknown:
+                return set(), True
+            if same and same_path:
+                unchanged.add(path)
+        return unchanged, False
+    except OmniFlowError:
+        # This optimization cannot relax verification when either Git input is unavailable.
+        return set(), True
+
+
+def _verified_git_text(entry: dict, *, repository: str, sha: str, root: Path, remote: bool,
+                       local_only: bool = False, max_bytes: int = MAX_YAML_FILE_BYTES) -> str:
+    try:
+        if local_only:
+            # The workstation diagnostic must never fetch objects or invoke credential helpers.
+            text = _bounded_git(["cat-file", "blob", entry["sha"]], root=root,
+                                limit=max_bytes, local_only=True).decode("utf-8")
+        elif remote:
+            text = read_github_text(repository, sha, entry["path"], max_bytes=max_bytes)
+        else:
+            text = read_git_text(sha, entry["path"], root=root, max_bytes=max_bytes)
+    except _GitUnavailable:
+        raise CandidateVerificationError("git_snapshot_unavailable") from None
+    except UnicodeError:
+        raise CandidateVerificationError("invalid_snapshot_encoding") from None
+    except OmniFlowError as exc:
+        _retain_candidate_cause(exc, "git_snapshot_unavailable")
+        raise
+    if not isinstance(text, str):
+        raise CandidateVerificationError("incomplete_git_snapshot")
+    raw = _utf8(text)
+    algorithm = hashlib.sha1 if len(entry["sha"]) == 40 else hashlib.sha256  # nosec B303,B324
+    blob = algorithm(b"blob " + str(len(raw)).encode("ascii") + b"\0" + raw).hexdigest()  # nosec B324
+    if len(raw) > max_bytes or len(raw) != entry["size"] or blob != entry["sha"].lower():
+        raise CandidateVerificationError("incomplete_git_snapshot")
+    return text
 
 
 def _utf8(text: str) -> bytes:

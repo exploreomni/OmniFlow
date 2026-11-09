@@ -10,10 +10,9 @@ from typing import Any
 
 import yaml
 from yaml.nodes import MappingNode, ScalarNode, SequenceNode
-from yaml.tokens import AliasToken, AnchorToken, DirectiveToken, TagToken
 
 from .exceptions import OmniFlowError
-from .yaml_security import parse_secure_yaml
+from .yaml_security import UnsupportedComparisonYaml, parse_secure_yaml
 
 MAX_CLASSIFICATION_BYTES = 128 * 1024
 DIFFERENCE_CLASSES = frozenset({
@@ -102,10 +101,8 @@ def _yaml_signature(text: str) -> tuple:
     try:
         # Shared limits bound file size, nesting and parser work. Construction
         # does not define equality: coercions would hide authored differences.
-        parse_secure_yaml(text, source="PR snapshot")
+        parse_secure_yaml(text, source="PR snapshot", comparison=True)
         tokens = list(yaml.scan(text, Loader=yaml.SafeLoader))
-        if any(isinstance(token, (AliasToken, AnchorToken, DirectiveToken, TagToken)) for token in tokens):
-            raise _Unverified("unsupported_yaml_construct")
         node = yaml.compose(text, Loader=yaml.SafeLoader)
         if node is None:
             raise _Unverified("empty_yaml_document")
@@ -116,6 +113,8 @@ def _yaml_signature(text: str) -> tuple:
         return tuple((type(token).__name__, getattr(token, "value", None),
                       getattr(token, "style", None),
                       text[token.start_mark.index:token.end_mark.index]) for token in tokens)
+    except UnsupportedComparisonYaml:
+        raise _Unverified("unsupported_yaml_construct") from None
     except (yaml.YAMLError, RecursionError, OmniFlowError):
         raise _Unverified("invalid_or_unsupported_yaml") from None
 

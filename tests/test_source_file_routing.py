@@ -107,6 +107,19 @@ def test_actual_source_outside_registered_scope_is_not_ignored(version):
     assert select(version, "omni", ["other/views/config.yaml"]) == []
 
 
+def test_pr_marker_cannot_hide_changed_models_or_unregistered_files(monkeypatch):
+    flow = registry(1, "omni/first")
+    second = dict(flow["models"][0], model_id="second", model_path="omni/second")
+    flow["models"].append(second)
+    monkeypatch.setattr("omniflow.discovery.load_flow_metadata", lambda *a, **kw: flow)
+    monkeypatch.setattr("omniflow.discovery.load_pr_marker", lambda: {"model_id": "second"})
+    changed = ["omni/first/orders.view.yaml", "omni/first/sales.topic.yml"]
+    contexts = discover_contexts(auto=True, allow_skip=True, changed_files=changed)
+    assert sorted(context.model_id for context in contexts) == ["model", "second"]
+    with pytest.raises(ConfigError, match="outside every registered model_path"):
+        discover_contexts(auto=True, allow_skip=True, changed_files=[*changed, "other/new.view.yaml"])
+
+
 def test_missing_registry_only_blocks_recognized_source_families(monkeypatch):
     monkeypatch.setattr("omniflow.discovery.load_flow_metadata", lambda *a, **kw: None)
     monkeypatch.setattr("omniflow.discovery.load_pr_marker", lambda: {})

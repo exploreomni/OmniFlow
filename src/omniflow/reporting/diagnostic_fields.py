@@ -5,6 +5,7 @@ repository-only locations are added separately by the authorized projection.
 """
 
 DIAGNOSTIC_FACTS = (
+    "source_difference_role", "source_fallback_reason",
     "context_reference", "validation_scope", "state", "reason_code", "candidate_reason",
     "cause_code", "transport_reason", "document_reference", "service", "api_operation", "http_status", "attempt_count", "max_attempts",
     "operation_phase", "retryable", "config_key", "expected_type", "source_kind", "source_line",

@@ -1414,6 +1414,12 @@ def _run_context_steps(
     scope_findings(all_issues, model_id=context.model_id, branch_id=branch_id, branch_name=context.branch_name)
     summary = _summarize(all_issues)
     report = _base_report(config, context, branch_id, exit_code, all_issues, summary)
+    if scoped_regression and baseline_proof:
+        # Report scope decisions separately. The exact proofs consumed by the
+        # final comparison and repository evidence stay unchanged.
+        public_base = {key: baseline_proof[key] for key in ("method", "source_fallback_reason", "dependency_file_count")
+                       if key in baseline_proof}
+        report["candidate_verification"] = {**report["candidate_verification"], "base_source_verification": public_base}
     report["check_reports"] = reports
     report.update(progress.evidence())
     if not report["validation_complete"] and exit_code == 0:

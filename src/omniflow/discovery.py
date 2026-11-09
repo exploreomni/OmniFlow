@@ -445,6 +445,7 @@ def select_model_contexts(
         _validate_target_registry(models)
         return _select_target_contexts(models, changed_files, marker or {}, allow_skip=allow_skip)
     marker = marker or {}
+    selected = []
     if marker.get("model_id"):
         matching = [context for context in models if context.model_id == marker["model_id"]]
         if not matching:
@@ -461,32 +462,25 @@ def select_model_contexts(
                     "OmniFlow PR marker branch_name does not match the GitHub pull request head branch"
                 )
             context.branch_name = branch_name or marker_branch
-            _clear_base_branch_context(context)
-        return matching
+        selected.extend(matching)
 
-    matched = [
-        context
-        for context in models
-        if context.model_path and any(_is_under_model_path(path, context.model_path) for path in changed_files)
-    ]
-    if matched:
-        for context in matched:
-            _clear_base_branch_context(context)
-        return matched
-    if allow_skip and changed_files:
-        unmatched_omni_files = [
-            path for path in changed_files
-            if _is_unregistered_omni_file(path, [context.model_path for context in models])
-        ]
-        if unmatched_omni_files:
-            sample = ", ".join(unmatched_omni_files[:3])
+    model_paths = [context.model_path for context in models]
+    for path in changed_files:
+        matched = [context for context in models if _is_under_model_path(path, context.model_path)]
+        if not matched and _is_unregistered_omni_file(path, model_paths):
             raise ConfigError(
-                "Omni semantic files changed outside every registered model_path: "
-                f"{sample}. Update trusted .omni/flow.json metadata or add a valid PR marker.",
+                "Omni semantic files changed outside every registered model_path. "
+                "Register the model path in the trusted .omni/flow.json.",
                 reason_code="unregistered_model_path",
             )
-        return []
-    if allow_skip and not changed_files:
+        for context in matched:
+            if context not in selected:
+                selected.append(context)
+    if selected:
+        for context in selected:
+            _clear_base_branch_context(context)
+        return selected
+    if allow_skip:
         return []
     if len(models) == 1:
         _clear_base_branch_context(models[0])

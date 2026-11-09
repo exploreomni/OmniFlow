@@ -21,7 +21,8 @@ def compare(monkeypatch, git, omni, changed, *, side="head", names=None, rules=(
             blob = hashlib.sha1(b"blob " + str(len(raw)).encode() + b"\0" + raw).hexdigest()
             entries.append({"path": "omni/" + path, "mode": "100644", "type": "blob", "size": len(raw), "sha": blob})
         return entries
-    reader = Mock(side_effect=lambda revision, path, **kwargs: git[path.removeprefix("omni/")])
+    revisions = {sha: git, other_sha: other or {}}
+    reader = Mock(side_effect=lambda revision, path, **kwargs: revisions[revision][path.removeprefix("omni/")])
     monkeypatch.setattr(candidate, "pull_request_revision", lambda rev_side: (sha if rev_side == side else other_sha, "fixture/repo"))
     monkeypatch.setattr(candidate, "_local_tree", lambda revision, **kwargs: tree(git if revision == sha else other or {}))
     monkeypatch.setattr(candidate, "read_git_text", reader)
@@ -33,7 +34,7 @@ def compare(monkeypatch, git, omni, changed, *, side="head", names=None, rules=(
     context = SimpleNamespace(model_id="fixture-model", model_path="omni", branch_id="fixture-branch")
     proof = verify_candidate(client, context, revision_side=side, changed_paths=changed, non_omni_rules=rules)
     assert client.get_model_yaml.call_args.kwargs["branch_id"] == ("fixture-branch" if side == "head" else None)
-    assert all(c.args[0] == sha for c in reader.call_args_list)
+    assert all(c.args[0] in revisions for c in reader.call_args_list)
     return proof, {c.args[1] for c in reader.call_args_list}
 
 
@@ -74,7 +75,12 @@ def test_create_delete_requires_presence_or_absence_on_each_revision(monkeypatch
         present = (mode == "add") == (side == "head")
         expected = exists if present else unchanged
         proof, _ = compare(monkeypatch, expected, expected, ["omni/sales.topic.yaml"], side=side)
-        assert proof["changed_file_count"] == 1 and (proof["file_count"], proof["absent_file_count"]) == (int(present), int(not present))
+        if side == "head" and mode == "delete":
+            assert proof["method"] == "authored_yaml_snapshot" and proof["file_count"] == len(unchanged)
+            assert proof["source_fallback_reason"] == "dependency_consumers_unverified"
+        else:
+            assert proof["changed_file_count"] == 1
+            assert (proof["file_count"], proof["absent_file_count"]) == (int(present), int(not present))
         with pytest.raises(CandidateVerificationError) as caught:
             compare(monkeypatch, expected, unchanged if present else exists, ["omni/sales.topic.yaml"], side=side)
         assert caught.value.candidate_reason == "pr_change_not_synchronized"
@@ -97,9 +103,10 @@ def test_deleted_canonical_or_duplicate_view_cannot_borrow_a_stale_survivor(monk
     with pytest.raises(CandidateVerificationError) as alias:
         compare(monkeypatch, {"model": "label: ok"}, api, ["omni/a__orders.view.yaml"], names={"a__orders": "a/orders.view"})
     assert alias.value.candidate_reason == "pr_change_not_synchronized"
-    proof, reads = compare(monkeypatch, git, {"b/orders.view": "schema: b\ntable_name: orders"}, ["omni/a/orders.view"],
+    proof, reads = compare(monkeypatch, git, git, ["omni/a/orders.view"],
                            names={"b__orders": "b/orders.view"})
-    assert proof["absent_file_count"] == 1 and reads == {"omni/b/orders.view"}
+    assert proof["source_fallback_reason"] == "dependency_consumers_unverified"
+    assert reads == {"omni/model", "omni/b/orders.view"}
 
 
 def test_empty_scope_is_never_whole_model_proof_and_bad_inventory_is_not_empty(monkeypatch):

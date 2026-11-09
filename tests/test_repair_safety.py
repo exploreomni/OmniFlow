@@ -196,6 +196,42 @@ class RepairSafetyTests(unittest.TestCase):
                 settings=AIRepairSettings(max_changed_lines=1),
             )
 
+    def test_inspection_checks_protected_descendants_including_container_and_scalar_types(self):
+        cases = [
+            ("fields: {}", "fields: {id: {sql: value}}"),
+            ("joins: []", "joins: [{on_sql: '1=1'}]"),
+            ("model: {default_access_grants: [employees]}", "model: {}"),
+            ("fields: {id: {hidden: true}}", "fields: {}"),
+            ("rules: []", "rules: [{entry: {required_access_grants: []}}]"),
+            ("rules: [{entry: {permissions: {}}}]", "rules: []"),
+            ("label: old", "label: [{owner: ops}]"),
+            ("rules: [{filters: []}]", "rules: {label: new}"),
+            ("role: true", "role: 1"),
+            ("hidden: [1]", "hidden: [1.0]"),
+            ("hidden: yes", "hidden: true"),
+            ("fields: {}", "fields: {field: {hidden: true, hidden: false}}"),
+            ("fields: {}", "fields: {true: first, 1: second}"),
+            ("fields: {}", "fields: {f1: &flag false, hidden: *flag}"),
+            ("label: old", "label: {nested: ['Bearer synthetic-value']}"),  # pragma: allowlist secret
+        ]
+        for before, after in cases:
+            with self.subTest(before=before, after=after), self.assertRaises(SecurityPolicyError):
+                inspect_repair_change(
+                    before=snapshot(MemoryYamlClient({"orders.view": before})),
+                    after=snapshot(MemoryYamlClient({"orders.view": after})),
+                    allowed_files=("orders.view",), settings=AIRepairSettings(),
+                )
+
+    def test_inspection_allows_metadata_edit_alongside_unchanged_nested_protection(self):
+        before = "fields: [{id: {sql: id, hidden: true, description: old}}]"
+        after = before.replace("old", "new")
+        result = inspect_repair_change(
+            before=snapshot(MemoryYamlClient({"orders.view": before})),
+            after=snapshot(MemoryYamlClient({"orders.view": after})),
+            allowed_files=("orders.view",), settings=AIRepairSettings(),
+        )
+        self.assertEqual(result.modified_files, ("orders.view",))
+
     def test_inspection_rejects_sensitive_keys_and_secret_like_values(self):
         before = snapshot(MemoryYamlClient({"orders.view": "name: orders\ndescription: old\n"}))
         unsafe_documents = (

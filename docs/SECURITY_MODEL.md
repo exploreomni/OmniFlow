@@ -20,11 +20,11 @@ The AI Repair development scaffold is outside the supported customer security bo
 
 ## Trust Boundaries
 
-The privileged `pull_request_target` workflow checks out the trusted base revision. OmniFlow reads `.omni/flow.json` and `.omniflow.yml` from that base revision and obtains changed filenames through GitHub's API. It does not check out or execute the proposed pull-request revision.
+The privileged `pull_request_target` workflow checks out the trusted base revision. OmniFlow reads `.omni/flow.json` and `.omniflow.yml` from that base revision. It obtains changed filenames from the immutable Git comparison, using GitHub's compare endpoint when those objects are unavailable locally. It reads proposed source files as data.
 
 The root `.omniflow.yml` policy is required and is distinct from `.github/workflows/omniflow.yml`. Bootstrap it on the protected base before PR validation. Missing policy fails with configuration exit code `2`; neither PR-head-only policy nor environment/identity overrides can substitute for it. Customer PR workflows must use repository-relative custom configuration paths to retain the trusted-base lookup. Absolute paths read a local file directly and are reserved for explicitly trusted local use, not proposed PR policy.
 
-The pull-request description is untrusted. An optional marker may select a model, path, and branch only when each value agrees with trusted metadata and GitHub event context. It cannot supply an Omni host.
+The pull-request description is untrusted. A marker can add a registered model when its values agree with trusted metadata and the GitHub event. Every registered model with a changed Omni source also receives validation. Unregistered Omni paths require a trusted metadata change.
 
 New-only PR model/content validation requires immutable Git base/head evidence and verifies authored live base/candidate YAML against the corresponding revisions before and after checks. Missing or mismatched snapshots block rather than selecting another baseline. This is sampled consistency verification, not an atomic lock over live content/drafts or a guarantee of exhaustive API validation depth. Orchestrated no-branch, post-sync, and repair verification remain strict-health checks, not self-comparisons.
 
