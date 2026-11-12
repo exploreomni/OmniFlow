@@ -732,7 +732,7 @@ dimensions:
             root = self._repo(directory)
             with mock.patch(
                 "omniflow.dbt_impact._sql_changes",
-                return_value=({"coffee_training.analytics_staging.dim_product": {"product_detail"}}, {}),
+                return_value=({"dim_product": {"product_detail"}}, {}),
             ):
                 _, issues = evaluate_dbt_impact(
                     changed_files=["models/staging/dim_product.sql"],

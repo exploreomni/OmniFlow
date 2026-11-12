@@ -59,6 +59,7 @@ class FakeClient:
         self.calls = []
         self.search_error = None
         self.state_error = None
+        self.app_bindings = SimpleNamespace(names=frozenset(), partial=True)
 
     @contextmanager
     def bounded_reads(self, budget):
@@ -88,6 +89,13 @@ class FakeClient:
         if self.state_error:
             raise self.state_error
         return self.state
+
+    def get_published_app_bindings(self, document_id, **kwargs):
+        self.budget.consume()
+        self.calls.append(("app", document_id, kwargs))
+        if isinstance(self.app_bindings, Exception):
+            raise self.app_bindings
+        return self.app_bindings
 
 
 def run(client=None, impacts=None, *, contexts=None, settings=None, **kwargs):
@@ -132,6 +140,7 @@ def test_native_tiles_deduplicate_and_saved_tabs_are_workbook_only():
     result = run(client)
     assert result["status"] == "complete"
     assert result["summary"] == dict(affected_fields=1, dashboards=1, workbooks=1, queries=2,
+                                      apps=0, app_queries=0, app_candidates=0,
                                       dashboard_filters=0, searches=1, unverified_documents=0)
     assert [item["usage"] for item in result["impacts"][0]["documents"][0]["queries"]] == ["dashboard", "workbook"]
     assert all(call[2]["branch_id"] is None for call in client.calls if call[0] in {"yaml", "search"})
@@ -203,7 +212,7 @@ def test_workbook_without_layout_is_not_dashboard():
     ({"containers": [{"type": "unsupported"}]}, "content_impact_layout_unsupported"),
     ({"draftOf": {"identifier": "published"}}, "content_impact_document_scope_mismatch"),
     ({"modelId": "different-model"}, "content_impact_document_scope_mismatch"),
-    ({"app": {"url": "/private/app"}}, "content_impact_app_unsupported"),
+    ({"app": {"url": "/private/app"}}, "content_impact_app_binding_unverified"),
     ({"controls": {"data": {"x": {"config": {"type": "composite"}}}, "order": ["x"]}},
      "content_impact_controls_unsupported"),
 ])
@@ -223,6 +232,119 @@ def test_draft_search_result_is_not_fetched_as_published():
     result = run(client)
     assert "content_impact_draft_document" in reasons(result)
     assert not any(call[0] in {"queries", "state"} for call in client.calls)
+
+
+def app_client():
+    client = FakeClient()
+    client.queries = {"queries": [query("1"), query("2", fields=["orders.tax"])]}
+    client.state = state(("1", "2"), rendered=None)
+    client.state.update(app={"url": "https://untrusted.example/app"}, workbookModelId="workbook-model")
+    for saved, name in zip(client.queries["queries"], ("Used query", "Unused query"), strict=True):
+        saved["name"] = name
+        saved["query"]["modelId"] = "workbook-model"
+        tab = client.state["queryPresentations"]["data"][saved["queryIdentifierMapKey"]]
+        tab.update(name=name, query={k: v for k, v in saved["query"].items() if k != "modelId"})
+    client.app_bindings = SimpleNamespace(names={"Used query"}, partial=False)
+    return client
+
+
+def test_app_counts_require_bound_query_and_preserve_field_specific_evidence():
+    client = app_client()
+    result = run(client, [impact(), impact(source_revision="head"), impact(field_name="tax")])
+    counts = result["summary"]
+    assert (counts["apps"], counts["app_queries"], counts["app_candidates"]) == (1, 1, 0)
+    assert (counts["dashboards"], counts["workbooks"], counts["queries"]) == (0, 0, 0)
+    confirmed, _, unused = [entry["documents"][0] for entry in result["impacts"]]
+    assert confirmed["app_evidence"] == "confirmed"
+    assert [(q["query_key"], q["usage"]) for q in confirmed["queries"]] == [("1", "app")]
+    assert unused["app_evidence"] == "matching_saved_query" and not unused["queries"]
+    assert [q["query_key"] for q in unused["candidate_queries"]] == ["2"]
+    assert result["status"] == "partial"
+    assert [call[0] for call in client.calls].count("app") == 1
+    candidate_only = run(client, [impact(field_name="tax")])
+    assert (candidate_only["summary"]["apps"], candidate_only["summary"]["app_queries"],
+            candidate_only["summary"]["app_candidates"]) == (0, 0, 1)
+
+
+def test_dashboard_plus_unbound_app_survive_through_the_pr_comment():
+    from omniflow.reporting.notification import render_pr_comment
+
+    client = app_client()
+    client.documents.append({"identifier": "tile-doc", "type": "Published"})
+    dashboard_query = query("1", fields=["orders.tax"])
+    dashboard_state = state()
+    dashboard_state["queryPresentations"]["data"]["1"]["query"] = dashboard_query["query"]
+    with (patch.object(client, "get_document_queries", side_effect=lambda doc, **_:
+                       {"queries": [dashboard_query]} if doc == "tile-doc" else client.queries),
+          patch.object(client, "get_document_state", side_effect=lambda doc, **_:
+                       dashboard_state if doc == "tile-doc" else client.state)):
+        result = run(client, [impact(field_name="tax")])
+    assert {k: result["summary"][k] for k in ("dashboards", "queries", "apps", "app_queries", "app_candidates")} == {
+        "dashboards": 1, "queries": 1, "apps": 0, "app_queries": 0, "app_candidates": 1,
+    }
+    comment = render_pr_comment({"content_impact": result, "policy_decision": "pass", "exit_code": 0},
+                                head_sha="a" * 40, run_url="https://github.com/org/test/actions/runs/1")
+    assert "1 additional App candidate" in comment and "Unused query" not in comment
+
+
+def test_app_typed_by_search_stays_a_candidate_after_document_budget_is_exhausted(monkeypatch):
+    monkeypatch.setattr("omniflow.content_impact.MAX_DOCUMENTS", 1)
+    client = FakeClient()
+    client.documents.append({"identifier": "second", "type": "App"})
+    result = run(client)
+    assert result["summary"]["app_candidates"] == 1 and result["summary"]["apps"] == 0
+    assert result["summary"]["dashboards"] == 1 and result["status"] == "partial"
+    assert not any(call[1] == "second" for call in client.calls)
+
+
+def test_app_binding_is_discarded_if_the_published_tabs_change_during_reads():
+    client = app_client()
+    after = copy.deepcopy(client.state)
+    after["queryPresentations"]["data"]["1"]["name"] = "Replacement"
+    with patch.object(client, "get_document_state", side_effect=[client.state, after]):
+        result = run(client)
+    assert "content_impact_document_changed" in reasons(result)
+    assert result["summary"]["apps"] == 0 and result["summary"]["app_candidates"] == 1
+
+
+@pytest.mark.parametrize("queries_readable", [True, False])
+def test_scoped_app_read_can_identify_candidate_when_workbook_identity_is_unavailable(queries_readable):
+    client = app_client()
+    if not queries_readable:
+        client.queries = None
+    client.state_error = ConfigError("state has no acting-member parameter",
+                                     reason_code="content_impact_document_scope_unavailable")
+    result = run(client, user_id=USER, include_personal_folders=True)
+    assert result["summary"]["app_candidates"] == 1 and result["summary"]["apps"] == 0
+    assert ("app", "doc", {"user_id": USER, "include_personal_folders": True}) in client.calls
+    assert "content_impact_app_binding_unverified" in reasons(result)
+    assert result["impacts"][0]["documents"][0]["app_evidence"] == "candidate"
+
+
+@pytest.mark.parametrize("problem", ["duplicate_name", "duplicate_key", "foreign", "draft", "stale", "access"])
+def test_app_ambiguous_or_unavailable_evidence_cannot_confirm(problem):
+    client = app_client()
+    saved = client.queries["queries"]
+    if problem == "duplicate_name":
+        saved[1]["name"] = saved[0]["name"]
+    elif problem == "duplicate_key":
+        saved.append(copy.deepcopy(saved[0]))
+    elif problem == "foreign":
+        client.state["queryPresentations"]["data"]["1"]["foreignModelId"] = "other"
+    elif problem == "draft":
+        client.state["draftOf"] = {"identifier": "doc"}
+    elif problem == "stale":
+        client.state["queryPresentations"]["data"]["1"]["query"]["fields"] = ["other.amount"]
+    else:
+        client.app_bindings = OmniAuthError("private text", reason_code="omni_forbidden")
+    result = run(client)
+    assert result["status"] == "partial" and result["advisory"]
+    assert (result["summary"]["apps"], result["summary"]["app_candidates"]) == (0, 1)
+    if problem == "draft":
+        assert "app" not in [call[0] for call in client.calls]
+    if problem == "access":
+        assert "content_impact_app_definition_unavailable" in reasons(result)
+        assert "private text" not in str(result)
 
 
 @pytest.mark.parametrize("error", [OmniAuthError("private", reason_code="omni_forbidden"),
@@ -403,6 +525,16 @@ def test_query_api_org_uses_verified_membership_not_global_id():
     with pytest.raises(ConfigError, match="acting-user scope"):
         client.get_document_state("doc", user_id=USER)
     assert len(session.calls) == 2
+
+
+def test_app_read_keeps_membership_and_returns_only_static_binding_evidence():
+    html = "<script>omni.query('Used query').onData(rows => show(rows));</script>"
+    session = Session([identity("organization"), Response({"html": html, "settings": {}})])
+    client = OmniClient(base_url=BASE, api_key="test", session=session)
+    bindings = client.get_published_app_bindings("doc", user_id=USER)
+    method, url, options = session.calls[-1]
+    assert (method, url, options["params"]) == ("GET", BASE + "/api/v2/documents/doc/app", {"userId": MEMBER})
+    assert bindings.names == {"Used query"} and not hasattr(bindings, "html")
 
 
 def test_pat_has_no_impersonation_and_reads_state_in_credential_scope():

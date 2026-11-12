@@ -15,8 +15,10 @@ from .repository_policy import resolve_repository_policy
 from .revision_data import pull_request_revision
 from .security import redact, secure_write_text, validate_repo_output_path
 
-COUNTS = ("affected_fields", "dashboards", "workbooks", "queries", "dashboard_filters",
-          "searches", "unverified_documents")
+LEGACY_COUNTS = ("affected_fields", "dashboards", "workbooks", "queries", "dashboard_filters",
+                 "searches", "unverified_documents")
+APP_COUNTS = ("apps", "app_queries", "app_candidates")
+COUNTS = LEGACY_COUNTS + APP_COUNTS
 PRIVATE_FILES = ("column-impact.json", "column-impact.md")
 MAX_REPORT_BYTES = 32 * 1024 * 1024
 GAP_REASONS = frozenset({
@@ -26,6 +28,7 @@ GAP_REASONS = frozenset({
     "content_impact_document_identity_unavailable", "content_impact_model_unavailable",
     "content_impact_queries_unavailable", "content_impact_layout_unavailable", "content_impact_reference_unverified",
     "content_impact_document_scope_mismatch", "content_impact_app_unsupported", "content_impact_invalid_document",
+    "content_impact_app_binding_unverified", "content_impact_app_definition_unavailable",
     "content_impact_layout_unsupported", "content_impact_invalid_queries", "content_impact_query_identity_unavailable",
     "content_impact_query_type_unsupported", "content_impact_query_shape_unsupported",
     "content_impact_query_inventory_incomplete", "content_impact_controls_unsupported",
@@ -59,14 +62,19 @@ def public_content_impact(report: dict) -> dict:
     if status not in {"complete", "partial", "unavailable", "disabled"}:
         status = "unavailable"
     counts = report.get("summary") if isinstance(report.get("summary"), dict) else {}
-    if status == "complete" and not all(type(counts.get(key)) is int and 0 <= counts[key] <= 2**31 - 1
-                                         for key in COUNTS):
+    valid_counts = {key: counts[key] for key in COUNTS
+                    if type(counts.get(key)) is int and 0 <= counts[key] <= 2**31 - 1}
+    app_counts_present = any(key in counts for key in APP_COUNTS)
+    required = COUNTS if app_counts_present else LEGACY_COUNTS
+    if status == "complete" and not all(key in valid_counts for key in required):
         status = "unavailable"
+    if not all(key in valid_counts for key in APP_COUNTS):
+        for key in APP_COUNTS:
+            valid_counts.pop(key, None)
     safe: dict[str, Any] = {
         "status": status, "advisory": True, "scope": "published",
         "coverage_complete": status == "complete" and report.get("coverage_complete") is True,
-        "summary": {key: counts[key] for key in COUNTS
-                    if type(counts.get(key)) is int and 0 <= counts[key] <= 2**31 - 1},
+        "summary": valid_counts,
     }
     gaps = report.get("coverage_gaps")
     safe["coverage_gap_count"] = len(gaps) if isinstance(gaps, list) else max(
@@ -90,7 +98,8 @@ def public_content_impact(report: dict) -> dict:
     safe["coverage_causes"] = sorted({cause for cause in causes
                                        if isinstance(cause, str) and cause in allowed_causes})
     if safe["status"] == "complete" and (not safe["coverage_complete"] or safe["coverage_gap_count"]
-                                            or safe["coverage_reasons"] or safe["coverage_causes"]):
+                                            or safe["coverage_reasons"] or safe["coverage_causes"]
+                                            or valid_counts.get("app_candidates", 0) > 0):
         safe.update(status="partial", coverage_complete=False)
     return safe
 
@@ -105,18 +114,40 @@ def content_impact_line(report: dict) -> str | None:
     counts = safe["summary"]
     if safe["status"] == "unavailable":
         return "dbt content impact: unavailable — affected content is unknown (advisory)."
-    content_counts = ("dashboards", "workbooks", "queries", "dashboard_filters")
-    if all(counts.get(key) == 0 for key in content_counts):
+    legacy_content = ("dashboards", "workbooks", "queries", "dashboard_filters")
+    legacy_zero = all(counts.get(key) == 0 for key in legacy_content)
+    app_counts_present = "apps" in counts
+    candidates = counts.get("app_candidates", 0)
+    candidate_label = "App candidate" if candidates == 1 else "App candidates"
+    if legacy_zero and app_counts_present and not counts["apps"] and not counts["app_queries"]:
+        if candidates:
+            return (f"dbt content impact: {candidates} {candidate_label} to review. No confirmed App queries or "
+                    "dashboard/workbook references were found in checked content. Coverage is partial (advisory).")
         if safe["coverage_complete"]:
             return ("dbt content impact: no affected content found — complete for supported published scope "
                     "(advisory).")
         return ("dbt content impact: none found in checked content — partial; affected content is still unknown "
                 "(advisory).")
     coverage = "complete for supported published scope" if safe["coverage_complete"] else "partial; totals are lower bounds"
-    return (f"dbt content impact: {counts.get('dashboards', 'unknown')} dashboard(s), "
-            f"{counts.get('workbooks', 'unknown')} workbook(s), {counts.get('queries', 'unknown')} query(s) observed "
-            + (f", {counts['dashboard_filters']} dashboard filter(s)" if counts.get("dashboard_filters") else "")
-            + f" — {coverage} (advisory).")
+    parts = []
+    for key, singular, plural in (
+        ("dashboards", "dashboard", "dashboards"), ("workbooks", "workbook", "workbooks"),
+        ("queries", "dashboard/workbook query", "dashboard/workbook queries"),
+        ("dashboard_filters", "dashboard filter", "dashboard filters"),
+        ("apps", "confirmed App", "confirmed Apps"), ("app_queries", "App query", "App queries"),
+    ):
+        count = counts.get(key)
+        if count:
+            parts.append(f"{count} {singular if count == 1 else plural}")
+        elif count is None and key in legacy_content:
+            parts.append(f"unknown {plural}")
+        elif count == 0 and legacy_zero and not app_counts_present and key == "queries":
+            parts.append("0 dashboard/workbook queries")
+    if candidates:
+        parts.append(f"{candidates} additional {candidate_label} to review")
+    if not app_counts_present:
+        parts.append("App counts were not reported")
+    return "dbt content impact: " + ", ".join(parts) + f" — {coverage} (advisory)."
 
 
 def coverage_explanations(report: dict) -> list[str]:
@@ -170,11 +201,27 @@ def _coverage_messages(report: dict, *, compact: bool) -> list[str]:
          "A source field could not be matched uniquely to a published Omni view. Verify database/schema identity "
          "and published model synchronization; unresolved fields are not attributed to another view's content.",
          "A source field could not be matched uniquely to a published Omni view."),
+        ({"content_impact_app_definition_unavailable"},
+         "OmniFlow could not read the published App definition. In Omni, open the App and check which saved queries "
+         "it uses. Verify the workflow identity can read that published definition, then rerun.",
+         "Published App definition unavailable. Open the App, check its saved queries and verify read access."),
+        ({"content_impact_app_binding_unverified"},
+         "App usage could not be verified. In the published App, check whether it references a saved query that "
+         "uses the changed field. A field-search hit or saved-query match alone leaves the App a candidate.",
+         "App usage unverified. Check the published App’s references to saved queries for the changed field."),
+        ({"content_impact_query_scope_unverified", "content_impact_query_identity_unavailable"},
+         "Open the saved tab in its published workbook. Check that it uses the expected model and that its "
+         "name and identity refer to one saved query. Rerun after publishing any corrections.",
+         "A saved query could not be matched uniquely to its published tab and model."),
+        ({"content_impact_app_unsupported"},
+         "This earlier run recorded App lineage as unsupported. Review the App’s saved queries in Omni or rerun "
+         "with a revision that inspects published App queries.",
+         "This earlier run did not check App lineage. Review the published App or rerun on an updated revision."),
         ({"content_impact_query_expression_unverified", "content_impact_timeframe_identity_unverified",
-          "content_impact_query_type_unsupported", "content_impact_app_unsupported", "omni_query_view_unsupported"},
-         "Saved calculations, timeframe references, or SQL/App queries have unsupported lineage. Direct supported "
+          "content_impact_query_type_unsupported", "omni_query_view_unsupported"},
+         "Saved calculations, timeframe references, or SQL queries have unsupported lineage. Direct supported "
          "references may be listed, but inspect the affected queries in Omni for additional dependencies.",
-         "Saved calculations, timeframe references, or SQL/App queries have unsupported lineage."),
+         "Saved calculations, timeframe references, or SQL queries have unsupported lineage."),
         ({"dbt_sql_dynamic_projection", "dbt_sql_unsupported", "dbt_sql_wildcard", "dbt_source_unsupported",
           "dbt_manifest_only_change", "dbt_sql_output_identity_unavailable", "dbt_sql_duplicate_output"},
          "The changed dbt source cannot be fully analyzed. Dynamic macros, wildcard outputs, and compiled-SQL-only "
@@ -340,13 +387,52 @@ def _revision_rows(items: list[dict]) -> list[tuple[dict, list[str]]]:
             for item, revisions in grouped.values()]
 
 
+APP_EVIDENCE_LABELS = {
+    "confirmed": "Confirmed App query usage",
+    "matching_saved_query": "Matching saved query — App usage unverified",
+    "candidate": "App candidate — field search only",
+}
+
+
+def _app_groups_lines(sources: list[tuple[dict, dict]]) -> list[str]:
+    # Keep the link between a field, its query and the evidence for that pair.
+    # One App can have a confirmed query for one field and a candidate for another.
+    groups = {}
+    for source, document in sources:
+        evidence = document["app_evidence"]
+        confirmed = [q for q in document.get("queries", []) if q.get("usage") == "app" and evidence == "confirmed"]
+        candidates = document.get("candidate_queries", [])
+        key = (evidence, tuple(sorted(q["query_key"] for q in confirmed)),
+               tuple(sorted(q["query_key"] for q in candidates)))
+        rows, _, _ = groups.setdefault(key, ([], confirmed, candidates))
+        rows.append(source)
+    lines = []
+    query_budget = source_budget = 20
+    priority = list(APP_EVIDENCE_LABELS)
+    for (state, _, _), (rows, confirmed, candidates) in sorted(groups.items(), key=lambda item: priority.index(item[0][0]))[:20]:
+        if query_budget == 0 and source_budget == 0:
+            break
+        lines.append(f"**{APP_EVIDENCE_LABELS[state]}**")
+        if state == "candidate":
+            lines.append("Open the published App and check which saved queries use the changed field.")
+        for query_list, usage in ((confirmed, "Confirmed App query"), (candidates, "Saved query with unverified App usage")):
+            for query in query_list[:query_budget]:
+                lines.append(f"- {usage}: {_metadata_link(query, query['query_key'])}")
+                query_budget -= 1
+        for item, revisions in _revision_rows(rows)[:source_budget]:
+            lines.append(f"- {_impact_description(item, revisions)}")
+            source_budget -= 1
+        lines.append("")
+    return lines
+
+
 def render_private_impact(private: dict) -> str:
     """Render already-redacted metadata, grouping content once across field impacts."""
     lines = ["# dbt column-to-content impact", "", "Repository-only metadata. Do not forward externally.", "",
              content_impact_line({"content_impact": private}) or "Impact unavailable.", "",
              "Confirmed dependency means a supported reference was observed, not that this PR breaks the document. "
              "Potential impact is broader inference. Unresolved coverage is not proof of no impact.", "",
-             "## Affected published content", ""]
+             "## Published content reviewed", ""]
     impacts = [item for item in private.get("impacts", []) if isinstance(item, dict)]
     documents = {}
     unresolved = []
@@ -360,7 +446,11 @@ def render_private_impact(private: dict) -> str:
                                   ("source_repository", "source_sha", "model_path", "model_id", "environment")},
                                  sort_keys=True)
             key = (context, document.get("document_id") or document.get("url") or f"unknown-{index}")
-            record = documents.setdefault(key, {"document": document, "queries": {}, "filters": set(), "sources": []})
+            record = documents.setdefault(key, {"document": document, "queries": {}, "filters": set(),
+                                                "sources": [], "app_sources": []})
+            if document.get("app_evidence") in APP_EVIDENCE_LABELS:
+                record["app_sources"].append((item, document))
+                continue
             for query in document.get("queries", []):
                 record["queries"].setdefault(query.get("query_key"), query)
             record["filters"].update(control.get("control_id") for control in document.get("dashboard_filters", []))
@@ -370,6 +460,10 @@ def render_private_impact(private: dict) -> str:
         owner = document.get("owner") or {}
         lines.extend([f"### {_metadata_link(document, identity)}", "",
                       f"Owner: {_escape(owner.get('name') or owner.get('id') or 'unavailable from returned metadata')}.", ""])
+        if record["app_sources"]:
+            lines.extend(_app_groups_lines(record["app_sources"]))
+            if not record["sources"]:
+                continue
         for query in list(record["queries"].values())[:20]:
             lines.append(f"- {_metadata_link(query, query.get('query_key') or 'Unnamed query')} "
                          f"— {_escape(query.get('usage', 'unverified'))}")

@@ -289,6 +289,24 @@ class OmniClient:
                                reason_code="content_impact_invalid_queries")
         return payload
 
+    def get_published_app_bindings(
+        self, document_id: str, *, user_id: str | None = None, include_personal_folders: bool = False,
+    ):
+        """Inspect the published app transiently under the same actor as the saved queries."""
+        from .app_bindings import published_app_bindings
+
+        document_id = validate_path_segment(document_id, name="document_id")
+        actor = self._resolve_content_actor(user_id, include_personal_folders=include_personal_folders)
+        params = {"userId": actor[2]} if actor is not None and actor[0] == "organization" else {}
+        # Build the endpoint from the trusted instance and the search result's ID.
+        # app.url, external scripts, and any links inside the app are never fetched.
+        payload = self._request("GET", f"/api/v2/documents/{document_id}/app", params=params)
+        if (not isinstance(payload, dict) or not isinstance(payload.get("html"), str)
+                or not isinstance(payload.get("settings"), dict)):
+            raise OmniAPIError("Published app definition is unavailable.",
+                               reason_code="content_impact_app_definition_unavailable")
+        return published_app_bindings(payload["html"])
+
     def get_document_state(
         self, document_id: str, *, user_id: str | None = None,
         include_personal_folders: bool = False,

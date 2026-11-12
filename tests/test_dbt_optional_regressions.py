@@ -10,7 +10,7 @@ import pytest
 from omniflow import cli
 from omniflow.breaking_hold import PENDING_RULE, evaluate_breaking_hold
 from omniflow.config import BreakingChangeHoldSettings, DbtExposureSettings, DbtImpactSettings, load_config
-from omniflow.dbt_impact import COVERAGE_RULE, ORPHANED_COLUMN_RULE, evaluate_dbt_impact
+from omniflow.dbt_impact import COVERAGE_RULE, ORPHANED_COLUMN_RULE, ORPHANED_MODEL_RULE, evaluate_dbt_impact
 from omniflow.diagnostics import capture_private_reports
 from omniflow.discovery import ModelContext
 from omniflow.exceptions import SecurityPolicyError
@@ -68,6 +68,38 @@ def evaluate(root, paths, **overrides):
         return evaluate_dbt_impact(changed_files=["models/orders.sql"], dbt_paths=["models"],
                                   settings=DbtImpactSettings(enabled=True, **overrides),
                                   omni_yaml_paths=paths, base_ref="main", repo_root=root)
+
+
+@pytest.mark.parametrize("mapping,delete_model,expected_rule", [
+    ({"sql_table_name": "warehouse.analytics.orders"}, False, ORPHANED_COLUMN_RULE),
+    ({"omni_view": "revenue"}, False, ORPHANED_COLUMN_RULE),
+    ({"omni_view": "revenue"}, True, ORPHANED_MODEL_RULE),
+    ({"sql_table_name": "warehouse.analytics.unused", "omni_view": "revenue"}, False, None),
+    ({"omni_view": "unknown"}, False, COVERAGE_RULE),
+])
+def test_sql_orphans_use_the_explicit_model_mapping(tmp_path, mapping, delete_model, expected_rule):
+    path = "models/renamed_orders.sql"
+    base = init(tmp_path, {
+        path: "select id, total from source",
+        "omni/revenue.view.yaml": VIEW.replace("orders", "warehouse.analytics.orders"),
+        # A physical table named like the mapped view must not be selected by that view mapping.
+        "omni/renamed_orders.view.yaml": VIEW.replace("orders", "warehouse.other.revenue"),
+    })
+    if delete_model:
+        (tmp_path / path).unlink()
+    else:
+        (tmp_path / path).write_text("select total from source")
+    commit(tmp_path)
+    report, issues = evaluate_dbt_impact(
+        changed_files=[path], dbt_paths=["models"], base_ref=base, repo_root=tmp_path, omni_yaml_paths=["omni"],
+        settings=DbtImpactSettings(enabled=True, table_mapping=[{"dbt_model": "renamed_orders", **mapping}]),
+    )
+    assert report["analysis_mode"] == "sql_heuristic"
+    assert [issue["rule"] for issue in issues] == ([expected_rule] if expected_rule else [])
+    if expected_rule in {ORPHANED_COLUMN_RULE, ORPHANED_MODEL_RULE}:
+        refs = issues[0]["orphaned_views" if delete_model else "orphaned_fields"]
+        assert {ref["view"] for ref in refs} == {"revenue"}
+        assert issues[0]["severity"] == "error"
 
 
 @pytest.mark.parametrize("name", ["relationships.view", "order_relationships.view.yaml", "customer_relationship.view.yml"])
@@ -138,6 +170,18 @@ def pr_fixture(tmp_path, monkeypatch, head_view):
         monkeypatch.setenv(key, value)
     monkeypatch.chdir(tmp_path)
     return base, head
+
+
+@pytest.mark.parametrize("head_view,expected_rules", [(None, []), ("name: renamed_orders\n" + VIEW, [COVERAGE_RULE])])
+def test_view_mapping_respects_candidate_deletion_and_rename(tmp_path, monkeypatch, head_view, expected_rules):
+    base, _ = pr_fixture(tmp_path, monkeypatch, head_view)
+    report, issues = evaluate_dbt_impact(
+        changed_files=["models/orders.sql"], dbt_paths=["models"], base_ref=base, repo_root=tmp_path,
+        omni_yaml_paths=["omni"], settings=DbtImpactSettings(
+            enabled=True, table_mapping=[{"dbt_model": "orders", "omni_view": "orders"}]),
+    )
+    assert [issue["rule"] for issue in issues] == expected_rules
+    assert report["coverage_complete"] is (not expected_rules)
 
 
 @pytest.mark.parametrize("head_view,expected_code", [(VIEW + "# comment\n", 1),

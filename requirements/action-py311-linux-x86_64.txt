@@ -1,6 +1,10 @@
 # Security lock for the official GitHub Action runtime.
 # Platform: CPython 3.11 on Linux x86_64. Every selected wheel is hash-verified.
 # Runner-provided pip performs only this verified bootstrap; subsequent installs use this audited pin.
+tree-sitter==0.26.1 \
+    --hash=sha256:1529457e099ee5963b9738d42ed8133316d936157e912aa4a985f4fdaf018ada
+tree-sitter-javascript==0.25.0 \
+    --hash=sha256:9dc04ba91fc8583344e57c1f1ed5b2c97ecaaf47480011b92fbeab8dda96db75
 sqlglot==30.24.0 \
     --hash=sha256:9488828cc018453b7a3ba01e65d2749c9a731314c14583695163ca1f358203fe
 pip==26.2.1 \

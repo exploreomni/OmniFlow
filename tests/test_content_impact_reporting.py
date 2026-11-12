@@ -177,6 +177,57 @@ def test_private_links_are_scoped_and_public_links_withheld(configured):
     assert "demo.omniapp.co" not in Path(".omniflow/public/report.md").read_text()
 
 
+def test_app_reports_preserve_field_evidence_and_keep_private_names_out_of_pr(configured):
+    confirmed = {"query_key": "A", "name": "Private confirmed query", "usage": "app"}
+    candidate = {"query_key": "B", "name": "Private unbound query"}
+    document = {"document_id": "app-id", "name": "Private App title"}
+    records = (
+        ("confirmed_field", {"app_evidence": "confirmed", "queries": [confirmed]}),
+        ("matching_field", {"app_evidence": "matching_saved_query", "candidate_queries": [candidate]}),
+        ("search_only_field", {"app_evidence": "candidate"}),
+    )
+    detail = {"status": "partial", "coverage_complete": False,
+              "summary": dict.fromkeys(COUNTS, 0) | {"apps": 1, "app_queries": 1},
+              "coverage_gaps": [{"reason_code": "content_impact_app_binding_unverified"}],
+              "impacts": [{"field_name": field, "source_revision": revision, "documents": [document | evidence]}
+                          for field, evidence in records for revision in ("base", "head")]}
+    with patch("omniflow.content_impact_reporting.resolve_repository_policy",
+               return_value=RepositoryPolicy(True, "repository_verified")):
+        assert publish_content_impact(configured, detail, current_validation_report(configured))
+    private_md = Path(".omniflow/repository/column-impact.md").read_text()
+    confirmed_md, remainder = private_md.split("**Matching saved query — App usage unverified**")
+    matching_md, candidates_md = remainder.split("**App candidate — field search only**")
+    assert private_md.count("Private App title") == private_md.count("Private confirmed query") == 1
+    assert "confirmed\\_field" in confirmed_md and "matching\\_field" not in confirmed_md
+    assert "matching\\_field" in matching_md and "Private unbound query" in matching_md
+    assert "search\\_only\\_field" in candidates_md and "Private unbound query" not in candidates_md
+    assert private_md.count("base, head") == 3
+    public = current_validation_report(configured)
+    comment = render_pr_comment(public, head_sha="a" * 40, run_url="https://github.com/acme/test/actions/runs/1")
+    assert "1 confirmed App, 1 App query" in comment and "dashboard/workbook query" not in comment
+    for surface in (comment, json.dumps(public), Path(".omniflow/public/report.md").read_text()):
+        assert all(name not in surface for name in ("Private App title", "Private confirmed query", "Private unbound query",
+                                                    "app-id", "confirmed_field"))
+    assert public["exit_code"] == 1
+
+
+def test_candidate_only_app_counts_and_schema_v1_compatibility():
+    counts = dict.fromkeys(COUNTS, 0)
+    report = {"status": "complete", "coverage_complete": True, "summary": counts | {"app_candidates": 2}}
+    safe = public_content_impact(report)
+    assert safe["status"] == "partial" and not safe["coverage_complete"]
+    line = content_impact_line({"content_impact": safe})
+    assert "2 App candidates to review" in line and "none found" not in line and "no affected content" not in line
+
+    previous = {key: count for key, count in counts.items() if key not in ("app_candidates", "apps", "app_queries")}
+    historical = public_content_impact(report | {"summary": previous})
+    assert historical["status"] == "complete" and historical["coverage_complete"]
+    assert historical["summary"] == previous
+    assert "App counts were not reported" in content_impact_line({"content_impact": historical})
+    for invalid in ({"apps": 0}, {"apps": True, "app_queries": 0, "app_candidates": 0}):
+        assert public_content_impact(report | {"summary": previous | invalid})["status"] == "unavailable"
+
+
 def test_private_content_is_deduplicated_with_source_paths_and_recovery(configured):
     detail = _detail()
     document = {"document_id": "doc", "name": "Affected document", "owner": {"name": "Test owner"},
@@ -261,10 +312,10 @@ def test_zero_counts_distinguish_complete_from_partial_and_unavailable(status, e
 
 def test_missing_counts_and_filter_only_evidence_are_not_clean_zero():
     detail = {"status": "partial", "summary": {}, "coverage_gaps": []}
-    assert "unknown dashboard(s)" in content_impact_line({"content_impact": detail})
+    assert "unknown dashboards" in content_impact_line({"content_impact": detail})
     detail["summary"] = dict.fromkeys(COUNTS, 0) | {"dashboard_filters": 1}
     text = content_impact_line({"content_impact": detail})
-    assert "1 dashboard filter(s)" in text and "none found" not in text
+    assert "1 dashboard filter" in text and "none found" not in text
 
 
 @pytest.mark.parametrize("reason,expected", [
@@ -272,6 +323,9 @@ def test_missing_counts_and_filter_only_evidence_are_not_clean_zero():
     ("dbt_explicit_view_mapping_unresolved", "checks.dbt_impact.table_mapping"),
     ("dbt_sql_dynamic_projection", "Dynamic macros"),
     ("content_impact_query_expression_unverified", "Saved calculations"),
+    ("content_impact_app_binding_unverified", "published App"),
+    ("content_impact_app_definition_unavailable", "workflow identity can read"),
+    ("content_impact_app_unsupported", "earlier run"),
     ("content_impact_budget_exhausted", "limit was reached"),
     ("omni_forbidden", "acting-user permissions"),
     ("omni_repository_credentials_unavailable", "read-only repository token"),
