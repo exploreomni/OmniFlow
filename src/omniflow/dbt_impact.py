@@ -16,11 +16,11 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from .candidate import MAX_TREE_ENTRIES, _bounded_git, _GitUnavailable, _local_tree, _remote_tree
 from .config import DbtImpactSettings
-from .dbt_manifest import MAX_MANIFEST_BYTES, DbtModel, diff_manifests, parse_manifest
+from .dbt_manifest import MAX_MANIFEST_BYTES, diff_manifests, parse_manifest
 from .dbt_sql_diff import MAX_SQL_BYTES, analyze_output_columns, model_name_from_path, sql_reference_text
 from .diff.yaml_loader import load_yaml_files, parse_yaml_file_map
 from .exceptions import ConfigError, OmniFlowError, SecurityPolicyError
@@ -58,6 +58,21 @@ class OmniViewRef:
     file: str
     sql_table_name: str
     identity: str = ""
+
+
+@dataclass(frozen=True, order=True)
+class _RelationTarget:
+    name: str
+    source: Literal["inferred", "sql_table_name", "omni_view"] = "inferred"
+
+    def views(self, index: dict[str, list[OmniViewRef]]) -> list[OmniViewRef]:
+        matches = index.get(self.name.lower(), [])
+        if self.source == "omni_view":
+            return [view for view in matches if view.view == self.name]
+        if self.source == "sql_table_name":
+            return [view for view in matches if view.sql_table_name == self.name
+                    or view.sql_table_name.endswith("." + self.name)]
+        return matches
 
 
 def evaluate_dbt_impact(
@@ -102,7 +117,17 @@ def evaluate_dbt_impact(
     # A precise dbt relation cannot prove that an Omni relation with an implicit
     # database/schema is unrelated. Do not broaden it, or silently call it clean.
     unique_views = {reference.identity: reference for bucket in view_refs.values() for reference in bucket}
-    for token in sorted(removed_columns_by_model.keys() | removed_models.keys()):
+    for target in sorted(removed_columns_by_model.keys() | removed_models.keys()):
+        if target.source == "omni_view":
+            if not target.views(view_refs):
+                prior = target.views(base_views)
+                # A coordinated deletion can remove the last reference. A renamed
+                # view still reading the old table cannot establish a clean result.
+                if not prior or any(view_refs.get(view.sql_table_name) for view in prior):
+                    notes.append(f"Incomplete coverage: mapped Omni view '{target.name}' could not be found "
+                                 "in the candidate. Check table_mapping against the authored Omni view name.")
+            continue
+        token = target.name
         if any(_relation_requires_context(token, reference.sql_table_name) for reference in unique_views.values()):
             notes.append(f"Incomplete coverage: dbt relation '{token}' has less-qualified Omni relation candidates; "
                          "supply explicit relation metadata or table_mapping rather than guessing the connection default.")
@@ -196,7 +221,7 @@ def _resolve_dbt_changes(
     settings: DbtImpactSettings,
     base_ref: str | None,
     root: Path,
-) -> tuple[dict[str, set[str]], dict[str, str], str, list[str]]:
+) -> tuple[dict[_RelationTarget, set[str]], dict[_RelationTarget, str], str, list[str]]:
     """Determine removed columns and removed models.
 
     Prefers a committed manifest, falling back to SQL parsing. Returns column
@@ -211,9 +236,16 @@ def _resolve_dbt_changes(
         removed_columns, removed_models = manifest_result
         return removed_columns, removed_models, "manifest", notes
 
-    removed_columns, removed_models = _sql_changes(
+    columns_by_name, models_by_name = _sql_changes(
         dbt_files=dbt_files, base_ref=base_ref, root=root, notes=notes
     )
+    removed_columns, removed_models = {}, {}
+    for name, columns in columns_by_name.items():
+        for target in _model_targets(name, name, settings):
+            removed_columns.setdefault(target, set()).update(columns)
+    for relation, name in models_by_name.items():
+        for target in _model_targets(name, relation, settings):
+            removed_models[target] = name
     return removed_columns, removed_models, "sql_heuristic", notes
 
 
@@ -223,7 +255,7 @@ def _manifest_changes(
     base_ref: str | None,
     root: Path,
     notes: list[str],
-) -> tuple[dict[str, set[str]], dict[str, str]] | None:
+) -> tuple[dict[_RelationTarget, set[str]], dict[_RelationTarget, str]] | None:
     if not settings.manifest_path:
         return None
     head_text = read_head_text(settings.manifest_path, root=root, max_bytes=MAX_MANIFEST_BYTES)
@@ -257,15 +289,15 @@ def _manifest_changes(
         notes.append("Incomplete coverage: the committed manifest is unchanged despite dbt source changes.")
     removed_model_nodes, removed_column_nodes = diff_manifests(base_models, head_models)
 
-    removed_columns: dict[str, set[str]] = {}
+    removed_columns: dict[_RelationTarget, set[str]] = {}
     for unique_id, columns in removed_column_nodes.items():
         model = base_models[unique_id]
-        for token in _model_tokens(model, settings):
-            removed_columns.setdefault(token, set()).update(columns)
-    removed_models: dict[str, str] = {}
+        for target in _model_targets(model.name, model.canonical_relation(), settings):
+            removed_columns.setdefault(target, set()).update(columns)
+    removed_models: dict[_RelationTarget, str] = {}
     for model in removed_model_nodes.values():
-        for token in _model_tokens(model, settings):
-            removed_models[token] = model.name
+        for target in _model_targets(model.name, model.canonical_relation(), settings):
+            removed_models[target] = model.name
     return removed_columns, removed_models
 
 
@@ -314,16 +346,17 @@ def _sql_changes(
     return removed_columns, removed_models
 
 
-def _model_tokens(model: DbtModel, settings: DbtImpactSettings) -> set[str]:
-    tokens: set[str] = set()
+def _model_targets(name: str, default: str, settings: DbtImpactSettings) -> set[_RelationTarget]:
+    targets = set()
     for mapping in settings.table_mapping:
-        if mapping.get("dbt_model", "").strip().lower() != model.name.lower():
+        if mapping.get("dbt_model", "").strip().lower() != name.lower():
             continue
         # An explicit physical relation is stronger evidence than an alias.
-        value = mapping.get("sql_table_name") or mapping.get("omni_view")
-        if value:
-            tokens.add(_clean_relation(value))
-    return tokens or {model.canonical_relation()}
+        if mapping.get("sql_table_name"):
+            targets.add(_RelationTarget(_clean_relation(mapping["sql_table_name"]), "sql_table_name"))
+        elif mapping.get("omni_view"):
+            targets.add(_RelationTarget(mapping["omni_view"], "omni_view"))
+    return targets or {_RelationTarget(default)}
 
 
 def _load_omni_files(root: Path, omni_yaml_paths: list[str]) -> dict[str, Any]:
@@ -599,7 +632,7 @@ def _table_tokens(sql_table_name: str, view_name: str) -> set[str]:
 
 def _column_issues(
     *,
-    removed_columns_by_model: dict[str, set[str]],
+    removed_columns_by_model: dict[_RelationTarget, set[str]],
     field_refs: list[OmniFieldRef],
     view_refs: dict[str, list[OmniViewRef]],
     severity: str,
@@ -613,8 +646,9 @@ def _column_issues(
     the most qualified relation name is kept for the report.
     """
     grouped: dict[tuple[str, tuple[tuple[str, str], ...]], dict[str, Any]] = {}
-    for token, columns in sorted(removed_columns_by_model.items()):
-        references = view_refs.get(token, [])
+    for target, columns in sorted(removed_columns_by_model.items()):
+        token = target.name
+        references = target.views(view_refs)
         affected = {reference.identity for reference in references}
         if not affected:
             continue
@@ -676,15 +710,16 @@ def _column_issues(
 
 def _model_issues(
     *,
-    removed_models: dict[str, str],
+    removed_models: dict[_RelationTarget, str],
     view_refs: dict[str, list[OmniViewRef]],
     severity: str,
     mode: str,
 ) -> list[dict[str, Any]]:
     """Emit one issue per removed dbt model, collapsing duplicate relation tokens."""
     grouped: dict[tuple[str, tuple[str, ...]], dict[str, Any]] = {}
-    for token, model_name in sorted(removed_models.items()):
-        references = view_refs.get(token, [])
+    for target, model_name in sorted(removed_models.items()):
+        token = target.name
+        references = target.views(view_refs)
         if not references:
             continue
         identity = tuple(sorted({reference.identity for reference in references}))

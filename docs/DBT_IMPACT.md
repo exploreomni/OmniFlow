@@ -148,7 +148,7 @@ deployment:
 | `fail_on_orphaned_references` | `true` | `true` blocks the merge. `false` reports a warning only. |
 | `fail_on_incomplete_coverage` | `true` | Missing or unsupported evidence blocks the gate. Set `false` only for explicitly advisory adoption. |
 | `omni_yaml_paths` | `model_path` entries from `.omni/flow.json` | Directories holding Omni model YAML. |
-| `table_mapping` | none | Explicit `dbt_model` to `sql_table_name` or `omni_view` overrides, for custom schema macros. Maximum 500 entries. |
+| `table_mapping` | none | Maps a dbt model to a physical `sql_table_name` or an authored `omni_view`. The orphan check uses these overrides with or without a manifest. When both are supplied in one entry, the physical table takes precedence. Maximum 500 entries. |
 
 The check reuses `deployment.breaking_change_hold.dbt_paths` to decide which files are dbt sources, so the two features stay consistent.
 
