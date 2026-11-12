@@ -8,7 +8,7 @@ fixed coverage reasons are safe for the public report's separate allowlist.
 from __future__ import annotations
 
 import time
-from collections import defaultdict
+from collections import Counter, defaultdict
 from collections.abc import Callable
 from pathlib import PurePosixPath
 from typing import Any
@@ -185,7 +185,7 @@ def enrich_content_impact(
         "schema_version": 1, "scope": "published", "advisory": True,
         "status": "unavailable", "coverage_complete": False,
         "coverage_gaps": [], "impacts": [],
-        "summary": dict.fromkeys(("affected_fields", "dashboards", "workbooks", "queries",
+        "summary": dict.fromkeys(("affected_fields", "dashboards", "workbooks", "queries", "apps", "app_queries", "app_candidates",
                                   "dashboard_filters", "searches", "unverified_documents"), 0),
     }
     gaps = result["coverage_gaps"]
@@ -228,6 +228,7 @@ def enrich_content_impact(
         grouped_impacts[impact["model_path"]].append((index, entry))
     unique_fields: set[tuple[str, str, str]] = set()
     dashboards, workbooks, queries, filters, unverified = set(), set(), set(), set(), set()
+    apps, app_queries, app_candidates = set(), set(), set()
     document_count = 0
     completed_searches = 0
     for model_path, entries in grouped_impacts.items():
@@ -256,7 +257,7 @@ def enrich_content_impact(
                     unique_fields.add((context.base_url, context.model_id, field))
                 # The full saved definition/layout is cached only within this run
                 # and one model/actor scope. Search evidence is always field-specific.
-                document_cache: dict[str, tuple[Any, Any, list[dict[str, Any]]]] = {}
+                document_cache = {}
                 for field, field_entries in searches.items():
                     index = field_entries[0][0]
                     if result["summary"]["searches"] >= max_searches:
@@ -294,23 +295,32 @@ def enrich_content_impact(
                             if document_count >= MAX_DOCUMENTS:
                                 _gap(gaps, "content_impact_budget_exhausted", impact_index=index)
                                 unverified.add(identity)
+                                if str(document.get("type", "")).lower() == "app":
+                                    # The search identified an App even though its saved tabs were not read.
+                                    app_candidates.add(identity)
                                 continue
                             document_count += 1
                             document_cache[document_id] = _read_document(
-                                client, budget, document_id, user_id, include_personal_folders,
+                                client, budget, document_id, context.model_id, user_id, include_personal_folders,
                             )
-                        query_payload, state, read_gaps = document_cache[document_id]
+                        query_payload, state, app_bindings, read_gaps = document_cache[document_id]
                         for gap in read_gaps:
                             gaps.append({**gap, "impact_index": index})
                         item, item_gaps = _document_evidence(
-                            document, query_payload, state, field, context.model_id, context.base_url,
+                            document, query_payload, state, field, context.model_id, context.base_url, app_bindings,
                         )
                         evidence.append(item)
                         for reason in item_gaps:
                             _gap(gaps, reason, impact_index=index)
                         if read_gaps or item_gaps:
                             unverified.add(identity)
+                        if "app_evidence" in item and item["app_evidence"] != "confirmed":
+                            app_candidates.add(identity)
                         for query in item["queries"]:
+                            if query["usage"] == "app":
+                                apps.add(identity)
+                                app_queries.add((*identity, query["query_key"]))
+                                continue
                             queries.add((*identity, query["query_key"]))
                             if query["usage"] == "dashboard":
                                 dashboards.add(identity)
@@ -327,6 +337,7 @@ def enrich_content_impact(
         except (ValueError, TypeError, KeyError):
             _gap(gaps, "content_impact_field_identity_unavailable")
     result["summary"].update(affected_fields=len(unique_fields), dashboards=len(dashboards), workbooks=len(workbooks),
+                             apps=len(apps), app_queries=len(app_queries), app_candidates=len(app_candidates - apps),
                              queries=len(queries), dashboard_filters=len(filters), unverified_documents=len(unverified))
     result["coverage_complete"] = not gaps
     result["status"] = "complete" if not gaps else "partial" if completed_searches else "unavailable"
@@ -422,7 +433,7 @@ def _document_id(document):
     return None
 
 
-def _read_document(client, budget, document_id, user_id, include_personal):
+def _read_document(client, budget, document_id, model_id, user_id, include_personal):
     values, gaps = [], []
     for method, reason in ((client.get_document_queries, "content_impact_queries_unavailable"),
                            (client.get_document_state, "content_impact_layout_unavailable")):
@@ -432,7 +443,37 @@ def _read_document(client, budget, document_id, user_id, include_personal):
         except OmniFlowError as exc:
             values.append(None)
             _gap(gaps, reason, exc=exc)
-    return *values, gaps
+    queries, state = values
+    bindings = None
+    known_app = (isinstance(state, dict) and isinstance(state.get("app"), dict) and state.get("draftOf") is None
+                 and state.get("modelId") == model_id)
+    # Unlike generic document state, the published app endpoint supports the
+    # organization's acting member. Its success can identify a candidate in
+    # that scope, even when we cannot verify the workbook-model relationship.
+    scoped_lookup = state is None and any(
+        gap.get("cause_code") == "content_impact_document_scope_unavailable" for gap in gaps
+    )
+    if (known_app and isinstance(queries, dict)) or scoped_lookup:
+        reason = "content_impact_app_definition_unavailable"
+        try:
+            budget.remaining()
+            bindings = client.get_published_app_bindings(document_id, user_id=user_id,
+                                                        include_personal_folders=include_personal)
+            if known_app and bindings.names:
+                # The app and saved tabs are separate API reads. A republish or
+                # tab rename between them can otherwise attach a name to the wrong query.
+                reason = "content_impact_document_changed"
+                budget.remaining()
+                after = client.get_document_state(document_id, user_id=user_id, include_personal_folders=include_personal)
+                if any(after.get(k) != state.get(k) for k in
+                       ("modelId", "workbookModelId", "draftOf", "queryPresentations", "app")):
+                    bindings = None
+                    _gap(gaps, reason)
+        except OmniFlowError as exc:
+            bindings = None
+            if known_app:
+                _gap(gaps, reason, exc=exc)
+    return queries, state, bindings, gaps
 
 
 def _returned_url(value, base_url, *, query_key=None):
@@ -466,14 +507,22 @@ def _private_metadata(document, base_url):
     return item
 
 
-def _document_evidence(document, query_payload, state, field, model_id, base_url):
+def _document_evidence(document, query_payload, state, field, model_id, base_url, app_bindings=None):
     item, gaps = _private_metadata(document, base_url), []
+    is_app = isinstance(state, dict) and isinstance(state.get("app"), dict)
+    if is_app or (state is None and app_bindings is not None) or str(document.get("type", "")).lower() == "app":
+        item["app_evidence"] = "candidate"
+        item["candidate_queries"] = []
+        if not is_app:
+            return item, ["content_impact_app_binding_unverified"]
     if not isinstance(state, dict):
         return item, ["content_impact_reference_unverified"]
     if state.get("draftOf") is not None or ("modelId" in state and state["modelId"] != model_id):
         return item, ["content_impact_document_scope_mismatch"]
-    if "app" in state:
-        return item, ["content_impact_app_unsupported"]
+    if is_app and state.get("modelId") != model_id:
+        return item, ["content_impact_document_scope_mismatch"]
+    if "app" in state and not is_app:
+        return item, ["content_impact_invalid_document"]
     presentations = state.get("queryPresentations")
     if (not isinstance(presentations, dict) or not isinstance(presentations.get("data"), dict)
             or not isinstance(presentations.get("order"), list)):
@@ -488,13 +537,22 @@ def _document_evidence(document, query_payload, state, field, model_id, base_url
     try:
         controls = state.get("controls")
         control_keys = set(controls["data"]) if isinstance(controls, dict) and isinstance(controls.get("data"), dict) else set()
-        rendered = _layout_references(state.get("containers"), set(tabs), control_keys)
+        rendered = set() if is_app else _layout_references(state.get("containers"), set(tabs), control_keys)
     except ValueError:
         rendered = None
         gaps.append("content_impact_layout_unsupported")
     saved = query_payload.get("queries") if isinstance(query_payload, dict) else []
     if not isinstance(saved, list) or len(saved) > MAX_QUERY_RECORDS:
         return item, ["content_impact_invalid_queries"]
+
+    def counts_for(key):
+        return Counter(q[key] for q in saved if isinstance(q, dict) and isinstance(q.get(key), str))
+
+    if is_app:
+        name_counts = counts_for("name")
+        key_counts = counts_for("queryIdentifierMapKey")
+        id_counts = counts_for("id")
+        tab_name_counts = Counter(tab["name"] for tab in tabs.values() if isinstance(tab.get("name"), str))
     seen = set()
     for query in saved:
         if not isinstance(query, dict):
@@ -506,6 +564,12 @@ def _document_evidence(document, query_payload, state, field, model_id, base_url
             continue
         seen.add(key)
         tab = tabs[key]
+        if is_app and (tab.get("type") != "query" or tab.get("foreignModelId") is not None
+                       or not isinstance(tab.get("query"), dict)
+                       or not isinstance(query.get("id"), str) or not query["id"]
+                       or id_counts[query["id"]] != 1 or key_counts[key] != 1):
+            gaps.append("content_impact_query_identity_unavailable")
+            continue
         if tab.get("type") not in {"query", "linked"} or tab.get("isSql") is True:
             gaps.append("content_impact_query_type_unsupported")
             continue
@@ -528,7 +592,14 @@ def _document_evidence(document, query_payload, state, field, model_id, base_url
                     gaps.append("content_impact_document_changed")
                     continue
             query_model = query.get("query", {}).get("modelId")
-            allowed_models = {model_id, state.get("workbookModelId"), tab.get("model_extension_id")}
+            if is_app and (not isinstance(query_model, str) or not query_model
+                           or query_model not in (model_id, state.get("workbookModelId"))
+                           or tab.get("model_extension_id") not in (None, query_model, model_id)
+                           or tab["query"].get("modelId", query_model) != query_model
+                           or definition.get("sql") or definition.get("isSql")):
+                gaps.append("content_impact_query_scope_unverified")
+                continue
+            allowed_models = (model_id, state.get("workbookModelId"), tab.get("model_extension_id"))
             if query_model is not None and query_model not in allowed_models:
                 gaps.append("content_impact_document_scope_mismatch")
                 continue
@@ -544,11 +615,27 @@ def _document_evidence(document, query_payload, state, field, model_id, base_url
         url = _returned_url(query.get("url"), base_url, query_key=key)
         if url is not None:
             observation["url"] = url
+        if is_app:
+            name = query.get("name")
+            if (app_bindings is None or not isinstance(name, str) or name_counts[name] != 1
+                    or tab.get("name") != name or tab_name_counts[name] != 1 or name not in app_bindings.names):
+                observation["usage"] = "matching_saved_query"
+                item["candidate_queries"].append(observation)
+                continue
+            observation["usage"] = "app"
         item["queries"].append(observation)
     # State and saved-query API are separate snapshots. Missing saved definitions
     # are not evidence that a formerly referenced tab disappeared.
     if any(tab.get("type") == "query" and key not in seen for key, tab in tabs.items()):
         gaps.append("content_impact_query_inventory_incomplete")
+    if is_app:
+        if item["queries"]:
+            item["app_evidence"] = "confirmed"
+        elif item["candidate_queries"]:
+            item["app_evidence"] = "matching_saved_query"
+        if (not item["queries"] or item["candidate_queries"] or app_bindings is None or app_bindings.partial):
+            gaps.append("content_impact_app_binding_unverified")
+        return item, sorted(set(gaps))
     try:
         item["dashboard_filters"] = _control_references(state.get("controls"), field)
     except ValueError:

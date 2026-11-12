@@ -329,10 +329,47 @@ Base/head source references remain separate in JSON; identical display rows comb
 their revision labels in Markdown. Impact is not proof that a PR breaks
 the reported document. User impersonation, permissions, unsupported layouts, and
 request/time limits can narrow coverage; incomplete counts are lower bounds.
-Saved calculated-field expressions, raw/app queries, and unresolved timeframe
+Saved calculated-field expressions, raw SQL queries, and unresolved timeframe
 references also retain explicit gaps instead of claiming full query lineage.
 A document can contribute to both dashboard and workbook counts when it contains
 both displayed tiles and affected saved tabs that are not placed on the dashboard.
+
+### Reading App impact
+
+A dbt change can affect a published Omni App through one of its saved queries.
+OmniFlow looks for an exact reference to the affected Omni field in a saved query
+and checks whether the published App uses that query. The private report distinguishes
+three levels of evidence for each changed field.
+
+| What the report shows | Evidence and next step |
+| --- | --- |
+| **Confirmed App query usage** | The published App references a saved query whose supported definition uses the changed field. Open that query in Omni and review the change before deploying. |
+| **Matching saved query — App usage unverified** | A saved query uses the field. Inspect the published App's query bindings to determine whether it consumes that query. |
+| **App candidate — field search only** | The field search returned the App. Open the App and inspect its saved queries and their field references. |
+
+The public summary counts distinct confirmed Apps (`apps`), confirmed App queries
+(`app_queries`) and additional candidate Apps (`app_candidates`). An App with both
+confirmed and unverified observations counts once as confirmed. The private report
+retains the evidence for each field. The existing `queries` total covers
+dashboard/workbook query observations and excludes App queries. Earlier reports omit
+the App counts. Reviewers can rerun enrichment for the current change to obtain them.
+
+Confirmation requires a published result subscription that OmniFlow can trace to
+a uniquely named saved query in the same workbook and model. For example,
+`omni.query("Revenue").onData(...)` can establish that the App consumes the
+Revenue query. OmniFlow can also trace a fixed list of saved-query names when it
+can verify that the list stays unchanged and that the App subscribes to each
+query. An unused workbook tab, a matching name in page text, or a
+`data-omni-query` attribute alone supplies insufficient evidence. A query name
+chosen at runtime, an external script, or an App definition larger than 1 MiB
+can leave an App listed as a candidate. Open the published App and check the
+query binding for the changed field. OmniFlow reads the definition without
+running App code or queries. App source and query results are excluded from artifacts.
+With an acting member on an organization key, OmniFlow can identify an App
+through the scoped App read. If published workbook state cannot be verified in
+that scope, it reports a candidate. Omni documents its published App read API as
+currently in development and subject to change. [Read app content](https://docs.omni.co/api/apps/read-app-content)
+and [list document queries](https://docs.omni.co/api/documents/list-document-queries).
 
 The PR receives one short advisory impact line, including the leading reason when
 coverage is partial. “None found; coverage partial” is not “zero with complete
@@ -375,6 +412,8 @@ affected dashboards.
 | --- | --- |
 | Unresolved explicit view mapping | `dbt_explicit_view_mapping_unresolved` means a configured `table_mapping[].omni_view` matched no authored view across the registered model roots in the recorded base/head revision. Check the trusted mapping and any intentional view rename/removal. It is unknown impact, not a confirmed zero; independently resolved impacts remain available. |
 | Unresolved field/view identity | Check the source database/schema and published model synchronization. The unmatched field is retained as static evidence but no other view's dashboards are attributed to it. |
+| Published App definition unavailable | `content_impact_app_definition_unavailable` means OmniFlow could not read a usable published App definition. Check read access in the configured scope and review the App in Omni. |
+| App query binding unverified | `content_impact_app_binding_unverified` means the available evidence could not establish which saved query the published App uses for the changed field. Inspect the App’s query bindings in Omni. |
 | Saved calculation or timeframe lineage | Supported direct references are still useful; inspect calculated expressions in Omni for additional dependencies. These counts are not an exhaustive content inventory. |
 | Downstream dbt models not analyzed | `dbt_downstream_models_not_analyzed` means another dbt model `ref()`s the changed one. Content built on those downstream models is not counted; check their Omni views. `dbt_downstream_models_unavailable` means that inventory could not be read. Neither is zero impact. |
 | Dynamic macros, wildcard outputs, or compiled-SQL-only changes | The analyzer does not execute dbt or analyze compiled artifacts. Review generated SQL separately; this is not a clean no-impact result. |
