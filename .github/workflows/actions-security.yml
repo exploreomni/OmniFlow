@@ -1,6 +1,9 @@
 name: Actions Security
 
 on:
+  workflow_dispatch:
+  schedule:
+    - cron: "23 6 * * 1"
   pull_request:
   push:
     branches: [main]
