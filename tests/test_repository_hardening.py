@@ -303,6 +303,11 @@ class RepositoryHardeningTests(unittest.TestCase):
         self.assertIn("version: 1.29.0", text)
         self.assertIn("advanced-security: false", text)
 
+    def test_codeql_init_and_analyze_use_the_same_revision(self):
+        workflow = yaml.safe_load((ROOT / ".github/workflows/sast.yml").read_text(encoding="utf-8"))
+        actions = dict(use.split("@", 1) for use in nested_uses(workflow["jobs"]["codeql"]))
+        self.assertEqual(actions["github/codeql-action/init"], actions["github/codeql-action/analyze"])
+
     def test_simulator_uses_deterministic_base_branch(self):
         text = (ROOT / "scripts/simulate_alpha.py").read_text(encoding="utf-8")
         self.assertIn('["git", "init", "-q", "--initial-branch=main"]', text)
