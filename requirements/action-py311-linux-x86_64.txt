@@ -5,9 +5,9 @@ tree-sitter==0.26.1 \
     --hash=sha256:1529457e099ee5963b9738d42ed8133316d936157e912aa4a985f4fdaf018ada
 tree-sitter-javascript==0.25.0 \
     --hash=sha256:9dc04ba91fc8583344e57c1f1ed5b2c97ecaaf47480011b92fbeab8dda96db75
-sqlglot==30.30.0 \
-    --hash=sha256:06c4c212a7868c7dcff0fd0fda348dd3c5cbad40137b3083a70ecdfe22921cf9 \
-    --hash=sha256:b8e344042c85d7baa1d0d827127dfe1611ce9ac59bceab6fe370665baeb14ce7
+sqlglot==30.31.0 \
+    --hash=sha256:448404736cb0ed1335774e34399a3a99d28274778fb718877556fb7d475d8808 \
+    --hash=sha256:51a876a43edecf8ee6fd4c872cf6713d899c4234256bba0be96a8c7c8d8781e8
 pip==26.3 \
     --hash=sha256:6c36ae7da8695be67e3cd9f7d87919667ced53f57ce2ede75d89b5912ed2bc4c \
     --hash=sha256:f3b60b20ffaadd4415ed7957212a38ac63fa4c5fa375bd0f4a797777940fad13
